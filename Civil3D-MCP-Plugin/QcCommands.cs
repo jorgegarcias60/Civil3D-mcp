@@ -15,6 +15,17 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class QcCommands
 {
+  /// <summary>
+  /// Triangle count for a surface, or null when the surface is not a TIN.
+  /// NumberOfTriangles is exposed on the TIN-specific properties, NOT on
+  /// GetGeneralProperties(); reflecting it off the general properties always
+  /// returned null, and a `?? 0` fallback then reported every healthy TIN as
+  /// having no triangles. Callers must treat null as "unknown / not a TIN"
+  /// rather than as zero.
+  /// </summary>
+  private static int? GetTriangleCount(CivilSurface surface) =>
+    surface is TinSurface tinSurface ? tinSurface.GetTinProperties().NumberOfTriangles : null;
+
   // -------------------------------------------------------------------------
   // qcCheckAlignment
   // -------------------------------------------------------------------------
@@ -541,7 +552,7 @@ public static class QcCommands
         var minElevation = CivilObjectUtils.GetPropertyValue<double?>(generalProperties, "MinimumElevation") ?? 0;
         var maxElevation = CivilObjectUtils.GetPropertyValue<double?>(generalProperties, "MaximumElevation") ?? 0;
         var numberOfPoints = CivilObjectUtils.GetPropertyValue<int?>(generalProperties, "NumberOfPoints") ?? 0;
-        var numberOfTriangles = CivilObjectUtils.GetPropertyValue<int?>(generalProperties, "NumberOfTriangles") ?? 0;
+        var numberOfTriangles = GetTriangleCount(surface);
 
         var elevationRange = maxElevation - minElevation;
         if (elevationRange > spikeThreshold * 10)
@@ -815,7 +826,7 @@ public static class QcCommands
             var surface = CivilObjectUtils.GetRequiredObject<CivilSurface>(transaction, surfId, OpenMode.ForRead);
             var gp = CivilObjectUtils.InvokeMethod(surface, "GetGeneralProperties");
             var npts = CivilObjectUtils.GetPropertyValue<int?>(gp, "NumberOfPoints") ?? 0;
-            var ntri = CivilObjectUtils.GetPropertyValue<int?>(gp, "NumberOfTriangles") ?? 0;
+            var ntri = GetTriangleCount(surface);
             if (npts == 0)
             {
               sb.AppendLine($"  [ERROR] {surface.Name}: no data points");
@@ -828,7 +839,7 @@ public static class QcCommands
             }
             else
             {
-              sb.AppendLine($"  [OK] {surface.Name} (pts={npts}, tri={ntri})");
+              sb.AppendLine($"  [OK] {surface.Name} (pts={npts}, tri={(ntri?.ToString() ?? "n/a")})");
             }
           }
           sb.AppendLine();
