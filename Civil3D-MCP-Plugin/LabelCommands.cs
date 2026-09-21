@@ -92,8 +92,13 @@ public static class LabelCommands
       {
         var station = PluginRuntime.GetOptionalDouble(parameters, "station")
           ?? throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Alignment station labels require 'station'.");
-        var styleId = FindLabelStyleId(civilDoc, transaction, objectType, labelStyle);
-        var labelId = CreateAlignmentStationLabel(target, styleId, station);
+        // Deliberately NOT FindLabelStyleId here: for "alignment" that returns
+        // an alignment label SET style, and StationOffsetLabel.Create rejects
+        // it with "Wrong type objectId". A station label needs a station-offset
+        // LABEL style, which lives in its own collection.
+        var styleId = FindStationOffsetLabelStyleId(civilDoc, transaction, labelStyle);
+        var markerStyleId = FindFirstMarkerStyleId(civilDoc);
+        var labelId = CreateAlignmentStationLabel(target, styleId, markerStyleId, station);
         return new Dictionary<string, object?>
         {
           ["objectType"] = objectType,
@@ -328,6 +333,87 @@ public static class LabelCommands
     return CivilObjectUtils.ToObjectIds(collection).Where(objectId => objectId != ObjectId.Null).ToList();
   }
 
+  /// <summary>
+  /// Resolves a station-offset label style from
+  /// civilDoc.Styles.LabelStyles.AlignmentLabelStyles.StationOffsetLabelStyles.
+  /// Returns the style matching <paramref name="labelStyle"/> when one is
+  /// named, otherwise the first available style.
+  /// </summary>
+  /// <summary>
+  /// First available marker style from civilDoc.Styles.MarkerStyles.
+  /// StationOffsetLabel.Create rejects ObjectId.Null for the marker style.
+  /// </summary>
+  private static ObjectId FindFirstMarkerStyleId(object civilDoc)
+  {
+    var styles = Civil3DCompatibility.GetPropertyValue(civilDoc, "Styles");
+    var markerStyles = Civil3DCompatibility.GetPropertyValue(styles, "MarkerStyles");
+
+    if (markerStyles is IEnumerable enumerable)
+    {
+      foreach (var item in enumerable)
+      {
+        if (item is ObjectId objectId && objectId != ObjectId.Null)
+        {
+          return objectId;
+        }
+      }
+    }
+
+    throw new JsonRpcDispatchException(
+      "CIVIL3D.OBJECT_NOT_FOUND",
+      "This drawing has no marker style, which a station label requires.");
+  }
+
+  private static ObjectId FindStationOffsetLabelStyleId(
+    object civilDoc, Transaction transaction, string? labelStyle)
+  {
+    var styles = Civil3DCompatibility.GetPropertyValue(civilDoc, "Styles");
+    var labelStyles = Civil3DCompatibility.GetPropertyValue(styles, "LabelStyles");
+    var alignmentLabelStyles = Civil3DCompatibility.GetPropertyValue(labelStyles, "AlignmentLabelStyles");
+    var collection = Civil3DCompatibility.GetPropertyValue(alignmentLabelStyles, "StationOffsetLabelStyles");
+
+    if (collection is not IEnumerable enumerable)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.OBJECT_NOT_FOUND",
+        "Could not reach the alignment station-offset label styles in this drawing.");
+    }
+
+    var fallback = ObjectId.Null;
+    foreach (var item in enumerable)
+    {
+      if (item is not ObjectId objectId || objectId == ObjectId.Null)
+      {
+        continue;
+      }
+
+      if (fallback == ObjectId.Null)
+      {
+        fallback = objectId;
+      }
+
+      if (string.IsNullOrWhiteSpace(labelStyle))
+      {
+        continue;
+      }
+
+      var style = transaction.GetObject(objectId, OpenMode.ForRead);
+      if (string.Equals(CivilObjectUtils.GetName(style), labelStyle, StringComparison.OrdinalIgnoreCase))
+      {
+        return objectId;
+      }
+    }
+
+    if (fallback == ObjectId.Null)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.OBJECT_NOT_FOUND",
+        "This drawing has no alignment station-offset label style to apply.");
+    }
+
+    return fallback;
+  }
+
   private static ObjectId FindLabelStyleId(object civilDoc, Transaction transaction, string objectType, string? labelStyle)
   {
     var fallback = ObjectId.Null;
@@ -430,18 +516,45 @@ public static class LabelCommands
     );
   }
 
-  private static ObjectId CreateAlignmentStationLabel(DBObject alignment, ObjectId styleId, double station)
+  private static ObjectId CreateAlignmentStationLabel(
+    DBObject alignment, ObjectId styleId, ObjectId markerStyleId, double station)
   {
-    return TryCreateLabel(
-      new[]
-      {
-        "Autodesk.Civil.DatabaseServices.Labels.AlignmentStationLabel, AeccDbMgd",
-        "Autodesk.Civil.DatabaseServices.AlignmentStationLabel, AeccDbMgd",
-        "Autodesk.Civil.DatabaseServices.Labels.AlignmentMajorStationLabel, AeccDbMgd",
-      },
-      "alignment station",
-      parameters => BuildAlignmentStationLabelArguments(parameters, alignment.ObjectId, styleId, station)
-    );
+    // None of the three type names this used to probe for exists in AeccDbMgd.
+    // There is no AlignmentStationLabel, no Labels.AlignmentStationLabel and no
+    // Labels.AlignmentMajorStationLabel, so FindLoadedType returned null for
+    // every candidate and the call always ended in "Unable to create a
+    // alignment station label with the available Civil 3D API overloads."
+    //
+    // A single label at one chosen station is a StationOffsetLabel placed at
+    // zero offset. (The interval-based alternative, AlignmentStationLabelGroup
+    // .Create(styleId, alignmentId, increment), labels the whole alignment at a
+    // spacing and so does not match this tool's "station" parameter.)
+    if (alignment is not Autodesk.Civil.DatabaseServices.Alignment typedAlignment)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.INVALID_INPUT",
+        "Station labels can only be added to an alignment.");
+    }
+
+    if (station < typedAlignment.StartingStation || station > typedAlignment.EndingStation)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.INVALID_INPUT",
+        $"Station {station} is outside alignment '{typedAlignment.Name}' " +
+        $"({typedAlignment.StartingStation} to {typedAlignment.EndingStation}).");
+    }
+
+    // PointLocation returns void and reports the position through ref
+    // parameters; it does not return a point.
+    double easting = 0.0;
+    double northing = 0.0;
+    typedAlignment.PointLocation(station, 0.0, ref easting, ref northing);
+
+    // A null marker style is rejected with "Value does not fall within the
+    // expected range" -- the overload needs a real marker style, so the caller
+    // resolves one from civilDoc.Styles.MarkerStyles.
+    return Autodesk.Civil.DatabaseServices.StationOffsetLabel.Create(
+      typedAlignment.ObjectId, styleId, markerStyleId, new Point2d(easting, northing));
   }
 
   private static ObjectId TryCreateLabel(
