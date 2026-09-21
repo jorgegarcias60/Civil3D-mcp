@@ -251,7 +251,7 @@ public static class PipeNetworkCommands
         {
           ["name"] = CivilObjectUtils.GetName(partsList),
         ["handle"] = partsList is AcDbObject dbObject ? CivilObjectUtils.GetHandle(dbObject) : null,
-          ["parts"] = EnumeratePartNames(partsList).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name).ToList(),
+          ["parts"] = EnumeratePartNames(partsList, transaction).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name).ToList(),
         })
         .ToList();
 
@@ -674,25 +674,46 @@ public static class PipeNetworkCommands
     }
   }
 
-  private static IEnumerable<string> EnumeratePartNames(object partsList)
+  /// <summary>
+  /// Part family and part size names in a parts list.
+  ///
+  /// This used to probe for member names "PartFamilies", "PipeFamilies",
+  /// "StructureFamilies" and "PartFamilySet". PartsList exposes none of them --
+  /// it has PartFamilyCount and an ObjectId indexer -- so every probe returned
+  /// nothing and pipe_catalog_list reported an empty "parts" array for every
+  /// parts list. That left callers with no way to discover a valid partName,
+  /// even though add_pipe and add_structure require one.
+  ///
+  /// Uses the same typed access those two already rely on:
+  /// PartsList.GetPartFamilyIdsByDomain(domain), then PartFamily.PartSizeCount
+  /// with the family's indexer.
+  /// </summary>
+  private static IEnumerable<string> EnumeratePartNames(object partsList, Transaction transaction)
   {
-    foreach (var collectionName in new[] { "PartFamilies", "PipeFamilies", "StructureFamilies", "PartFamilySet" })
+    if (partsList is not PartsList typedPartsList)
     {
-      var collection = GetNamedMemberValue(partsList, collectionName);
-      foreach (var item in EnumerateNamedObjects(collection))
+      yield break;
+    }
+
+    foreach (var domain in new[] { DomainType.Pipe, DomainType.Structure })
+    {
+      foreach (ObjectId familyId in typedPartsList.GetPartFamilyIdsByDomain(domain))
       {
-        var familyName = CivilObjectUtils.GetName(item);
-        if (!string.IsNullOrWhiteSpace(familyName))
+        var family = CivilObjectUtils.GetRequiredObject<PartFamily>(transaction, familyId, OpenMode.ForRead);
+
+        if (!string.IsNullOrWhiteSpace(family.Name))
         {
-          yield return familyName!;
+          yield return family.Name;
         }
 
-        foreach (var child in EnumerateNamedObjects(GetNamedMemberValue(item, "PartSizeFilter") ?? GetNamedMemberValue(item, "PartSizes") ?? GetNamedMemberValue(item, "SizeDataRecords")))
+        for (var index = 0; index < family.PartSizeCount; index++)
         {
-          var childName = CivilObjectUtils.GetName(child) ?? CivilObjectUtils.GetStringProperty(child, "Description");
-          if (!string.IsNullOrWhiteSpace(childName))
+          var size = transaction.GetObject(family[index], OpenMode.ForRead);
+          var sizeName = CivilObjectUtils.GetName(size)
+            ?? CivilObjectUtils.GetStringProperty(size, "Description");
+          if (!string.IsNullOrWhiteSpace(sizeName))
           {
-            yield return childName!;
+            yield return sizeName!;
           }
         }
       }
