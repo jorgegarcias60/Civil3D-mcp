@@ -334,12 +334,6 @@ public static class LabelCommands
   }
 
   /// <summary>
-  /// Resolves a station-offset label style from
-  /// civilDoc.Styles.LabelStyles.AlignmentLabelStyles.StationOffsetLabelStyles.
-  /// Returns the style matching <paramref name="labelStyle"/> when one is
-  /// named, otherwise the first available style.
-  /// </summary>
-  /// <summary>
   /// First available marker style from civilDoc.Styles.MarkerStyles.
   /// StationOffsetLabel.Create rejects ObjectId.Null for the marker style.
   /// </summary>
@@ -364,6 +358,15 @@ public static class LabelCommands
       "This drawing has no marker style, which a station label requires.");
   }
 
+  /// <summary>
+  /// Resolves a station-offset label style from
+  /// civilDoc.Styles.LabelStyles.AlignmentLabelStyles.StationOffsetLabelStyles.
+  /// Returns the style matching <paramref name="labelStyle"/> when one is
+  /// named (an unknown name is rejected with the available names, rather than
+  /// silently replaced), otherwise the first available style. These styles are
+  /// not the alignment label SET styles that label_list_styles returns for
+  /// "alignment".
+  /// </summary>
   private static ObjectId FindStationOffsetLabelStyleId(
     object civilDoc, Transaction transaction, string? labelStyle)
   {
@@ -380,6 +383,7 @@ public static class LabelCommands
     }
 
     var fallback = ObjectId.Null;
+    var available = new List<string>();
     foreach (var item in enumerable)
     {
       if (item is not ObjectId objectId || objectId == ObjectId.Null)
@@ -397,10 +401,14 @@ public static class LabelCommands
         continue;
       }
 
-      var style = transaction.GetObject(objectId, OpenMode.ForRead);
-      if (string.Equals(CivilObjectUtils.GetName(style), labelStyle, StringComparison.OrdinalIgnoreCase))
+      var name = CivilObjectUtils.GetName(transaction.GetObject(objectId, OpenMode.ForRead));
+      if (string.Equals(name, labelStyle, StringComparison.OrdinalIgnoreCase))
       {
         return objectId;
+      }
+      if (!string.IsNullOrEmpty(name))
+      {
+        available.Add(name);
       }
     }
 
@@ -409,6 +417,13 @@ public static class LabelCommands
       throw new JsonRpcDispatchException(
         "CIVIL3D.OBJECT_NOT_FOUND",
         "This drawing has no alignment station-offset label style to apply.");
+    }
+
+    if (!string.IsNullOrWhiteSpace(labelStyle))
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.OBJECT_NOT_FOUND",
+        $"No alignment station-offset label style named '{labelStyle}'. Available: {string.Join(", ", available)}.");
     }
 
     return fallback;
@@ -735,64 +750,6 @@ public static class LabelCommands
       if (parameterType == typeof(double))
       {
         args[i] = 0.0;
-        continue;
-      }
-
-      if (parameterType == typeof(bool))
-      {
-        args[i] = false;
-        continue;
-      }
-
-      if (parameterType == typeof(int))
-      {
-        args[i] = 0;
-        continue;
-      }
-
-      if (parameterType == typeof(string))
-      {
-        args[i] = string.Empty;
-        continue;
-      }
-
-      return null;
-    }
-
-    return args;
-  }
-
-  private static object?[]? BuildAlignmentStationLabelArguments(Civil3DCompatibility.ParameterShape[] parameters, ObjectId alignmentId, ObjectId styleId, double station)
-  {
-    var args = new object?[parameters.Length];
-    var objectIds = new Queue<ObjectId>(new[] { alignmentId, styleId });
-    var doubles = new Queue<double>(new[] { station, 0.0, 0.0 });
-
-    for (var i = 0; i < parameters.Length; i++)
-    {
-      var parameterType = parameters[i].Type;
-
-      if (parameterType == typeof(ObjectId))
-      {
-        args[i] = objectIds.Count > 0 ? objectIds.Dequeue() : ObjectId.Null;
-        continue;
-      }
-
-      if (parameterType == typeof(double))
-      {
-        args[i] = doubles.Count > 0 ? doubles.Dequeue() : 0.0;
-        continue;
-      }
-
-      if (parameterType == typeof(Point2d))
-      {
-        args[i] = new Point2d(0.0, 0.0);
-        continue;
-      }
-
-      if (parameterType == typeof(Point3d))
-      {
-        args[i] = Point3d.Origin;
         continue;
       }
 

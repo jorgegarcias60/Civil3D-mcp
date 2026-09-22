@@ -252,20 +252,12 @@ public static class ProfileEditCommands
       // ObjectId, which a blind (ObjectId?) cast would have discarded anyway.
       //
       // Call the typed API instead: the five-argument form when we resolved
-      // both a style and a band set, otherwise the minimal form plus a rename.
-      ObjectId pvId;
-      if (!styleId.IsNull && !bandSetId.IsNull)
-      {
-        pvId = ProfileView.Create(
-          alignment.ObjectId, insertionPoint, profileViewName, bandSetId, styleId);
-      }
-      else
-      {
-        pvId = ProfileView.Create(alignment.ObjectId, insertionPoint);
-        var created = CivilObjectUtils.GetRequiredObject<ProfileView>(
-          transaction, pvId, OpenMode.ForWrite);
-        created.Name = profileViewName;
-      }
+      // both a style and a band set, otherwise the minimal form plus a rename,
+      // with whichever of the two was supplied applied on its own.
+      var both = !styleId.IsNull && !bandSetId.IsNull;
+      var pvId = both
+        ? ProfileView.Create(alignment.ObjectId, insertionPoint, profileViewName, bandSetId, styleId)
+        : ProfileView.Create(alignment.ObjectId, insertionPoint);
 
       if (pvId.IsNull)
       {
@@ -275,7 +267,19 @@ public static class ProfileEditCommands
       }
 
       var profileView = CivilObjectUtils.GetRequiredObject<ProfileView>(
-        transaction, pvId, OpenMode.ForRead);
+        transaction, pvId, both ? OpenMode.ForRead : OpenMode.ForWrite);
+      if (!both)
+      {
+        profileView.Name = profileViewName;
+        if (!styleId.IsNull)
+        {
+          profileView.StyleId = styleId;
+        }
+        if (!bandSetId.IsNull)
+        {
+          profileView.Bands.ImportBandSetStyle(bandSetId);
+        }
+      }
 
       return new Dictionary<string, object?>
       {
