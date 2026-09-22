@@ -18,7 +18,7 @@ Sacred-G/Civil3D-mcp          the original project (Civil 3D 2026)            re
 | `main` | Kept equal to Sacred-G `main` (a plain mirror; no fork-only commits). |
 
 Current fixes: `qc-triangles` (#10 / #1), `civil3d-2027-api-paths` (#11 / #2),
-`catalog-list-and-alignment-from-polyline` (#12 / #3).
+`catalog-list-and-alignment-from-polyline` (#12 / #3), `coordinate-system-set` (#13 / #4).
 
 ## Remotes (one-time, in the working clone)
 
