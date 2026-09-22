@@ -25,6 +25,14 @@
 
 ---
 
+> [!NOTE]
+> **This is jorgegarcias60's fork, branch `civil3d-2027`** = the Joshua8-AI 2027 fork (described below) plus fixes that are proposed back but not merged yet:
+> - QC: false "no triangles" error on healthy TIN surfaces ([Sacred-G#10](https://github.com/Sacred-G/Civil3D-mcp/pull/10) / [Joshua8-AI#1](https://github.com/Joshua8-AI/Civil3D-mcp/pull/1))
+> - Style names, alignment station labels and profile view creation on 2027 ([Sacred-G#11](https://github.com/Sacred-G/Civil3D-mcp/pull/11) / [Joshua8-AI#2](https://github.com/Joshua8-AI/Civil3D-mcp/pull/2))
+> - `catalog_list` part names, and alignments traced from an existing polyline with an exact curve radius ([Sacred-G#12](https://github.com/Sacred-G/Civil3D-mcp/pull/12) / [Joshua8-AI#3](https://github.com/Joshua8-AI/Civil3D-mcp/pull/3))
+>
+> Build and install it exactly like the 2027 fork (`scripts\gather-refs-2027.ps1`, then `scripts\build-2027.ps1 -Install`). How the branch is kept up to date: [docs/FORK.md](./docs/FORK.md).
+
 > [!IMPORTANT]
 > **This is the [Joshua8-AI](https://github.com/Joshua8-AI/Civil3D-mcp) fork with working Civil 3D 2027 support.** Differences from [upstream](https://github.com/Sacred-G/Civil3D-mcp) (all credit for the project itself goes to Sacred-G):
 > - **Civil 3D 2027 (.NET 10) build**: `scripts\gather-refs-2027.ps1` stages the six reference DLLs (spread across three folders in a 2027 install), then `scripts\build-2027.ps1 -Install` builds with a command-line TFM override and deploys. 2026 builds are unaffected.
