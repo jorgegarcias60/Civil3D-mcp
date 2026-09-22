@@ -261,27 +261,43 @@ public static class AlignmentCommands
 
       var alignmentId = Alignment.Create(civilDoc, polylineOptions, name, siteId, layerId, styleId, labelSetId);
 
-      // Insert a curve of the requested radius at every interior PI. The
-      // alignment was created as pure tangents above, so consecutive entity
-      // pairs are the tangents meeting at each PI.
+      // Insert a curve of the requested radius at every interior PI: wherever two
+      // tangents meet at an angle, in station order. A traced polyline can
+      // already carry arcs (fillets, bulges); a tangent next to an arc is not a
+      // PI, and two collinear tangents are one straight run, so neither gets a
+      // curve.
       var curvesAdded = 0;
       var curveFailures = new List<string>();
       if (curveRadius != null)
       {
         var writeAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, alignmentId, OpenMode.ForWrite);
-        var tangentIds = new List<int>();
-        foreach (AlignmentEntity entity in writeAlignment.Entities)
+        var ordered = new List<AlignmentEntity>();
+        for (var order = 0; order < writeAlignment.Entities.Count; order++)
         {
-          tangentIds.Add(entity.EntityId);
+          ordered.Add(writeAlignment.Entities.GetEntityByOrder(order));
         }
 
-        for (var index = 0; index < tangentIds.Count - 1; index++)
+        var pi = 0;
+        for (var index = 0; index < ordered.Count - 1; index++)
         {
+          if (ordered[index] is not AlignmentLine first || ordered[index + 1] is not AlignmentLine second)
+          {
+            continue;
+          }
+
+          var d1 = first.EndPoint - first.StartPoint;
+          var d2 = second.EndPoint - second.StartPoint;
+          if (Math.Abs(d1.X * d2.Y - d1.Y * d2.X) <= 1e-9 * d1.Length * d2.Length)
+          {
+            continue;   // collinear: no PI here
+          }
+
+          pi++;
           try
           {
             writeAlignment.Entities.AddFreeCurve(
-              tangentIds[index],
-              tangentIds[index + 1],
+              first.EntityId,
+              second.EntityId,
               curveRadius.Value,
               CurveParamType.Radius,
               false,
@@ -294,7 +310,7 @@ public static class AlignmentCommands
           {
             // A radius that will not fit between two short tangents is a real
             // design constraint, not a crash. Report it and keep the corner sharp.
-            curveFailures.Add($"PI {index + 1}: {ex.Message}");
+            curveFailures.Add($"PI {pi}: {ex.Message}");
           }
         }
       }
