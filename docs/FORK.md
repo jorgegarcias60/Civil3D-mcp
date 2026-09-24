@@ -20,6 +20,22 @@ Sacred-G/Civil3D-mcp          the original project (Civil 3D 2026)            re
 Current fixes: `qc-triangles` (#10 / #1), `civil3d-2027-api-paths` (#11 / #2),
 `catalog-list-and-alignment-from-polyline` (#12 / #3), `coordinate-system-set` (#13 / #4).
 
+## Working together
+
+This fork is developed here directly; the upstreams are slow to take pull requests, so
+`civil3d-2027` is our main line. Sending a fix upstream is optional and never blocks our work.
+
+- **Production = `civil3d-2027`.** Build and install the plugin only from an up-to-date
+  `civil3d-2027` (`git checkout civil3d-2027`, `git pull`, then the build below). Never install
+  from a working branch.
+- **Collaborators:** clone this repo, make a branch `<your-github-user>/<topic>` from
+  `civil3d-2027`, push it, and open a pull request into `civil3d-2027`. Run the build and tests
+  below first and say in the PR what you tested in Civil 3D.
+- **Review:** the ruleset "Protect civil3d-2027 (production)" requires a pull request with one
+  approval (the owner's) to merge; a new push after approval needs approval again. Force-push and
+  deleting the branch are blocked. The owner is exempt and may push directly.
+- New upstream work reaches `civil3d-2027` through the routine below, like any other change.
+
 ## Remotes (one-time, in the working clone)
 
 ```bash
