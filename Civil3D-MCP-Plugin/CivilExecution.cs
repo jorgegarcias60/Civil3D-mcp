@@ -206,7 +206,11 @@ public static class CivilExecution
     // Civil 3D with nothing to process may not raise it again. Post a no-op
     // message to the main window while the request waits so the watcher keeps
     // getting ticks. PostMessage is safe from any thread.
-    var mainWindow = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+    IntPtr mainWindow;
+    using (var host = System.Diagnostics.Process.GetCurrentProcess())
+    {
+      mainWindow = host.MainWindowHandle;
+    }
     using var nudge = new Timer(_ =>
     {
       if (Volatile.Read(ref claimed) == 0 && mainWindow != IntPtr.Zero)
