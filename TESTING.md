@@ -38,7 +38,11 @@ Host-hop recovery (`civil3d-2027` @ `87d6bf1`, installed 2026-09-25, Jorge's mac
 | Stuck LISP reader (the original incident) | COM `SendCommand` of an unterminated string, command line at `("_>`, then `civil3d_drawing info` | `CIVIL3D.HOST_BUSY` after 15.0 s (was a 120 s timeout) |
 | Recovery once the prompt clears | Civil 3D's automatic save cleared the `("_>` prompt; then drawing info, point list, point create | pass without a restart (previously every call failed until restart) |
 | User in a command | 3DORBIT active, then a gated point delete | `CIVIL3D.HOST_BUSY`; the user's command was not interrupted |
-| Modal dialog open | "Drawing Recovery" notice open at startup, then drawing info / surface list | **120 s timeouts**: no Idle ticks inside a modal loop. Fixed after this run by the no-Idle watchdog (HOST_BUSY after 15 s without an Idle tick); not yet re-tested live |
+| Modal dialog open | "Drawing Recovery" notice open at startup, then drawing info / surface list | **120 s timeouts**: no Idle ticks inside a modal loop. Fixed by the no-Idle watchdog, re-tested below |
+| Modal dialog open (no-Idle watchdog, `fix/host-busy-no-idle`, 2026-09-26) | COM `SendCommand` of `_.UNITS` (Drawing Units dialog open), then `civil3d_drawing info` | `CIVIL3D.HOST_BUSY` "a dialog is open ..." after 15.0 s |
+| After the dialog closes | Cancel on Drawing Units, then drawing info and surface list | pass at once, on the normal command-context hop (no fallback switch logged) |
+
+The Drawing Units dialog ignored `WM_CLOSE` and a posted `IDCANCEL`; a `BM_CLICK` on its Cancel button took effect only after a delay. Close test dialogs by hand if a script cannot.
 
 Notes: after a rebuild Civil 3D asks "Security - Unsigned Executable File" for the bundle DLL; check the path and answer **Load Once**. A plugin call made through the command-context hop cancels whatever command or prompt is active (AutoCAD's `ExecuteInCommandContextAsync` behaviour).
 
