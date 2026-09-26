@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- After a command-line prompt was left waiting for input (e.g. an unbalanced
+  LISP expression sent over COM) and then cancelled, every later request timed
+  out after 120 s until Civil 3D restarted: `ExecuteInCommandContextAsync`
+  never ran callbacks queued after the stuck one. Requests now run exactly
+  once through the command-context hop or an `Application.Idle` fallback that
+  takes over when the hop has not started after 5 s of idle time (logged, and
+  kept until restart); while a command or prompt stays active for 15 s they
+  fail with `CIVIL3D.HOST_BUSY` instead of timing out.
 - With no document open, drawing-dependent requests hung and wedged the
   plugin's execution gate; they now fail fast with `CIVIL3D.NO_DRAWING`, and
   `civil3d_drawing new` works from zero documents.
