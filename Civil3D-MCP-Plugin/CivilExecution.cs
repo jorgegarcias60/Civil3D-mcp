@@ -28,13 +28,17 @@ public static class CivilExecution
       T? result = default;
       Exception? capturedException = null;
 
-      var hostTask = RunInCommandContextAsync(async _ =>
+      // Read on the request's thread: the expected identity is an AsyncLocal,
+      // and the Application.Idle fallback runs on the UI thread's execution
+      // context, where it would read empty and skip the drawing-change check.
+      var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
+
+      var hostTask = RunOnHostAsync(async _ =>
       {
         try
         {
           cancellationToken.ThrowIfCancellationRequested();
           var doc = App.DocumentManager.MdiActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
-          var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
           var activeDrawingIdentity = PluginRuntime.GetDrawingIdentity(doc);
           if (!string.IsNullOrWhiteSpace(expectedDrawingIdentity) &&
               !string.Equals(expectedDrawingIdentity, activeDrawingIdentity, StringComparison.OrdinalIgnoreCase))
@@ -62,9 +66,9 @@ public static class CivilExecution
         }
 
         await Task.CompletedTask;
-      });
+      }, cancellationToken);
 
-      await AwaitHostContextAsync(hostTask, cancellationToken);
+      await hostTask;
 
       if (capturedException != null)
       {
@@ -74,6 +78,165 @@ public static class CivilExecution
       return result!;
     });
   }
+
+  // How long a command-context hop may take to start while Civil 3D is idle
+  // before it is treated as wedged, and how long a running command or LISP
+  // prompt may hold the host before the request fails with HOST_BUSY.
+  private static readonly TimeSpan CommandContextStartGrace = TimeSpan.FromSeconds(5);
+  private static readonly TimeSpan HostBusyTimeout = TimeSpan.FromSeconds(15);
+
+  // Set once a command-context hop failed to start although no command was
+  // active. AutoCAD does not recover from that state (seen 2026-09-25: a LISP
+  // expression sent over COM waited for input, a request queued behind it,
+  // and after the prompt was cancelled every later ExecuteInCommandContextAsync
+  // stayed queued until Civil 3D restarted). From then on requests use the
+  // Application.Idle hop only.
+  private static volatile bool _commandContextWedged;
+
+  // Runs the operation on the host's main thread exactly once. The normal
+  // route is the command-context hop; an Application.Idle watcher runs next to
+  // it and
+  //  - fails fast with CIVIL3D.HOST_BUSY while a command or prompt stays active
+  //    (CMDACTIVE != 0), instead of letting the request time out after 120 s;
+  //  - runs the operation itself from the Idle tick (application context; the
+  //    operation takes its own document lock) when the command-context hop has
+  //    not started within the grace period although Civil 3D is idle.
+  // A claim flag makes sure whichever hop comes second does nothing, including
+  // a command-context callback that AutoCAD runs long after the request ended.
+  private static async Task RunOnHostAsync(Func<object, Task> operation, CancellationToken cancellationToken)
+  {
+    var claimed = 0;
+    var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    async Task RunOnce()
+    {
+      if (Interlocked.Exchange(ref claimed, 1) != 0)
+      {
+        return;
+      }
+
+      try
+      {
+        await operation(null!);
+        done.TrySetResult(true);
+      }
+      catch (Exception ex)
+      {
+        done.TrySetException(ex);
+      }
+    }
+
+    var useCommandContext = !_commandContextWedged;
+    if (useCommandContext)
+    {
+      try
+      {
+        var commandTask = RunInCommandContextAsync(_ => RunOnce());
+        _ = commandTask.ContinueWith(
+          t => PluginLog.Warn("Host", "Command-context hop failed; the Idle watcher takes over.", t.Exception),
+          CancellationToken.None,
+          TaskContinuationOptions.OnlyOnFaulted,
+          TaskScheduler.Default);
+      }
+      catch (Exception ex)
+      {
+        PluginLog.Warn("Host", "Command-context hop could not be queued; the Idle watcher takes over.", ex);
+      }
+    }
+
+    // Busy and idle time are measured separately: only continuous idle time
+    // counts toward the grace period, so a command that runs for a few seconds
+    // does not make a healthy command-context hop look wedged.
+    DateTime? busySince = null;
+    DateTime? idleSince = null;
+    EventHandler? idle = null;
+    idle = async (_, _) =>
+    {
+      // async void: an exception escaping this handler would take down the
+      // host, so every failure ends the request instead.
+      try
+      {
+        if (Volatile.Read(ref claimed) != 0)
+        {
+          CoreApp.Idle -= idle;
+          return;
+        }
+
+        var now = DateTime.UtcNow;
+        var commandActive = Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) != 0;
+        if (commandActive)
+        {
+          idleSince = null;
+          busySince ??= now;
+          if (now - busySince.Value >= HostBusyTimeout && Interlocked.Exchange(ref claimed, 1) == 0)
+          {
+            CoreApp.Idle -= idle;
+            done.TrySetException(new JsonRpcDispatchException(
+              "CIVIL3D.HOST_BUSY",
+              "Civil 3D has a command or prompt in progress (CMDACTIVE is not 0). Finish it or press Esc in Civil 3D, then retry. No drawing changes were made."));
+          }
+
+          return;
+        }
+
+        busySince = null;
+        idleSince ??= now;
+        if (useCommandContext && now - idleSince.Value < CommandContextStartGrace)
+        {
+          return;
+        }
+
+        CoreApp.Idle -= idle;
+        if (useCommandContext && !_commandContextWedged)
+        {
+          _commandContextWedged = true;
+          PluginLog.Warn("Host", $"Command-context hop did not start within {CommandContextStartGrace.TotalSeconds:0} s while Civil 3D was idle; switching to the Application.Idle hop until Civil 3D restarts.");
+        }
+
+        await RunOnce();
+      }
+      catch (Exception ex)
+      {
+        CoreApp.Idle -= idle;
+        if (Interlocked.Exchange(ref claimed, 1) == 0)
+        {
+          done.TrySetException(ex);
+        }
+      }
+    };
+    CoreApp.Idle += idle;
+
+    // Idle is raised when the host's message queue empties; a background
+    // Civil 3D with nothing to process may not raise it again. Post a no-op
+    // message to the main window while the request waits so the watcher keeps
+    // getting ticks. PostMessage is safe from any thread.
+    IntPtr mainWindow;
+    using (var host = System.Diagnostics.Process.GetCurrentProcess())
+    {
+      mainWindow = host.MainWindowHandle;
+    }
+    using var nudge = new Timer(_ =>
+    {
+      if (Volatile.Read(ref claimed) == 0 && mainWindow != IntPtr.Zero)
+      {
+        PostMessage(mainWindow, 0 /* WM_NULL */, IntPtr.Zero, IntPtr.Zero);
+      }
+    }, null, TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250));
+
+    try
+    {
+      await AwaitHostContextAsync(done.Task, cancellationToken);
+    }
+    finally
+    {
+      // Request finished, failed or was cancelled: nothing may run it later.
+      Interlocked.Exchange(ref claimed, 1);
+      CoreApp.Idle -= idle;
+    }
+  }
+
+  [System.Runtime.InteropServices.DllImport("user32.dll")]
+  private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
   public static async Task<T> ExecuteInCommandContextAsync<T>(Func<Task<T>> action)
   {
@@ -148,12 +311,12 @@ public static class CivilExecution
     EventHandler? handler = null;
     handler = async (_, _) =>
     {
-      // One-shot: detach before running so a slow callback cannot be re-entered
-      // by the next idle tick.
-      CoreApp.Idle -= handler;
-      cancellation.Dispose();
       try
       {
+        // One-shot: detach before running so a slow callback cannot be re-entered
+        // by the next idle tick.
+        CoreApp.Idle -= handler;
+        cancellation.Dispose();
         await callback(null!);
         completion.TrySetResult(true);
       }

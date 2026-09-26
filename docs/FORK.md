@@ -19,6 +19,8 @@ Sacred-G/Civil3D-mcp          the original project (Civil 3D 2026)            re
 
 Current fixes: `qc-triangles` (#10 / #1), `civil3d-2027-api-paths` (#11 / #2),
 `catalog-list-and-alignment-from-polyline` (#12 / #3), `coordinate-system-set` (#13 / #4).
+Fork only (not sent upstream yet): `fix/command-context-wedge` (Idle-hop fallback when
+`ExecuteInCommandContextAsync` stops running callbacks, `CIVIL3D.HOST_BUSY` while a command is active).
 
 ## Working together
 
