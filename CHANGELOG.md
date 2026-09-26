@@ -12,6 +12,11 @@
   takes over when the hop has not started after 5 s of idle time (logged, and
   kept until restart); while a command or prompt stays active for 15 s they
   fail with `CIVIL3D.HOST_BUSY` instead of timing out.
+- While a modal dialog was open (e.g. the Drawing Recovery notice at startup)
+  requests still timed out after 120 s: Civil 3D raises no `Application.Idle`
+  inside a modal loop, so neither hop nor the watcher could run. A watchdog on
+  the timer thread now fails the request with `CIVIL3D.HOST_BUSY` after 15 s
+  without an Idle tick.
 - With no document open, drawing-dependent requests hung and wedged the
   plugin's execution gate; they now fail fast with `CIVIL3D.NO_DRAWING`, and
   `civil3d_drawing new` works from zero documents.
