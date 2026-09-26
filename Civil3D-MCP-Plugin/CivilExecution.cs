@@ -28,13 +28,17 @@ public static class CivilExecution
       T? result = default;
       Exception? capturedException = null;
 
+      // Read on the request's thread: the expected identity is an AsyncLocal,
+      // and the Application.Idle fallback runs on the UI thread's execution
+      // context, where it would read empty and skip the drawing-change check.
+      var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
+
       var hostTask = RunOnHostAsync(async _ =>
       {
         try
         {
           cancellationToken.ThrowIfCancellationRequested();
           var doc = App.DocumentManager.MdiActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
-          var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
           var activeDrawingIdentity = PluginRuntime.GetDrawingIdentity(doc);
           if (!string.IsNullOrWhiteSpace(expectedDrawingIdentity) &&
               !string.Equals(expectedDrawingIdentity, activeDrawingIdentity, StringComparison.OrdinalIgnoreCase))
