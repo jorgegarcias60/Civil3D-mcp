@@ -149,6 +149,10 @@ public static class CivilExecution
     // does not make a healthy command-context hop look wedged.
     DateTime? busySince = null;
     DateTime? idleSince = null;
+    // Last Idle tick (UTC ticks), read by the timer thread: no tick at all for
+    // HostBusyTimeout means the host is inside a modal dialog or a long
+    // operation, where neither hop can run.
+    long lastIdleTicks = DateTime.UtcNow.Ticks;
     EventHandler? idle = null;
     idle = async (_, _) =>
     {
@@ -156,6 +160,7 @@ public static class CivilExecution
       // host, so every failure ends the request instead.
       try
       {
+        Interlocked.Exchange(ref lastIdleTicks, DateTime.UtcNow.Ticks);
         if (Volatile.Read(ref claimed) != 0)
         {
           CoreApp.Idle -= idle;
@@ -190,7 +195,10 @@ public static class CivilExecution
         if (useCommandContext && !_commandContextWedged)
         {
           _commandContextWedged = true;
-          PluginLog.Warn("Host", $"Command-context hop did not start within {CommandContextStartGrace.TotalSeconds:0} s while Civil 3D was idle; switching to the Application.Idle hop until Civil 3D restarts.");
+          // Also seen with a plain LISP prompt at the Command line (getstring
+          // reports CMDACTIVE 0), so this is not always a broken host; the
+          // Idle hop then waits instead of cancelling the prompt.
+          PluginLog.Warn("Host", $"Command-context hop did not start within {CommandContextStartGrace.TotalSeconds:0} s with no command active (a LISP prompt at the Command line, or a wedged host); using the Application.Idle hop until Civil 3D restarts.");
         }
 
         await RunOnce();
@@ -217,7 +225,21 @@ public static class CivilExecution
     }
     using var nudge = new Timer(_ =>
     {
-      if (Volatile.Read(ref claimed) == 0 && mainWindow != IntPtr.Zero)
+      if (Volatile.Read(ref claimed) != 0)
+      {
+        return;
+      }
+
+      var sinceIdle = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref lastIdleTicks));
+      if (sinceIdle >= HostBusyTimeout && Interlocked.Exchange(ref claimed, 1) == 0)
+      {
+        done.TrySetException(new JsonRpcDispatchException(
+          "CIVIL3D.HOST_BUSY",
+          "Civil 3D is not processing requests: a dialog is open or a long operation is running. Close the dialog or wait, then retry. No drawing changes were made."));
+        return;
+      }
+
+      if (mainWindow != IntPtr.Zero)
       {
         PostMessage(mainWindow, 0 /* WM_NULL */, IntPtr.Zero, IntPtr.Zero);
       }
