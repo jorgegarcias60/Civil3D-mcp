@@ -181,6 +181,15 @@ public static class AlignmentCommands
         "createAlignment requires either 'polylineHandle' or at least two 'points'.");
     }
 
+    // The server schema already rejects both; check here too so a direct
+    // caller is not silently given the polyline and ignored points.
+    if (!string.IsNullOrWhiteSpace(polylineHandle) && pointsNode != null)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.INVALID_INPUT",
+        "createAlignment takes either 'polylineHandle' or 'points', not both.");
+    }
+
     // curveRadius: insert a curve of exactly this radius at every interior PI.
     // addCurves: let Civil 3D fit curves using the drawing's default radius.
     //   Defaults to true for 'points' (the original behavior) and false for
@@ -188,6 +197,16 @@ public static class AlignmentCommands
     // Neither curves option: straight tangents that follow the source geometry.
     var curveRadius = PluginRuntime.GetOptionalDouble(parameters, "curveRadius");
     var addCurves = PluginRuntime.GetOptionalBool(parameters, "addCurves") ?? string.IsNullOrWhiteSpace(polylineHandle);
+
+    // radii: one radius per interior PI in station order, for a design whose
+    // corners differ. A null entry, or a PI past the end of the list, stays sharp.
+    var radii = ReadRadii(parameters);
+    if (radii != null && curveRadius != null)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.INVALID_INPUT",
+        "createAlignment takes either 'radii' or 'curveRadius', not both.");
+    }
 
     if (curveRadius is <= 0)
     {
@@ -249,7 +268,7 @@ public static class AlignmentCommands
       // AddCurvesBetweenTangents would silently use the drawing default instead.
       var polylineOptions = new PolylineOptions
       {
-        AddCurvesBetweenTangents = curveRadius == null && addCurves,
+        AddCurvesBetweenTangents = curveRadius == null && radii == null && addCurves,
         EraseExistingEntities = eraseSource,
         PlineId = polylineId,
       };
@@ -261,14 +280,15 @@ public static class AlignmentCommands
 
       var alignmentId = Alignment.Create(civilDoc, polylineOptions, name, siteId, layerId, styleId, labelSetId);
 
-      // Insert a curve of the requested radius at every interior PI: wherever two
-      // tangents meet at an angle, in station order. A traced polyline can
-      // already carry arcs (fillets, bulges); a tangent next to an arc is not a
-      // PI, and two collinear tangents are one straight run, so neither gets a
-      // curve.
+      // Insert a curve at each interior PI -- wherever two tangents meet at an
+      // angle, in station order: curveRadius at every PI, or radii[n] at PI n.
+      // A traced polyline can already carry arcs (fillets, bulges); a tangent
+      // next to an arc is not a PI, and two collinear tangents are one straight
+      // run, so neither gets a curve or uses up a radii entry.
       var curvesAdded = 0;
+      var curvesSkipped = 0;
       var curveFailures = new List<string>();
-      if (curveRadius != null)
+      if (curveRadius != null || radii != null)
       {
         var writeAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, alignmentId, OpenMode.ForWrite);
         var ordered = new List<AlignmentEntity>();
@@ -292,13 +312,21 @@ public static class AlignmentCommands
             continue;   // collinear: no PI here
           }
 
-          pi++;
+          var radius = radii == null ? curveRadius : pi < radii.Count ? radii[pi] : null;
+          pi++;   // 1-based PI number from here on, for the messages below
+
+          if (radius is null)
+          {
+            curvesSkipped++;
+            continue;
+          }
+
           try
           {
             writeAlignment.Entities.AddFreeCurve(
               first.EntityId,
               second.EntityId,
-              curveRadius.Value,
+              radius.Value,
               CurveParamType.Radius,
               false,
               // CurveType only distinguishes Compound vs Reverse, which matters
@@ -310,7 +338,7 @@ public static class AlignmentCommands
           {
             // A radius that will not fit between two short tangents is a real
             // design constraint, not a crash. Report it and keep the corner sharp.
-            curveFailures.Add($"PI {pi}: {ex.Message}");
+            curveFailures.Add($"PI {pi} (R={radius:0.###}): {ex.Message}");
           }
         }
       }
@@ -325,11 +353,44 @@ public static class AlignmentCommands
         ["sourcePolyline"] = string.IsNullOrWhiteSpace(polylineHandle) ? null : polylineHandle,
         ["sourcePolylineErased"] = eraseSource,
         ["curveRadius"] = curveRadius,
+        ["radii"] = radii,
         ["curvesAdded"] = curvesAdded,
+        ["curvesSkipped"] = curvesSkipped,
         ["curveFailures"] = curveFailures,
         ["created"] = true,
       };
     });
+  }
+
+  private static List<double?>? ReadRadii(JsonObject? parameters)
+  {
+    if (PluginRuntime.GetParameter(parameters, "radii") is not JsonArray array)
+    {
+      return null;
+    }
+
+    var radii = new List<double?>();
+    foreach (var node in array)
+    {
+      double? radius;
+      try
+      {
+        radius = node?.GetValue<double>();
+      }
+      catch (Exception ex) when (ex is InvalidOperationException or FormatException)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'radii' must contain only positive numbers or null.");
+      }
+
+      if (radius is <= 0)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'radii' entries must be greater than zero (use null to keep a PI sharp).");
+      }
+
+      radii.Add(radius);
+    }
+
+    return radii;
   }
 
   public static Task<object?> DeleteAlignmentAsync(JsonObject? parameters)

@@ -116,6 +116,7 @@ const canonicalAlignmentInputShape = {
   name: z.string().optional(),
   polylineHandle: z.string().optional(),
   curveRadius: z.number().positive().optional(),
+  radii: z.array(z.number().positive().nullable()).optional(),
   addCurves: z.boolean().optional(),
   station: z.number().optional(),
   offset: z.number().optional(),
@@ -182,9 +183,13 @@ const AlignmentCreateArgsSchema = z.object({
   polylineHandle: z.string().optional(),
   points: z.array(Point2DSchema).min(2).optional(),
   // curveRadius inserts a curve of exactly this radius at every interior PI.
+  // radii gives one radius per interior PI in station order instead (null, or a
+  // PI past the end of the list, stays sharp); it cannot be combined with
+  // curveRadius.
   // addCurves lets Civil 3D fit curves at its own default radius; it defaults to
   // true for points (original behavior) and false for polylineHandle.
   curveRadius: z.number().positive().optional(),
+  radii: z.array(z.number().positive().nullable()).min(1).optional(),
   addCurves: z.boolean().optional(),
   type: z.enum(["centerline", "offset"]).optional(),
   site: z.string().optional(),
@@ -194,6 +199,9 @@ const AlignmentCreateArgsSchema = z.object({
 }).refine(
   (args) => Boolean(args.polylineHandle) !== Boolean(args.points),
   { message: "Provide either polylineHandle or points, not both." },
+).refine(
+  (args) => !(args.radii !== undefined && args.curveRadius !== undefined),
+  { message: "Provide either 'radii' or 'curveRadius', not both." },
 );
 
 const AlignmentDeleteArgsSchema = z.object({
@@ -378,6 +386,7 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
           polylineHandle: args.polylineHandle,
           points: args.points,
           curveRadius: args.curveRadius,
+          radii: args.radii,
           addCurves: args.addCurves,
           type: args.type,
           site: args.site,
