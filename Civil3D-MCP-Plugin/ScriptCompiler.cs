@@ -441,6 +441,17 @@ internal static class ScriptCompiler
     var typeName = type?.ToDisplayString() ?? string.Empty;
     var display = string.IsNullOrEmpty(typeName) ? name : $"{type!.Name}.{name}";
 
+    // The plugin implementation is loaded in the same assembly as the script
+    // base class. Calling its command/queue internals from a snippet can
+    // deadlock Civil 3D or bypass the run transaction.
+    var outermost = symbol as INamedTypeSymbol ?? type;
+    while (outermost?.ContainingType != null) outermost = outermost.ContainingType;
+    if (outermost?.ContainingNamespace?.ToDisplayString() == "Civil3DMcpPlugin"
+        && outermost.Name is not "RunCodeScript" and not "RunCodeTimeoutException" and not "RunCodeCancelledException")
+    {
+        return $"{display} is plugin code, not the script API (it can deadlock Civil 3D or queue commands).";
+    }
+
     // Always refused: these wait for a person, open a modal window, or end the process.
     if (symbol is IMethodSymbol)
     {
@@ -540,6 +551,11 @@ internal static class ScriptCompiler
     }
 
     const string useWrite = " Use mode 'write' to change the drawing.";
+
+    if (symbol is IMethodSymbol && typeName == BaseClassName && name is ("EnsureLayer" or "Tag"))
+    {
+      return $"{display} changes the drawing. Use mode 'write'.";
+    }
 
     if (symbol is IFieldSymbol && typeName == "Autodesk.AutoCAD.DatabaseServices.OpenMode" && name is "ForWrite" or "ForNotify")
     {
@@ -673,9 +689,9 @@ internal static class ScriptCompiler
         && IsOpenSide(model.GetSymbolInfo(value).Symbol));
   }
 
-  // RunCodeScript.OpenSide (not a local function of the snippet with that name).
+  // RunCodeScript.OpenSide/OpenSideOrNull (not local functions of the snippet).
   private static bool IsOpenSide(ISymbol? symbol) =>
-    symbol is IMethodSymbol { Name: "OpenSide" } method && method.ContainingType?.ToDisplayString() == BaseClassName;
+    symbol is IMethodSymbol { Name: "OpenSide" or "OpenSideOrNull" } method && method.ContainingType?.ToDisplayString() == BaseClassName;
 
   // Every way of writing to it: X = v, X += v, X++, --X, (X) = v, X!++,
   // (X, y) = (...) at any tuple depth, and C# 14's Db?.X = v.

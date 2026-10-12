@@ -88,6 +88,101 @@ internal static class RunCodeLog
       .Where(file => !ReservedFiles.Contains(Path.GetFileName(file), StringComparer.OrdinalIgnoreCase));
   }
 
+  internal sealed record CopyResult(List<string> Copied, List<string> Removed, List<string> Warnings);
+
+  // Output destinations are caller-selected. Only sources are confined to Root.
+  internal static CopyResult CopyOutputs(string runFolder, string destination, bool removeCopied)
+  {
+    var result = new CopyResult(new(), new(), new());
+    try
+    {
+      var targetFolder = ValidateCopyDestination(destination);
+      var sources = Directory.EnumerateFiles(Inside(runFolder))
+        .Where(file => !KeptFiles.Contains(Path.GetFileName(file), StringComparer.OrdinalIgnoreCase))
+        .Select(Inside).ToArray();
+      if (sources.Length == 0) return result;
+
+      Directory.CreateDirectory(targetFolder);
+      foreach (var source in sources)
+      {
+        var target = Path.Combine(targetFolder, Path.GetFileName(source));
+        var temporary = Path.Combine(targetFolder, ".run-code-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+          File.Copy(source, temporary);
+          File.Move(temporary, target, overwrite: true);
+          result.Copied.Add(target);
+          if (removeCopied)
+          {
+            var sourcePath = ResolveFullPath(source);
+            var targetPath = ResolveFullPath(target);
+            if (sourcePath.Equals(targetPath, StringComparison.OrdinalIgnoreCase))
+              throw new InvalidOperationException("The copied output resolves to its source; the source was kept.");
+            // Re-check the resolved destination before removing the only source.
+            ValidateCopyDestination(Path.GetDirectoryName(targetPath)!);
+            File.Delete(source);
+            result.Removed.Add(source);
+          }
+        }
+        catch (Exception exception)
+        {
+          result.Warnings.Add($"Could not copy or remove output '{source}' to '{target}': {exception.Message}");
+        }
+        finally
+        {
+          try
+          {
+            if (File.Exists(temporary)) File.Delete(temporary);
+          }
+          catch (Exception exception)
+          {
+            result.Warnings.Add($"Could not remove temporary output '{temporary}': {exception.Message}");
+          }
+        }
+      }
+    }
+    catch (Exception exception)
+    {
+      result.Warnings.Add($"Could not copy outputs to '{destination}': {exception.Message}");
+    }
+
+    return result;
+  }
+
+  internal static string ValidateCopyDestination(string destination)
+  {
+    if (destination.StartsWith(@"\\?\", StringComparison.Ordinal)
+      || destination.StartsWith(@"\\.\", StringComparison.Ordinal))
+      throw new ArgumentException("'copyOutputsTo' must not use a device path.");
+    if (!Path.IsPathFullyQualified(destination))
+      throw new ArgumentException("'copyOutputsTo' must be an absolute folder.");
+    var full = Path.GetFullPath(destination);
+    var root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    var target = full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    if (target.Equals(root, StringComparison.OrdinalIgnoreCase)
+      || target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+      throw new ArgumentException("'copyOutputsTo' must not be inside the run-code log root.");
+    for (var directory = new DirectoryInfo(full); directory != null; directory = directory.Parent)
+    {
+      if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+        throw new ArgumentException("'copyOutputsTo' must not traverse filesystem links or junctions.");
+    }
+    return full;
+  }
+
+  private static string ResolveFullPath(string path)
+  {
+    var full = Path.GetFullPath(new FileInfo(path).ResolveLinkTarget(true)?.FullName ?? path);
+    for (var directory = new FileInfo(full).Directory; directory != null; directory = directory.Parent)
+    {
+      if ((directory.Attributes & FileAttributes.ReparsePoint) == 0) continue;
+      var resolved = directory.ResolveLinkTarget(true);
+      if (resolved != null)
+        return Path.GetFullPath(Path.Combine(resolved.FullName, Path.GetRelativePath(directory.FullName, full)));
+    }
+    return full;
+  }
+
   // Results and files written by scripts older than the retention are
   // deleted; every script.cs and run.json is kept.
   internal static void PruneOldOutputs(TimeSpan retention)

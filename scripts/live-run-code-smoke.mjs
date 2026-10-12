@@ -4,14 +4,18 @@
 //
 //   npm run build
 //   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
+//     [--long <seconds>] [--damaged <directory>]
 //
 // --expect-drawing: the write cases run only when the active drawing's name contains
 //   this text (guards against testing on a real job by accident); without it, or
 //   --allow-writes, only the read cases run.
 // --side: a DWG read as a side database (never opened, never changed) for the
 //   OpenSide and bulk-sampling cases; skipped when not given.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -24,12 +28,20 @@ const { values: options } = parseArgs({
     "expect-drawing": { type: "string" },
     "allow-writes": { type: "boolean", default: false },
     approval: { type: "string", default: "token" },
+    long: { type: "string" },
+    damaged: { type: "string" },
   },
   strict: true,
 });
 const sidePath = options.side;
 const expectDrawing = options["expect-drawing"];
 const approvalMode = options.approval;
+const longSeconds = options.long === undefined ? undefined : Number(options.long);
+if (longSeconds !== undefined && (!Number.isInteger(longSeconds) || longSeconds < 91 || longSeconds > 600)) {
+  console.error("--long must be an integer from 91 to 600 seconds");
+  process.exit(2);
+}
+const damagedDir = options.damaged;
 if (approvalMode !== "token" && approvalMode !== "client") {
   console.error("--approval must be token or client");
   process.exit(2);
@@ -52,8 +64,9 @@ function record(name, passed, detail) {
   console.error(`${passed ? "ok  " : "FAIL"} ${name}${detail === undefined ? "" : ` :: ${JSON.stringify(detail).slice(0, 400)}`}`);
 }
 
-async function call(name, args, timeout = 180_000) {
-  return await client.callTool({ name, arguments: args }, undefined, { timeout, maxTotalTimeout: timeout });
+async function call(name, args, requestOptions = {}) {
+  return await client.callTool({ name, arguments: args }, undefined,
+    { timeout: 180_000, maxTotalTimeout: 180_000, ...requestOptions });
 }
 
 function text(result) {
@@ -67,11 +80,11 @@ async function approve(toolName, action, parameters) {
 }
 
 // One approved run; returns the plugin's response object (structuredContent.result).
-async function run(parameters) {
-  let response = await call("civil3d_run_code", parameters);
+async function run(parameters, requestOptions) {
+  let response = await call("civil3d_run_code", parameters, requestOptions);
   if (response.isError && /approval required/i.test(text(response))) {
     const approvalToken = await approve("civil3d_run_code", "run", parameters);
-    response = await call("civil3d_run_code", { ...parameters, approvalToken });
+    response = await call("civil3d_run_code", { ...parameters, approvalToken }, requestOptions);
   }
   if (response.isError) throw new Error(`civil3d_run_code failed: ${text(response)}`);
   return response.structuredContent.result;
@@ -115,6 +128,9 @@ async function check(name, fn) {
 
 try {
   await client.connect(transport);
+  const health = await call("civil3d_health", {});
+  if (health.isError) throw new Error(`civil3d_health failed: ${text(health)}`);
+  const runCodeApi = health.structuredContent?.result?.runCodeApi ?? 1;
   const tools = await client.listTools();
   const tool = tools.tools.find((item) => item.name === "civil3d_run_code");
   record("the server lists civil3d_run_code as destructive", Boolean(tool && tool.annotations?.destructiveHint === true));
@@ -124,6 +140,171 @@ try {
   record("read: basic run returns the active drawing", info.status === "ok" && drawingName.length > 0, { drawing: drawingName, timing: info.timing });
   if (expectDrawing && !drawingName.toLowerCase().includes(expectDrawing.toLowerCase())) {
     throw new Error(`Active drawing '${drawingName}' does not contain '${expectDrawing}'; stopping before any write.`);
+  }
+
+  if (runCodeApi < 3) {
+    await check("skew guard: copyOutputsTo refused by an older plugin", async () => {
+      const parameters = { code: "return 1;", copyOutputsTo: join(tmpdir(), `run-code-skew-${process.pid}`) };
+      const approvalToken = approvalMode === "token" ? await approve("civil3d_run_code", "run", parameters) : undefined;
+      const response = await call("civil3d_run_code", { ...parameters, ...(approvalToken ? { approvalToken } : {}) });
+      record("skew guard: copyOutputsTo refused by an older plugin",
+        response.isError === true && /older than this server/i.test(text(response)) && /nothing ran/i.test(text(response)),
+        { runCodeApi, response: text(response).slice(0, 240) });
+    });
+    record("PR 2 checks: skipped (plugin runCodeApi below 3)", true, { runCodeApi });
+  } else {
+    await check("PR 2: codePath/argsPath strips BOM and hashes script", async () => {
+      const folder = mkdtempSync(join(tmpdir(), "run-code-files-"));
+      try {
+        const code = "return (string)Args[\"echo\"]!;";
+        const codePath = join(folder, "script.cs");
+        const argsPath = join(folder, "args.json");
+        writeFileSync(codePath, `\uFEFF${code}`, "utf8");
+        writeFileSync(argsPath, JSON.stringify({ echo: "pr2-file-arg" }), "utf8");
+        const response = await run({ codePath, argsPath });
+        const hash = createHash("sha256").update(code, "utf8").digest("hex");
+        record("PR 2: codePath/argsPath strips BOM and hashes script",
+          response.status === "ok" && response.result === "pr2-file-arg" && response.scriptSha256 === hash,
+          { status: response.status, result: response.result, scriptSha256: response.scriptSha256, expected: hash });
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    });
+
+    await check("PR 2: copyOutputsTo copies WriteFile output", async () => {
+      const folder = mkdtempSync(join(tmpdir(), "run-code-copy-"));
+      try {
+        const target = join(folder, "outputs");
+        const output = join(target, "pr2-out.txt");
+        const response = await run({ code: "return WriteFile(\"pr2-out.txt\", \"x\");", copyOutputsTo: target });
+        record("PR 2: copyOutputsTo copies WriteFile output",
+          response.status === "ok" && existsSync(output) && readFileSync(output, "utf8") === "x"
+            && (response.copiedFiles ?? []).some((file) => resolve(file) === resolve(output)),
+          { status: response.status, copiedFiles: response.copiedFiles, logFolder: response.logFolder });
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    });
+
+    await check("PR 2: keepOutputs:false leaves only script.cs and run.json", async () => {
+      const folder = mkdtempSync(join(tmpdir(), "run-code-move-"));
+      try {
+        const target = join(folder, "outputs");
+        const output = join(target, "pr2-out.txt");
+        const response = await run({ code: "return WriteFile(\"pr2-out.txt\", \"x\");", copyOutputsTo: target, keepOutputs: false });
+        const remaining = response.logFolder && existsSync(response.logFolder) ? readdirSync(response.logFolder).sort() : [];
+        record("PR 2: keepOutputs:false leaves only script.cs and run.json",
+          response.status === "ok" && existsSync(output) && readFileSync(output, "utf8") === "x"
+            && (response.copiedFiles ?? []).some((file) => resolve(file) === resolve(output))
+            && JSON.stringify(remaining) === JSON.stringify(["run.json", "script.cs"]),
+          { status: response.status, copiedFiles: response.copiedFiles, remaining });
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    });
+
+    await check("PR 2: write timeout of 91 seconds is refused before running", async () => {
+      const response = await call("civil3d_run_code", { code: "return 1;", mode: "write", timeoutSeconds: 91 });
+      record("PR 2: write timeout of 91 seconds is refused before running",
+        response.isError === true && /Write runs are limited to 90 seconds/i.test(text(response)), text(response).slice(0, 240));
+    });
+
+    if (longSeconds === undefined) {
+      record("PR 2: long read skipped (no --long)", true);
+    } else {
+      await check("PR 2: long read and MCP progress", async () => {
+        const progress = [];
+        const response = await run({
+          mode: "read", timeoutSeconds: longSeconds,
+          code: `while (Elapsed.TotalSeconds < ${longSeconds} - 5) { Check(); System.Threading.Thread.Sleep(250); } return Elapsed.TotalSeconds;`,
+        }, {
+          onprogress: (notification) => progress.push(notification),
+          resetTimeoutOnProgress: true,
+          timeout: 60_000,
+          maxTotalTimeout: (longSeconds + 120) * 1000,
+        });
+        record("PR 2: long read and MCP progress",
+          response.status === "ok" && typeof response.result === "number"
+            && response.result >= longSeconds - 6 && progress.length >= Math.floor(longSeconds / 15) - 2,
+          { status: response.status, elapsed: response.result, notifications: progress.length, timeoutSeconds: longSeconds });
+      });
+    }
+
+    if (damagedDir === undefined) {
+      record("PR 2: damaged drawings skipped (no --damaged)", true);
+    } else {
+      await check("PR 2: OpenSideOrNull reports every failed drawing", async () => {
+        const paths = readdirSync(damagedDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && /\.dwg$/i.test(entry.name))
+          .map((entry) => resolve(damagedDir, entry.name));
+        if (paths.length === 0) throw new Error(`No .dwg files in ${damagedDir}`);
+        paths.push(join(resolve(damagedDir), `missing-pr2-${process.pid}.dwg`), drawingName);
+        const response = await run({
+          args: { paths },
+          code: [
+            "var opened = new List<object>();",
+            "foreach (var node in Args[\"paths\"]!.AsArray())",
+            "{",
+            "  var path = (string)node!;",
+            "  var side = OpenSideOrNull(path);",
+            "  opened.Add(new { path, opened = side != null });",
+            "}",
+            "return opened;",
+          ].join("\n"),
+        });
+        const outcomes = response.result ?? [];
+        const failed = Array.isArray(outcomes) ? outcomes.filter((item) => !item.opened) : [];
+        record("PR 2: OpenSideOrNull reports every failed drawing",
+          response.status === "ok" && Array.isArray(outcomes) && outcomes.length === paths.length
+            && outcomes.some((item) => item.opened) && failed.length > 0
+            && failed.every((item) => (response.sideErrors ?? []).some((error) => error.path === item.path && "errorStatus" in error)),
+          { status: response.status, outcomes, sideErrors: response.sideErrors });
+      });
+    }
+
+    await check("PR 2: Try records one error and continues", async () => {
+      const response = await run({ code: [
+        "var done = new List<int>();",
+        "for (var i = 0; i < 3; i++)",
+        "  Try($\"item-{i}\", () => { if (i == 1) throw new InvalidOperationException(\"middle\"); done.Add(i); });",
+        "return done;",
+      ].join("\n") });
+      record("PR 2: Try records one error and continues",
+        response.status === "ok" && JSON.stringify(response.result) === "[0,2]"
+          && response.tryErrors?.length === 1 && response.tryErrors[0].label === "item-1",
+        { status: response.status, result: response.result, tryErrors: response.tryErrors });
+    });
+
+    await check("PR 2: ById resolves a handle and rejects an unknown one", async () => {
+      const known = await run({ code: "return ById(Db.BlockTableId.Handle.ToString()) == Db.BlockTableId;" });
+      const missing = await run({ code: "return ById(\"FFFFFFFF\") == ObjectId.Null;" });
+      record("PR 2: ById resolves a handle and rejects an unknown one",
+        known.status === "ok" && known.result === true && missing.status === "runtime_error"
+          && /Object handle FFFFFFFF was not found or is erased/.test(missing.error?.message ?? ""),
+        { known: known.result, missing: missing.status, error: missing.error?.message });
+    });
+
+    await check("PR 2: PaperSpace lists layouts for an unknown name", async () => {
+      // The unknown name lists the drawing's layouts; the first listed one must then work.
+      const missing = await run({ code: "return PaperSpace(\"RUNCODE-SMOKE-NO-LAYOUT\").Count();" });
+      const first = (/Available layouts:s*([^,.]+)/i.exec(missing.error?.message ?? "") ?? [])[1]?.trim();
+      const known = first ? await run({ code: "return PaperSpace((string)Args[\"layout\"]).Count();", args: { layout: first } }) : { status: "skipped" };
+      record("PR 2: PaperSpace lists layouts for an unknown name",
+        known.status === "ok" && typeof known.result === "number" && missing.status === "runtime_error" && Boolean(first),
+        { known: known.status, count: known.result, missing: missing.error?.message });
+    });
+
+    await check("PR 2: plugin-internal CivilExecution call is rejected", async () => {
+      const response = await run({ code: "Civil3DMcpPlugin.CivilExecution.QueueCommandLine(\"x\"); return 1;" });
+      record("PR 2: plugin-internal CivilExecution call is rejected", response.status === "rejected",
+        { status: response.status, errors: response.errors });
+    });
+
+    await check("PR 2: EnsureLayer is rejected in read mode", async () => {
+      const response = await run({ code: "return EnsureLayer(\"RUNCODE-SMOKE-LAYER\", 1).Handle.ToString();" });
+      record("PR 2: EnsureLayer is rejected in read mode", response.status === "rejected",
+        { status: response.status, errors: response.errors });
+    });
   }
 
   const noTokenName = approvalMode === "client"
@@ -307,6 +488,57 @@ try {
   }
 
   if (writesAllowed) {
+  if (runCodeApi >= 3) {
+    await check("PR 2 write: EnsureLayer twice returns the same handle", async () => {
+      const response = await run({ mode: "write", code: [
+        "var first = EnsureLayer(\"RUNCODE-SMOKE-LAYER\", 1);",
+        "var second = EnsureLayer(\"RUNCODE-SMOKE-LAYER\", 1);",
+        "return new { first = first.Handle.ToString(), second = second.Handle.ToString() };",
+      ].join("\n") });
+      record("PR 2 write: EnsureLayer twice returns the same handle",
+        response.status === "ok" && response.result?.first === response.result?.second
+          && /^[0-9A-F]+$/i.test(response.result?.first ?? ""),
+        { status: response.status, result: response.result, error: response.error });
+    });
+
+    const cleanupTagged = [
+      "foreach (var entity in Tagged<Entity>(\"RUNCODE-SMOKE-PR2\").ToList())",
+      "  Open<Entity>(entity.ObjectId, forWrite: true).Erase();",
+      "return 1;",
+    ].join("\n");
+    try {
+      await check("PR 2 write: Tag/Tagged rerun leaves three texts", async () => {
+        const script = [
+          "foreach (var entity in Tagged<Entity>(\"RUNCODE-SMOKE-PR2\").ToList())",
+          "  Open<Entity>(entity.ObjectId, forWrite: true).Erase();",
+          "var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), forWrite: true);",
+          "for (var i = 0; i < 3; i++)",
+          "{",
+          "  var item = new DBText { TextString = $\"RUNCODE-SMOKE-PR2-{i}\", Position = new Point3d(-1e6 - i * 10, -1e6, 0), Height = 1 };",
+          "  ms.AppendEntity(item);",
+          "  Tr.AddNewlyCreatedDBObject(item, true);",
+          "  Tag(item, \"RUNCODE-SMOKE-PR2\");",
+          "}",
+          "return Tagged<Entity>(\"RUNCODE-SMOKE-PR2\").Count();",
+        ].join("\n");
+        const first = await run({ mode: "write", code: script });
+        const second = await run({ mode: "write", code: script });
+        const after = await run({ code: "return Tagged<Entity>(\"RUNCODE-SMOKE-PR2\").Count();" });
+        record("PR 2 write: Tag/Tagged rerun leaves three texts",
+          first.status === "ok" && first.result === 3 && second.status === "ok" && second.result === 3
+            && after.status === "ok" && after.result === 3,
+          { first: first.status, firstCount: first.result, second: second.status, secondCount: second.result, after: after.result });
+      });
+    } finally {
+      await check("PR 2 write: final tagged-text cleanup", async () => {
+        const cleanup = await run({ mode: "write", code: cleanupTagged });
+        const after = await run({ code: "return Tagged<Entity>(\"RUNCODE-SMOKE-PR2\").Count();" });
+        record("PR 2 write: final tagged-text cleanup",
+          cleanup.status === "ok" && after.status === "ok" && after.result === 0,
+          { cleanup: cleanup.status, after: after.result, error: cleanup.error });
+      });
+    }
+  }
   await check("write: adds an object, one undo removes it", async () => {
     const add = await run({
       mode: "write",

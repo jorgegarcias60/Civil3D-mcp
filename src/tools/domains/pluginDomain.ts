@@ -6,6 +6,7 @@ const HealthResponseSchema = z.object({
   connected: z.boolean(),
   civil3dVersion: z.string().optional(),
   pluginVersion: z.string().optional(),
+  runCodeApi: z.number().optional(),
   drawingLoaded: z.boolean(),
   operationInProgress: z.boolean(),
   currentOperation: z.string().nullable(),

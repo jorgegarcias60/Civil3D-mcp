@@ -30,11 +30,12 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class RunCodeCommands
 {
+  internal const int ApiVersion = 3;
   private const int MaxCodeChars = 200_000;
   private const int DefaultTimeoutSeconds = 30;
-  // Below an older MCP server's fixed 120 s command timeout, with room for
-  // compiling and queueing (newer servers wait for the start window too).
-  private const int MaxTimeoutSeconds = 90;
+  // Reads may take ten minutes and keep Civil 3D's UI busy. Writes stay short.
+  private const int MaxReadTimeoutSeconds = 600;
+  private const int MaxWriteTimeoutSeconds = 90;
   private const int MaxStartWithinSeconds = 300;
   private const int DefaultMaxInlineBytes = 64 * 1024;
   private const int MinInlineBytes = 1024;
@@ -93,9 +94,10 @@ public static class RunCodeCommands
 
     var writeMode = mode == "write";
     var timeoutSeconds = PluginRuntime.GetOptionalInt(parameters, "timeoutSeconds") ?? DefaultTimeoutSeconds;
-    if (timeoutSeconds < 1 || timeoutSeconds > MaxTimeoutSeconds)
+    var maxTimeoutSeconds = writeMode ? MaxWriteTimeoutSeconds : MaxReadTimeoutSeconds;
+    if (timeoutSeconds < 1 || timeoutSeconds > maxTimeoutSeconds)
     {
-      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"'timeoutSeconds' must be 1 to {MaxTimeoutSeconds}.");
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"'timeoutSeconds' must be 1 to {maxTimeoutSeconds} for mode '{mode}'.");
     }
 
     // The script starts within this many seconds of the request or not at all
@@ -121,6 +123,30 @@ public static class RunCodeCommands
       _ => throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'args' must be a JSON object."),
     };
 
+    var codePath = OptionalAuditString(parameters, "codePath");
+    var argsPath = OptionalAuditString(parameters, "argsPath");
+    var approval = OptionalAuditString(parameters, "approval");
+    var copyOutputsTo = OptionalAuditString(parameters, "copyOutputsTo");
+    if (copyOutputsTo != null)
+    {
+      try
+      {
+        copyOutputsTo = RunCodeLog.ValidateCopyDestination(copyOutputsTo);
+      }
+      catch (ArgumentException exception)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", exception.Message);
+      }
+    }
+    var keepOutputs = parameters?.ContainsKey("keepOutputs") == true
+      ? parameters["keepOutputs"] is JsonValue keepValue && keepValue.TryGetValue<bool>(out var keep)
+        ? keep
+        : throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'keepOutputs' must be a boolean.")
+      : true;
+    if (!keepOutputs && copyOutputsTo == null)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'keepOutputs: false' requires 'copyOutputsTo'.");
+    var scriptSha256 = RunCodeHelpers.Sha256Hex(code);
+
     // Log the script before anything runs, so it is on disk even if Civil 3D hangs.
     var runId = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}";
     var runFolder = RunCodeLog.CreateRunFolder(runId);
@@ -133,8 +159,14 @@ public static class RunCodeCommands
       ["timeoutSeconds"] = timeoutSeconds,
       ["startWithinSeconds"] = startWithinSeconds,
       ["args"] = args.DeepClone(),
+      ["scriptSha256"] = scriptSha256,
+      ["keepOutputs"] = keepOutputs,
       ["status"] = "started",
     };
+    if (codePath != null) summary["codePath"] = codePath;
+    if (argsPath != null) summary["argsPath"] = argsPath;
+    if (approval != null) summary["approval"] = approval;
+    if (copyOutputsTo != null) summary["copyOutputsTo"] = copyOutputsTo;
     RunCodeLog.WriteSummary(runFolder, summary);
     PluginLog.Info("RunCode", $"Run {runId} ({mode}, {timeoutSeconds} s budget) started; script saved in {runFolder}.");
     if (Interlocked.Exchange(ref _pruned, 1) == 0)
@@ -146,6 +178,7 @@ public static class RunCodeCommands
     {
       ["runId"] = runId,
       ["mode"] = mode,
+      ["scriptSha256"] = scriptSha256,
       ["status"] = "started",
     };
     var warnings = new JsonArray();
@@ -220,6 +253,7 @@ public static class RunCodeCommands
 
       AddOutput(response, warnings, outcome, runFolder, maxInlineBytes);
       AddResult(response, outcome, runFolder, maxInlineBytes);
+      AddScriptReports(response, warnings, outcome);
       if (status == "ok" && outcome.RunMs > timeoutSeconds * 1000L)
       {
         warnings.Add($"The script ran {outcome.RunMs / 1000.0:0.0} s, past its {timeoutSeconds} s budget: call Check() in long loops so the budget can stop it.");
@@ -236,6 +270,13 @@ public static class RunCodeCommands
       catch (Exception exception)
       {
         warnings.Add($"The files the script wrote could not be listed ({exception.Message}); see {runFolder}.");
+      }
+
+      if (outcome.Script != null && copyOutputsTo != null)
+      {
+        var copied = RunCodeLog.CopyOutputs(runFolder, copyOutputsTo, removeCopied: !keepOutputs && status == "ok");
+        response["copiedFiles"] = new JsonArray(copied.Copied.Select(path => (JsonNode)JsonValue.Create(path)!).ToArray());
+        foreach (var warning in copied.Warnings) warnings.Add(warning);
       }
 
       return response;
@@ -306,7 +347,7 @@ public static class RunCodeCommands
       {
         summary["note"] = "The request ended while the script was still running; a write is rolled back when it returns.";
       }
-      foreach (var key in new[] { "errors", "error", "resultShape", "resultBytes", "resultFile", "outputFile", "files" })
+      foreach (var key in new[] { "errors", "error", "resultShape", "resultBytes", "resultFile", "outputFile", "files", "copiedFiles", "sideErrors", "tryErrors", "warnings" })
       {
         if (response[key] != null)
         {
@@ -317,6 +358,36 @@ public static class RunCodeCommands
       RunCodeLog.WriteSummary(runFolder, summary);
       PluginLog.Info("RunCode", $"Run {runId} {status} in {total.ElapsedMilliseconds} ms (compile {compileMs} ms, run {outcome.RunMs} ms){(outcome.Drawing != null ? $" on {outcome.Drawing}" : string.Empty)}.");
     }
+  }
+
+  private static string? OptionalAuditString(JsonObject? parameters, string name)
+  {
+    if (parameters?.ContainsKey(name) != true) return null;
+    return parameters[name] is JsonValue value && value.TryGetValue<string>(out var text)
+      ? text
+      : throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"'{name}' must be a string.");
+  }
+
+  private static void AddScriptReports(JsonObject response, JsonArray warnings, RunOutcome outcome)
+  {
+    if (outcome.Script == null) return;
+    var sideErrors = outcome.Script.SideErrors;
+    var tryErrors = outcome.Script.TryErrors;
+    response["sideErrors"] = new JsonArray(sideErrors.Select(error => (JsonNode)new JsonObject
+    {
+      ["path"] = error.Path,
+      ["errorStatus"] = error.ErrorStatus,
+      ["message"] = error.Message,
+    }).ToArray());
+    response["tryErrors"] = new JsonArray(tryErrors.Select(error => (JsonNode)new JsonObject
+    {
+      ["label"] = error.Label,
+      ["type"] = error.Type,
+      ["message"] = error.Message,
+      ["line"] = error.Line,
+    }).ToArray());
+    if (sideErrors.Count > 0 || tryErrors.Count > 0)
+      warnings.Add($"The script reported {sideErrors.Count} side drawing error(s) and {tryErrors.Count} Try error(s) (each list keeps at most 200 entries).");
   }
 
   // Runs the script on the host's main thread through the plugin's usual

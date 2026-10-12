@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json.Nodes;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Colors;
 using Autodesk.Civil.ApplicationServices;
 using AcRuntimeException = Autodesk.AutoCAD.Runtime.Exception;
 
@@ -14,8 +16,12 @@ namespace Civil3DMcpPlugin;
 /// Base class of every runCode script (civil3d_run_code). The snippet becomes
 /// the body of <see cref="Run"/>, so these members are in scope by name:
 /// Doc, Db, Ed, Civil, Tr, Args, Log(...), Check(), Open&lt;T&gt;(id),
-/// ModelSpace&lt;T&gt;(), OpenSide(path), TransactionFor(db), WriteFile(...),
-/// RunFolder, Session.
+/// ModelSpace&lt;T&gt;(), PaperSpace&lt;T&gt;(layout), OpenSide(path),
+/// OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, ById(handle),
+/// EnsureLayer(...), Tag(...), TagValue(...), Tagged&lt;T&gt;(...),
+/// TransactionFor(db), WriteFile(...), RunFolder, Session.
+/// EnsureLayer and Tag need write mode. SideErrors and TryErrors keep at most
+/// 200 entries each; timeout and cancellation are never swallowed.
 ///
 /// The script runs on Civil 3D's main thread and cannot be stopped from
 /// outside: call Check() in long loops (ModelSpace() does it for every entity)
@@ -23,6 +29,9 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public abstract class RunCodeScript
 {
+  public sealed record RunCodeSideError(string Path, string? ErrorStatus, string Message);
+  public sealed record RunCodeTryError(string Label, string Type, string Message, int? Line);
+
   private const int MaxOutputChars = 4 * 1024 * 1024;
 
   private readonly StringBuilder _output = new();
@@ -38,6 +47,18 @@ public abstract class RunCodeScript
   // A script may point HostApplicationServices.WorkingDatabase at a side
   // database; it is set back before side databases are disposed.
   private Database? _savedWorkingDatabase;
+
+  private readonly List<RunCodeSideError> _sideErrors = new();
+  private readonly List<RunCodeTryError> _tryErrors = new();
+  // A cancelled request can collect reports while the main thread still runs.
+  public IReadOnlyList<RunCodeSideError> SideErrors
+  {
+    get { lock (_outputLock) return _sideErrors.ToArray(); }
+  }
+  public IReadOnlyList<RunCodeTryError> TryErrors
+  {
+    get { lock (_outputLock) return _tryErrors.ToArray(); }
+  }
 
   /// <summary>
   /// Kept across runs until Civil 3D closes: cache plain data between runs
@@ -226,26 +247,23 @@ public abstract class RunCodeScript
       throw new FileNotFoundException($"Drawing not found: {fullPath}", fullPath);
     }
 
-    var side = new Database(false, true);
+    Database side;
     try
+    {
+      side = ReadSideOnce(fullPath, FileOpenMode.OpenForReadAndAllShare);
+    }
+    catch (Exception first) when (first is not RunCodeTimeoutException and not OperationCanceledException
+      && !RunCodeHelpers.IsDrawingContentError((first as AcRuntimeException)?.ErrorStatus.ToString()))
     {
       try
       {
-        side.ReadDwgFile(fullPath, FileOpenMode.OpenForReadAndAllShare, true, string.Empty);
+        side = ReadSideOnce(fullPath, FileOpenMode.OpenTryForReadShare);
       }
-      catch (AcRuntimeException)
+      catch
       {
-        // A drawing open in this session is write-locked; fall back to the
-        // most permissive read share AutoCAD offers.
-        side.ReadDwgFile(fullPath, FileOpenMode.OpenTryForReadShare, true, string.Empty);
+        ExceptionDispatchInfo.Capture(first).Throw();
+        throw;
       }
-
-      side.CloseInput(true);
-    }
-    catch
-    {
-      side.Dispose();
-      throw;
     }
 
     // The owning wrapper, freed by ReleaseOwned after the transaction that
@@ -266,6 +284,22 @@ public abstract class RunCodeScript
     return alias;
   }
 
+  private static Database ReadSideOnce(string path, FileOpenMode mode)
+  {
+    var side = new Database(false, true);
+    try
+    {
+      side.ReadDwgFile(path, mode, true, string.Empty);
+      side.CloseInput(true);
+      return side;
+    }
+    catch
+    {
+      side.Dispose();
+      throw;
+    }
+  }
+
   /// <summary>The run's transaction for the drawing (Tr) or for a database from OpenSide.</summary>
   public Transaction TransactionFor(Database db)
   {
@@ -280,6 +314,186 @@ public abstract class RunCodeScript
       ? transaction
       : throw new InvalidOperationException("That database has no transaction in this run: use Db or a database returned by OpenSide.");
   }
+
+  /// <summary>Opens a side drawing, recording an error and returning null if it cannot be read.</summary>
+  public Database? OpenSideOrNull(string path)
+  {
+    try { return OpenSide(path); }
+    catch (Exception error) when (error is not RunCodeTimeoutException and not OperationCanceledException)
+    {
+      lock (_outputLock)
+      {
+        if (_sideErrors.Count < 200)
+          _sideErrors.Add(new RunCodeSideError(path, (error as AcRuntimeException)?.ErrorStatus.ToString(), error.Message));
+      }
+      Log($"Side drawing {path}: {error.Message}");
+      return null;
+    }
+  }
+
+  /// <summary>Runs a recoverable step and records its failure. Timeouts and cancellation always escape.</summary>
+  public bool Try(string label, Action action)
+  {
+    try { Check(); action(); Check(); return true; }
+    catch (Exception error) when (error is not RunCodeTimeoutException and not OperationCanceledException)
+    {
+      RecordTryError(label, error);
+      return false;
+    }
+  }
+
+  public T? Try<T>(string label, Func<T> action)
+  {
+    try { Check(); var result = action(); Check(); return result; }
+    catch (Exception error) when (error is not RunCodeTimeoutException and not OperationCanceledException)
+    {
+      RecordTryError(label, error);
+      return default;
+    }
+  }
+
+  private void RecordTryError(string label, Exception error)
+  {
+    var line = ScriptCompiler.FindScriptLine(error.ToString());
+    lock (_outputLock)
+    {
+      if (_tryErrors.Count < 200)
+        _tryErrors.Add(new RunCodeTryError(label, error.GetType().Name, error.Message, line));
+    }
+    Log($"{label}: {error.GetType().Name}: {error.Message}{(line == null ? string.Empty : $" (line {line})")}");
+  }
+
+  /// <summary>Finds an existing object by hexadecimal handle, without creating one.</summary>
+  public ObjectId ById(string hex, Database? db = null)
+  {
+    db ??= Db;
+    TransactionFor(db);
+    var handle = new Handle(RunCodeHelpers.ParseHandle(hex));
+    if (!db.TryGetObjectId(handle, out var id) || id.IsNull || id.IsErased)
+      throw new KeyNotFoundException($"Object handle {hex} was not found or is erased.");
+    return id;
+  }
+
+  /// <summary>Creates a layer when missing; existing layers keep their properties.</summary>
+  public ObjectId EnsureLayer(string name, short? colorIndex = null, string? linetype = null, Database? db = null)
+  {
+    if (!WriteMode) throw new InvalidOperationException("EnsureLayer needs mode 'write'.");
+    db ??= Db;
+    var tx = TransactionFor(db);
+    var layers = (LayerTable)tx.GetObject(db.LayerTableId, OpenMode.ForRead);
+    if (layers.Has(name)) return layers[name];
+    var layer = new LayerTableRecord { Name = name };
+    if (colorIndex.HasValue)
+    {
+      if (colorIndex.Value is < 1 or > 255) throw new ArgumentOutOfRangeException(nameof(colorIndex), "ACI color must be between 1 and 255.");
+      layer.Color = Color.FromColorIndex(ColorMethod.ByAci, colorIndex.Value);
+    }
+    if (linetype != null)
+    {
+      var types = (LinetypeTable)tx.GetObject(db.LinetypeTableId, OpenMode.ForRead);
+      if (!types.Has(linetype)) throw new KeyNotFoundException($"Linetype '{linetype}' was not found.");
+      layer.LinetypeObjectId = types[linetype];
+    }
+    layers.UpgradeOpen();
+    var id = layers.Add(layer);
+    tx.AddNewlyCreatedDBObject(layer, true);
+    return id;
+  }
+
+  /// <summary>Sets an application's XData string on an object opened for write; null stores an empty string.</summary>
+  public void Tag(DBObject obj, string app, string? value = null)
+  {
+    if (!WriteMode) throw new InvalidOperationException("Tag needs mode 'write'.");
+    if (obj == null) throw new ArgumentNullException(nameof(obj));
+    var tx = TransactionFor(obj.Database);
+    var apps = (RegAppTable)tx.GetObject(obj.Database.RegAppTableId, OpenMode.ForRead);
+    if (!apps.Has(app))
+    {
+      apps.UpgradeOpen();
+      var record = new RegAppTableRecord { Name = app };
+      apps.Add(record);
+      tx.AddNewlyCreatedDBObject(record, true);
+    }
+    if (!obj.IsWriteEnabled) obj.UpgradeOpen();
+    var data = new ResultBuffer(new TypedValue((int)DxfCode.ExtendedDataRegAppName, app),
+      new TypedValue((int)DxfCode.ExtendedDataAsciiString, value ?? ""));
+    using (data) obj.XData = data;
+  }
+
+  /// <summary>Returns the tag's string (including an empty string), or null when no string tag exists.</summary>
+  public string? TagValue(DBObject obj, string app)
+  {
+    TransactionFor(obj.Database);
+    using var data = obj.GetXDataForApplication(app);
+    if (data == null) return null;
+    foreach (var item in data.AsArray())
+      if (item.TypeCode == (int)DxfCode.ExtendedDataAsciiString) return item.Value as string;
+    return null;
+  }
+
+  public IEnumerable<Autodesk.AutoCAD.DatabaseServices.Entity> ModelSpace(Database? db = null) =>
+    ModelSpace<Autodesk.AutoCAD.DatabaseServices.Entity>(db);
+
+  /// <summary>Finds tagged entities in model and paper space; null matches any value.</summary>
+  public IEnumerable<T> Tagged<T>(string app, string? value = null, Database? db = null)
+    where T : Autodesk.AutoCAD.DatabaseServices.Entity
+  {
+    db ??= Db;
+    foreach (var entity in ModelSpace<T>(db))
+      if (HasTag(entity, app, value)) yield return entity;
+    foreach (var name in LayoutNames(db))
+      foreach (var entity in PaperSpace<T>(name, db))
+        if (HasTag(entity, app, value)) yield return entity;
+  }
+
+  private bool HasTag(DBObject obj, string app, string? value)
+  {
+    using var data = obj.GetXDataForApplication(app);
+    return data != null && (value == null || TagValue(obj, app) == value);
+  }
+
+  public IEnumerable<Autodesk.AutoCAD.DatabaseServices.Entity> Tagged(string app, string? value = null, Database? db = null) =>
+    Tagged<Autodesk.AutoCAD.DatabaseServices.Entity>(app, value, db);
+
+  private IEnumerable<string> LayoutNames(Database db)
+  {
+    var tx = TransactionFor(db);
+    var layouts = (DBDictionary)tx.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+    foreach (DBDictionaryEntry entry in layouts)
+    {
+      Check();
+      var layout = (Layout)tx.GetObject(entry.Value, OpenMode.ForRead);
+      if (!layout.ModelType) yield return layout.LayoutName;
+    }
+  }
+
+  public IEnumerable<T> PaperSpace<T>(string layoutName, Database? db = null)
+    where T : Autodesk.AutoCAD.DatabaseServices.Entity
+  {
+    db ??= Db;
+    var tx = TransactionFor(db);
+    var layouts = (DBDictionary)tx.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+    var available = new List<string>();
+    ObjectId blockId = ObjectId.Null;
+    foreach (DBDictionaryEntry entry in layouts)
+    {
+      Check();
+      var layout = (Layout)tx.GetObject(entry.Value, OpenMode.ForRead);
+      if (layout.ModelType) continue;
+      available.Add(layout.LayoutName);
+      if (string.Equals(layout.LayoutName, layoutName, StringComparison.OrdinalIgnoreCase)) blockId = layout.BlockTableRecordId;
+    }
+    if (blockId.IsNull) throw new KeyNotFoundException($"Layout '{layoutName}' was not found. Available layouts: {string.Join(", ", available)}.");
+    var block = (BlockTableRecord)tx.GetObject(blockId, OpenMode.ForRead);
+    foreach (ObjectId id in block)
+    {
+      Check();
+      if (tx.GetObject(id, OpenMode.ForRead) is T entity) yield return entity;
+    }
+  }
+
+  public IEnumerable<Autodesk.AutoCAD.DatabaseServices.Entity> PaperSpace(string layoutName, Database? db = null) =>
+    PaperSpace<Autodesk.AutoCAD.DatabaseServices.Entity>(layoutName, db);
 
   /// <summary>Writes a text file into RunFolder (a file name, no folders) and returns its full path.</summary>
   public string WriteFile(string fileName, string contents) => RunCodeLog.WriteScriptFile(RunFolder, fileName, contents, null);

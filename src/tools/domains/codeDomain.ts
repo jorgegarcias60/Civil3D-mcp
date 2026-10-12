@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, win32 } from "node:path";
 import { withApplicationConnection } from "../../utils/ConnectionManager.js";
 import { readPluginToken } from "../../utils/pluginAuth.js";
 import { Civil3DRpcError, COMMAND_TIMEOUT_MS } from "../../utils/SocketClient.js";
@@ -14,7 +17,8 @@ import { runCodeApprovalMode } from "../approvalPolicy.js";
 // every script with a summary in its run-code log folder.
 
 export const RUN_CODE_MAX_CODE_CHARS = 200_000;
-export const RUN_CODE_MAX_TIMEOUT_SECONDS = 90;
+export const RUN_CODE_MAX_READ_TIMEOUT_SECONDS = 600;
+export const RUN_CODE_MAX_WRITE_TIMEOUT_SECONDS = 90;
 // code + args as JSON; leaves room for the envelope under the plugin's 1 MiB
 // request limit (SocketClient MAX_REQUEST_BYTES). Checked here so that
 // civil3d_request_approval refuses an oversized call before issuing a token.
@@ -26,15 +30,43 @@ export const RUN_CODE_START_WINDOW_SECONDS = 30;
 // Compile, the host hop and the reply, on top of the start window and budget.
 const RUN_CODE_REPLY_MARGIN_SECONDS = 30;
 
+const absolutePath = z.string().min(1).refine(
+  (path) => isAbsolute(path) && (process.platform !== "win32" || win32.parse(path).root.length > 1),
+  "Path must be absolute.",
+);
+
+function checkPayloadSize(code: string, args: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify({ code, args }), "utf8");
+}
+
 export const RunCodeArgsSchema = z.object({
   action: z.literal("run"),
-  code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS),
+  code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS).optional(),
+  codePath: absolutePath.optional(),
   mode: z.enum(["read", "write"]).optional(),
-  timeoutSeconds: z.number().int().min(1).max(RUN_CODE_MAX_TIMEOUT_SECONDS).optional(),
+  timeoutSeconds: z.number().int().min(1).optional(),
   maxInlineBytes: z.number().int().min(1024).max(1024 * 1024).optional(),
   args: z.record(z.unknown()).optional(),
+  argsPath: absolutePath.optional(),
+  copyOutputsTo: absolutePath.optional(),
+  keepOutputs: z.boolean().optional(),
 }).superRefine((value, ctx) => {
-  const bytes = Buffer.byteLength(JSON.stringify({ code: value.code, args: value.args ?? {} }), "utf8");
+  if (Boolean(value.code) === Boolean(value.codePath)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["code"], message: "Supply exactly one of code or codePath." });
+  }
+  if (value.args !== undefined && value.argsPath !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["args"], message: "Supply either args or argsPath, not both." });
+  }
+  if (value.keepOutputs === false && !value.copyOutputsTo) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["keepOutputs"], message: "keepOutputs:false requires copyOutputsTo." });
+  }
+  const limit = (value.mode ?? "read") === "write"
+    ? RUN_CODE_MAX_WRITE_TIMEOUT_SECONDS : RUN_CODE_MAX_READ_TIMEOUT_SECONDS;
+  if ((value.timeoutSeconds ?? 30) > limit) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["timeoutSeconds"], message: `${value.mode === "write" ? "Write" : "Read"} runs are limited to ${limit} seconds.` });
+  }
+  if (value.codePath || value.argsPath) return;
+  const bytes = checkPayloadSize(value.code ?? "", value.args ?? {});
   if (bytes > RUN_CODE_MAX_REQUEST_BYTES) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -44,6 +76,47 @@ export const RunCodeArgsSchema = z.object({
     });
   }
 });
+
+type RunCodeArgs = z.infer<typeof RunCodeArgsSchema>;
+
+async function readUtf8File(path: string): Promise<{ text: string; sha256: string }> {
+  const bytes = await readFile(path);
+  if (bytes.length > RUN_CODE_MAX_REQUEST_BYTES) {
+    throw new Error(`File contents are ${bytes.length} bytes as JSON; the limit is ${RUN_CODE_MAX_REQUEST_BYTES}.`);
+  }
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes).replace(/^\uFEFF/, "");
+  return { text, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+export async function prepareRunCode(args: RunCodeArgs, rawArgs: Record<string, unknown>): Promise<{ args: RunCodeArgs; approvalParameters: Record<string, unknown> }> {
+  const binding: Record<string, unknown> = {};
+  let code = args.code;
+  let values = args.args;
+  if (args.codePath) {
+    const file = await readUtf8File(args.codePath);
+    code = file.text;
+    binding.codeSha256 = file.sha256;
+  }
+  if (args.argsPath) {
+    const file = await readUtf8File(args.argsPath);
+    let parsed: unknown;
+    try { parsed = JSON.parse(file.text); }
+    catch { throw new Error("argsPath must contain a JSON object."); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("argsPath must contain a JSON object.");
+    }
+    values = parsed as Record<string, unknown>;
+    binding.argsSha256 = file.sha256;
+  }
+  if (!code || code.length > RUN_CODE_MAX_CODE_CHARS) {
+    throw new Error(`code must contain 1-${RUN_CODE_MAX_CODE_CHARS} characters.`);
+  }
+  const bytes = checkPayloadSize(code, values ?? {});
+  if (bytes > RUN_CODE_MAX_REQUEST_BYTES) {
+    throw new Error(`code and args are ${bytes} bytes as JSON; the limit is ${RUN_CODE_MAX_REQUEST_BYTES}.`);
+  }
+  return { args: { ...args, code, args: values }, approvalParameters: { ...rawArgs, ...binding } };
+}
 
 const DiagnosticSchema = z.object({
   line: z.number().int(),
@@ -68,6 +141,10 @@ export const RunCodeResponseSchema = z.object({
   resultPreview: z.string().optional(),
   resultError: z.string().optional(),
   files: z.array(z.string()).optional(),
+  copiedFiles: z.array(z.string()).optional(),
+  scriptSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  sideErrors: z.array(z.object({ path: z.string(), errorStatus: z.string().nullable().optional(), message: z.string() })).optional(),
+  tryErrors: z.array(z.object({ label: z.string(), type: z.string(), message: z.string(), line: z.number().int().nullable().optional() })).optional(),
   errors: z.array(DiagnosticSchema).optional(),
   error: z.object({
     type: z.string(),
@@ -94,6 +171,8 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
     run: {
       action: "run",
       inputSchema: RunCodeArgsSchema,
+      prepare: async (args, rawArgs) => await prepareRunCode(args as RunCodeArgs, rawArgs),
+      progressHeartbeat: true,
       responseSchema: RunCodeResponseSchema,
       // "manage" + not safe for retry: approval is required (and forced for
       // this tool even when approvals are disabled).
@@ -113,19 +192,43 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
         );
         try {
           const response = await withApplicationConnection(
-            async (appClient) => await appClient.sendCommand("runCode", {
-              code: args.code,
-              mode: args.mode ?? "read",
-              timeoutSeconds,
-              startWithinSeconds: RUN_CODE_START_WINDOW_SECONDS,
-              maxInlineBytes: args.maxInlineBytes ?? 65536,
-              args: args.args ?? {},
-              ...(authToken ? { authToken } : {}),
-            }, { timeoutMs }),
+            async (appClient) => {
+              if (args.copyOutputsTo !== undefined || args.keepOutputs !== undefined || timeoutSeconds > 90) {
+                const health = await appClient.sendCommand("getCivil3DHealth", {}) as Record<string, unknown>;
+                const api = typeof health?.runCodeApi === "number" ? health.runCodeApi : 1;
+                if (api < 3) {
+                  const parameter = args.copyOutputsTo !== undefined ? "copyOutputsTo"
+                    : args.keepOutputs !== undefined ? "keepOutputs" : "timeoutSeconds";
+                  throw new Civil3DRpcError(
+                    `The Civil 3D plugin is older than this server: ${parameter} needs runCode API 3, the loaded plugin has ${api}. Install the plugin from this build (Civil 3D closed). Nothing ran.`,
+                    "CIVIL3D.INVALID_INPUT", -32602,
+                  );
+                }
+              }
+              return await appClient.sendCommand("runCode", {
+                code: args.code,
+                ...(args.codePath ? { codePath: args.codePath } : {}),
+                ...(args.argsPath ? { argsPath: args.argsPath } : {}),
+                ...(args.copyOutputsTo !== undefined ? { copyOutputsTo: args.copyOutputsTo } : {}),
+                ...(args.keepOutputs !== undefined ? { keepOutputs: args.keepOutputs } : {}),
+                ...(context?.approval === "token" || context?.approval === "client" ? { approval: context.approval } : {}),
+                mode: args.mode ?? "read",
+                timeoutSeconds,
+                startWithinSeconds: RUN_CODE_START_WINDOW_SECONDS,
+                maxInlineBytes: args.maxInlineBytes ?? 65536,
+                args: args.args ?? {},
+                ...(authToken ? { authToken } : {}),
+              }, { timeoutMs });
+            },
           );
+          const withHash = {
+            ...response as Record<string, unknown>,
+            scriptSha256: (response as Record<string, unknown>).scriptSha256
+              ?? createHash("sha256").update(args.code ?? "", "utf8").digest("hex"),
+          };
           return context?.approval === "token" || context?.approval === "client"
-            ? { ...response as Record<string, unknown>, approvedBy: context.approval }
-            : response;
+            ? { ...withHash, approvedBy: context.approval }
+            : withHash;
         } catch (error) {
           // No answer, so no runId: the agent must not retry blindly.
           if (error instanceof Civil3DRpcError && error.code === "CIVIL3D.TIMEOUT") {
@@ -152,20 +255,24 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
           : "Always needs approval: call civil3d_request_approval with toolName civil3d_run_code, action 'run' and the same parameters, then retry with approvalToken. ") +
         "The code runs with the user's full rights. " +
         "The snippet is the body of `object Run()`: statements, local functions and leading `using` lines; `return` a value (JSON: points and vectors as [x,y,z], ObjectIds as handles, tuples as arrays, anonymous objects by property). " +
-        "In scope: Doc, Db, Ed, Civil (CivilDocument), Tr (the run's transaction), Args (the 'args' object), Log(x), Check(), Open<T>(id, forWrite), ModelSpace<T>(db) (calls Check for each entity), OpenSide(path) (another DWG as a read-only side database; the run disposes it, so no using/Dispose), TransactionFor(db), WriteFile(name, text or lines) (into the run folder), Session (a dictionary kept across runs until Civil 3D closes; plain data only). " +
+        "In scope: Doc, Db, Ed, Civil (CivilDocument), Tr (the run's transaction), Args (the 'args' object), Log(x), Check(), Open<T>(id, forWrite), ModelSpace<T>(db), PaperSpace<T>(layout, db), ById(hex, db), OpenSide(path), OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, EnsureLayer(name, colorIndex?, linetype?, db) and Tag(obj, app, value?) in write mode, TagValue and Tagged<T>(app, value?, db), TransactionFor(db), WriteFile(name, text or lines) (into the run folder), Session (a dictionary kept across runs until Civil 3D closes; plain data only). OpenSide and OpenSideOrNull return managed read-only side databases; do not dispose them. " +
         "Namespaces: System, Linq, IO, Text, Text.Json, Autodesk.AutoCAD ApplicationServices/DatabaseServices/EditorInput/Geometry/Colors, Autodesk.Civil, Civil ApplicationServices/DatabaseServices/Styles; names both AutoCAD and Civil 3D define mean AutoCAD's (DBObject, Entity, Table, Shape...; Civil 3D's are CivilDBObject, CivilEntity...), except Surface and Section, which are Civil 3D's (AcSurface, AcSection); AcException is AutoCAD's exception. " +
-        "A script cannot be stopped from outside: call Check() in long loops, which ends it when timeoutSeconds (1-90, default 30) is used up or the request is cancelled; a timeout the script catches still ends the run as a timeout. " +
+        "Civil 3D's user interface freezes during a long read and it does not answer other tool calls until the run finishes. Call Check() in long loops, which ends the run when timeoutSeconds (read 1-600, write 1-90, default 30) is used up or the request is cancelled; a timeout the script catches still ends the run as a timeout. The server sends MCP progress every 15 seconds when the client provides a progress token. " +
         "mode 'read' (default): an open-close transaction, never committed; the compiler refuses OpenMode.ForWrite, UpgradeOpen, Erase, AppendEntity, Civil 3D Create/Add/Update..., regular transactions and drawing-setting setters, including ++/-- and deconstruction (a guard against mistakes, not a sandbox). " +
         "mode 'write': runs inside a plugin command; committed as one undo step when the snippet returns, rolled back when it throws or runs out of time (only changes made through Tr are rolled back: write mode refuses open-close transactions; database or system variables, files and Session are not rolled back). Both modes refuse Editor prompts, modal windows and message loops (any ShowDialog/ShowModal, MessageBox, InputBox, Application.Run), event subscriptions, TransactionManager.TopTransaction and Tr.Commit()/Abort() (the run owns Tr: just return; `using` on Tr does nothing); a nested transaction only as `using var t = ...StartTransaction();` (write) or `...StartOpenCloseTransaction()` (read). " +
         "status is ok, compile_error or rejected (errors with snippet line numbers), runtime_error, timeout or cancelled (error with line); committed is true, false or 'unknown' (the transaction was ended some other way: check the drawing). Output or results larger than maxInlineBytes (default 64 KB) go to outputFile/resultFile with a preview. Every script and its summary are saved in logFolder. " +
-        "code plus args: about 1 MB of JSON at most; pass larger data as a file path in args. A run that cannot start within 30 s because Civil 3D is busy with other work fails with HOST_BUSY and changes nothing.";
+        "Supply code or an absolute UTF-8 codePath (at most 200k characters after BOM removal), and args or an absolute argsPath containing a JSON object. File contents count toward the 1 MB JSON limit and are bound by hash to approval. copyOutputsTo copies output files atomically to an absolute folder; keepOutputs:false requires it and removes successfully copied outputs after an ok run. script.cs and run.json stay in the log. The response includes scriptSha256, copiedFiles, sideErrors and tryErrors when available. A run that cannot start within 30 s because Civil 3D is busy with other work fails with HOST_BUSY and changes nothing.";
       },
       inputShape: {
-        code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS),
+        code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS).optional(),
+        codePath: absolutePath.optional(),
         mode: z.enum(["read", "write"]).optional(),
-        timeoutSeconds: z.number().int().min(1).max(RUN_CODE_MAX_TIMEOUT_SECONDS).optional(),
+        timeoutSeconds: z.number().int().min(1).max(RUN_CODE_MAX_READ_TIMEOUT_SECONDS).optional(),
         maxInlineBytes: z.number().int().min(1024).max(1024 * 1024).optional(),
         args: z.record(z.unknown()).optional(),
+        argsPath: absolutePath.optional(),
+        copyOutputsTo: absolutePath.optional(),
+        keepOutputs: z.boolean().optional(),
       },
       supportedActions: ["run"],
       resolveAction: (rawArgs) => ({ action: "run", args: { ...rawArgs, action: "run" } }),
