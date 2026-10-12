@@ -5,6 +5,20 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### PR #14 follow-up: file-root refusal names the variable in use (2026-10-12)
+
+`CIVIL3D.PATH_NOT_ALLOWED` now names only the variable that `LoadRoots` reads (the import or export variable when it is set, otherwise `CIVIL3D_FILE_ROOTS`) and still lists the allowed roots.
+
+| Check | Result |
+|---|---|
+| `npm run build` | ok |
+| vitest | 616 passed (50 files) |
+| `docs:check` | ok |
+| Plugin builds, net8 and net10 | 0 warnings |
+| RunCodeHarness, net8 and net10 | pass |
+| `tests/FileBoundaryHarness` (default and `--shared-roots`) | pass; both fail on the old message |
+| `install-trusted` check | 0 failures |
+
 ### PR 4 writes to another open drawing (2026-10-12)
 
 Verified in `jorgegarcias60/run-code-activate-write`, in the

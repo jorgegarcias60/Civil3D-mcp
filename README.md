@@ -1167,6 +1167,10 @@ the current user's Documents folder.
 | `CIVIL3D_IMPORT_ROOTS` | `CIVIL3D_FILE_ROOTS` | Optional import-only roots for templates, DEM files, LandXML, STM, and other source artifacts. |
 | `CIVIL3D_EXPORT_ROOTS` | `CIVIL3D_FILE_ROOTS` | Optional export-only roots for drawings and generated reports. |
 
+An import or export variable overrides `CIVIL3D_FILE_ROOTS` when non-empty.
+`CIVIL3D.PATH_NOT_ALLOWED` lists the allowed roots and names the variable in use.
+Add the folder to that variable and restart Civil 3D.
+
 Xref (`attach`, `overlay`, `repath`), data-shortcut `data_shortcut_repair`, and
 `civil3d_compare` `drawing`/`compare_snapshot` read from the import roots;
 `civil3d_compare snapshot` writes to the export roots. Import/export tools enforce operation-specific extensions. Generated text and

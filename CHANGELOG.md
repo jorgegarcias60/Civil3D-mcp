@@ -116,6 +116,8 @@
 
 ### Fixed
 
+- Path refusals (`CIVIL3D.PATH_NOT_ALLOWED`) name only the root variable in use and keep the allowed-root list (follow-up to PR #14).
+
 - `label_add` (`civil3d_standards` / `civil3d_label`):
   - Alignment `label_set` imports the named label set (it replaces the
     alignment's label groups) and returns `labelGroups`; `curves` labels every
