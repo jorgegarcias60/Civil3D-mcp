@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -50,9 +51,7 @@ public static class RunCodeCommands
     public RunCodeScript? Script;
     public string? Drawing;
     public long RunMs;
-    public byte[]? Result;
-    public string? ResultShape;
-    public string? ResultError;
+    public RunCodeResult? Result;
     // Set on the main thread when the host action has finished. False after a
     // cancelled request: the request stopped waiting, the script may still run.
     public volatile bool ActionDone;
@@ -152,7 +151,7 @@ public static class RunCodeCommands
     var scriptSha256 = RunCodeHelpers.Sha256Hex(code);
 
     // Log the script before anything runs, so it is on disk even if Civil 3D hangs.
-    var runId = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}";
+    var runId = $"{DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}-{Guid.NewGuid().ToString("N")[..8]}";
     var runFolder = RunCodeLog.CreateRunFolder(runId);
     RunCodeLog.WriteText(runFolder, RunCodeLog.ScriptFile, code);
     var summary = new JsonObject
@@ -176,7 +175,11 @@ public static class RunCodeCommands
     PluginLog.Info("RunCode", $"Run {runId} ({mode}, {timeoutSeconds} s budget) started; script saved in {runFolder}.");
     if (Interlocked.Exchange(ref _pruned, 1) == 0)
     {
-      _ = Task.Run(() => RunCodeLog.PruneOldOutputs(OutputRetention));
+      _ = Task.Run(() =>
+      {
+        RunCodeLog.PruneOldOutputs(OutputRetention);
+        RunCodeLog.PruneOldRunFolders(runFolder);
+      });
     }
 
     var response = new JsonObject
@@ -257,7 +260,7 @@ public static class RunCodeCommands
       }
 
       AddOutput(response, warnings, outcome, runFolder, maxInlineBytes);
-      AddResult(response, outcome, runFolder, maxInlineBytes);
+      outcome.Result?.AddTo(response, maxInlineBytes, PreviewChars);
       AddScriptReports(response, warnings, outcome);
       if (status == "ok" && outcome.RunMs > timeoutSeconds * 1000L)
       {
@@ -279,7 +282,8 @@ public static class RunCodeCommands
 
       if (outcome.Script != null && copyOutputsTo != null)
       {
-        var copied = RunCodeLog.CopyOutputs(runFolder, copyOutputsTo, removeCopied: !keepOutputs && status == "ok");
+        var copied = RunCodeLog.CopyOutputs(runFolder, copyOutputsTo, removeCopied: !keepOutputs && status == "ok",
+          includeResult: outcome.Result?.FilePath != null);
         response["copiedFiles"] = new JsonArray(copied.Copied.Select(path => (JsonNode)JsonValue.Create(path)!).ToArray());
         foreach (var warning in copied.Warnings) warnings.Add(warning);
       }
@@ -446,16 +450,9 @@ public static class RunCodeCommands
         {
           var value = script.Run();
           outcome.RunMs = clock.ElapsedMilliseconds;
-          // Serialize now, while the objects in the result are still open.
-          try
-          {
-            outcome.Result = RunCodeJson.Serialize(value, out var shape);
-            outcome.ResultShape = shape;
-          }
-          catch (Exception exception)
-          {
-            outcome.ResultError = exception.Message;
-          }
+          // Save now, while the objects in the result are still open. Failure
+          // becomes resultError; the script's transaction checks still run.
+          outcome.Result = RunCodeResult.Save(runFolder, stream => RunCodeJson.Serialize(stream, value));
 
           // Check() tripped, but the script caught it and returned (or a lazy
           // result timed out while being written): still a timeout or a
@@ -623,40 +620,6 @@ public static class RunCodeCommands
     }
 
     response["output"] = output[..cut] + (saved ? "\n... (cut; full output in outputFile)" : "\n... (cut)");
-  }
-
-  private static void AddResult(JsonObject response, RunOutcome outcome, string runFolder, int maxInlineBytes)
-  {
-    if (outcome.ResultError != null)
-    {
-      response["resultError"] = $"The return value could not be written as JSON: {outcome.ResultError}";
-    }
-
-    if (outcome.Result == null)
-    {
-      return;
-    }
-
-    response["resultShape"] = outcome.ResultShape;
-    response["resultBytes"] = outcome.Result.Length;
-    if (outcome.Result.Length <= maxInlineBytes)
-    {
-      response["result"] = JsonNode.Parse(outcome.Result);
-      return;
-    }
-
-    response["result"] = null;
-    try
-    {
-      response["resultFile"] = RunCodeLog.WriteBytes(runFolder, RunCodeLog.ResultFile, outcome.Result);
-    }
-    catch (Exception exception)
-    {
-      // As for the output: the run's outcome still goes back to the caller.
-      response["resultError"] = $"The return value ({outcome.Result.Length} bytes) could not be saved to a file ({exception.Message}); only the preview is shown.";
-    }
-
-    response["resultPreview"] = Encoding.UTF8.GetString(outcome.Result, 0, Math.Min(outcome.Result.Length, PreviewChars)) + "...";
   }
 
   private static JsonObject DiagnosticJson(ScriptDiagnostic diagnostic)

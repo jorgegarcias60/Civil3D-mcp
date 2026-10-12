@@ -5,9 +5,110 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Run-code hardening: issues #7, #11, #12, #24 and #25 (2026-10-12)
+
+Offline results for `jorgegarcias60/run-code-hardening`, measured outside any
+sandbox on Jorge's machine on 2026-10-12:
+
+| Check | Result |
+|---|---|
+| `npm run build` | Ok. |
+| `npx vitest run --configLoader runner --cache=false` | All passed: 622 tests in 50 files. |
+| `npm run docs:check` | Ok. |
+| Plugin Release net8.0-windows, refs-2026 | 0 warnings. |
+| Plugin Release net10.0-windows, C_References | 0 warnings. |
+| RunCodeHarness `-f net8.0` | Pass. |
+| RunCodeHarness `-f net10.0` | Pass. |
+| `tests/powershell/install-trusted.check.ps1` | 0 failures. |
+
+New tests and checks cover:
+
+- #7: startup host mapping and refusal before token reads or plugin calls.
+- #11: read-mode Database mutation guards, detached destinations, aliases, null/default definitions and ref/out exposure.
+- #12: streamed and nested-tuple results, inline limits, JSON previews, copies, confinement and serialization/file failures.
+- #24: fresh-database retries, disposal, drawing-content error filtering and preservation of the first error.
+- #25: retention settings and age boundaries, current-run and audit-file protection, confinement, filesystem links and deletion failures.
+
+#### Smoke-script stderr fix (2026-10-12)
+
+Offline follow-up in the same worktree, inside the Codex sandbox. Changes remain uncommitted. No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `node --check` on the six changed `.mjs` scripts | Exit 0 for each. |
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | 637 tests passed in 51 files. |
+| `npm run docs:check` | Exit 0; 210 entries current. |
+| Plugin Release net10, then net8 rebuilt with `--restore --ignore-failed-sources -p:NuGetAudit=false` | Both exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+
+The static check rejected all five undrained transports in the committed scripts. Buffer tests drain over 450 KB and check the 200-line limit and bounded unterminated lines. NuGet was unreachable: the first net8 plugin build and both harness runs reported NU1900 audit warnings; plugin rebuilds used cached packages with the network audit disabled. The net10 harness skipped file-symlink checks because the sandbox lacks that privilege.
+
+#### Live-check setup fixes (2026-10-12)
+
+Offline follow-up in this worktree. Existing stderr changes were preserved. No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. The other five changed smoke/helper scripts also passed `node --check`. |
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 637 tests passed in 51 files. |
+| `npm run docs:check` | Exit 0; 210 entries current. |
+| Plugin Release net8, then net10, then net8 rebuilt, each with `--restore` and the matching references | Each exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+
+Both harness runs reported NU1900 warnings because the NuGet audit service was unreachable. The net10 harness skipped two file-symlink checks because the sandbox lacks the required privilege. Plugin builds had no warnings.
+
+#### Live results
+
+Follow-up live result for PR #18, Civil 3D 2026, 2026-10-12 (run by Claude Code on scratch drawings):
+with drawing A active and B open, a write with `document` = B added one tagged
+DBText (`status: "ok"`, `committed: true`, `activated: true`, `switchedBack: true`).
+A targeted read of B then counted 1, with A still active. After activating B,
+one `UNDO 1` sent over COM removed it. A was activated again, and a targeted
+read of B counted 0. This was run twice with the same result.
+
+#### Live hardening checks
+
+Live, Civil 3D 2026, 2026-10-12, run by Claude Code on scratch drawings. The server came from this branch; the plugin was built from `civil3d-2027` plus PRs #26-#28 and installed with the new installer:
+- Full smoke, token mode: 51 passed, 1 skipped (the long read, not requested). Client mode: the same. `live-label-smoke`: 9/9.
+- `--hardening`, token mode: 48 passed, 0 failed. Client mode: 47 passed, 0 failed. The checks covered:
+  - #7: refusals with no new run folder;
+  - #11: `SetDimstyleData` and `GetObjectId(true)` rejected, with DIMSTYLE and DBMOD unchanged; both detached `ReadDwgFile` forms counted 131,305 objects of a 10 MB background;
+  - #12: 20,000 objects and a large tuple saved as complete JSON with matching byte counts; a small result stayed inline.
+- #24 fixtures were outside the import roots, so they were skipped there and tested separately with synthetic files inside the import root:
+  - a good copy compared in 2.7 s;
+  - a truncated copy failed with `eEndOfFile` in 4.4 s;
+  - zero-filled and text files failed with `eBadDwgHeader` in under 3 s;
+  - `civil3d_health` answered after each.
+- Before the stderr fix, the token-mode full smoke froze after about 45 runs; with it, the same run passes.
+
+Smoke scripts drain server stderr so repeated approval logs cannot fill the pipe and freeze the server; failures print a bounded tail.
+
+With a running plugin from this build and a scratch active drawing, run:
+
+`node scripts/live-run-code-smoke.mjs --hardening --approval token --side "C:\Scratch\side.dwg" --damaged "C:\Scratch\damaged.dwg"`
+
+Repeat with `--approval client` for client approval mode. Keep the DWGs inside
+the plugin's allowed import roots; `--damaged` also accepts a directory.
+Omitted paths skip their checks; `--no-drawing` skips active-drawing checks
+and comparison. Import-root refusals report SKIP with the full policy message.
+Place damaged files inside the roots listed there (`CIVIL3D_IMPORT_ROOTS` or
+`CIVIL3D_FILE_ROOTS`) to exercise comparison recovery. The summary counts skips separately.
+
+- #7: token mode calls the IPv6 child directly without a token, then with approval from the normal server for the same parameters. The first call must require approval or refuse the host; the second must name `CIVIL3D_HOST`. Neither creates a run folder. Client mode checks host refusal as before. The normal server still runs code afterwards.
+- #11: mutation refusals leave DIMSTYLE, dimension scale and DBMOD unchanged; handle lookup and both detached `ReadDwgFile` forms work.
+- #12: large saved JSON results have complete contents, matching byte counts and bounded previews; small results stay inline.
+- #24: damaged-DWG comparison reports a file-read error within 60 seconds, or SKIP if import-root policy refuses the path; plugin health responds afterwards.
+
 ### PR #14 follow-up: file-root refusal names the variable in use (2026-10-12)
 
 `CIVIL3D.PATH_NOT_ALLOWED` now names only the variable that `LoadRoots` reads (the import or export variable when it is set, otherwise `CIVIL3D_FILE_ROOTS`) and still lists the allowed roots.
+
 ### Trusted installer checks (#8, #9, #10, 2026-10-12)
 
 Offline results from Jorge's machine on 2026-10-12, measured outside any
@@ -396,6 +497,7 @@ entries, `build-2027.ps1` 0 warnings / 0 errors). Live results from
 | Publish multi-sheet | save drawing, `publish_sheet_set` with 2+ layouts; confirm page count and order; `keepDsd: true` to inspect the DSD | passed 2026-09-26 (2 sheets, DSD accepted by 2027) |
 | Publish unsaved guard | modify drawing, `publish_sheet_set` (expect `CIVIL3D.CONFLICT`) | passed 2026-09-26 (plotting itself marks the drawing modified) |
 | As job | `asJob: true`, poll `civil3d_job status`, cancel mid-batch | pending |
+
 ## Xrefs, data-shortcut references, drawing comparison (2026-09-26, `feature/xref-datashortcut-compare`)
 
 Offline, on the branch:

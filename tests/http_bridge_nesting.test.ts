@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 const { pluginCalls } = vi.hoisted(() => ({ pluginCalls: [] as string[] }));
 
 vi.mock("../src/utils/ConnectionManager.js", () => ({
+  effectivePluginHost: "127.0.0.1",
   withApplicationConnection: async <T>(
     operation: (client: { sendCommand: (method: string, params?: unknown) => Promise<unknown> }) => Promise<T>,
   ) => await operation({

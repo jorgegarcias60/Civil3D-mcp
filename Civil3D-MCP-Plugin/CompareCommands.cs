@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json.Nodes;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -113,46 +114,70 @@ public static class CompareCommands
 
   private static DrawingFingerprint CaptureSideDatabase(string path, bool includeCivil)
   {
-    using var side = new Database(false, true);
+    Database side;
     try
     {
-      side.ReadDwgFile(path, FileOpenMode.OpenForReadAndAllShare, true, string.Empty);
-    }
-    catch (AcRuntimeException)
-    {
-      // A drawing open in this session is write-locked; fall back to the
-      // most permissive read share AutoCAD offers.
       try
       {
-        side.ReadDwgFile(path, FileOpenMode.OpenTryForReadShare, true, string.Empty);
+        side = ReadSideOnce(path, FileOpenMode.OpenForReadAndAllShare);
       }
-      catch (AcRuntimeException exception)
+      catch (Exception first) when (!RunCodeHelpers.IsDrawingContentError((first as AcRuntimeException)?.ErrorStatus.ToString()))
       {
-        throw new JsonRpcDispatchException("CIVIL3D.FILE_IO_ERROR", $"Unable to read '{path}' as a side database: {exception.Message}");
+        // A failed read can leave partial state. Retry on a fresh database
+        // only when the failure is not about the drawing's contents.
+        try
+        {
+          side = ReadSideOnce(path, FileOpenMode.OpenTryForReadShare);
+        }
+        catch
+        {
+          ExceptionDispatchInfo.Capture(first).Throw();
+          throw;
+        }
       }
     }
-
-    // Load everything into memory and release the file handle at once.
-    side.CloseInput(true);
-
-    CivilDocument? sideCivil = null;
-    var warnings = new List<string>();
-    if (includeCivil)
+    catch (Exception exception)
     {
-      try
-      {
-        sideCivil = CivilDocument.GetCivilDocument(side);
-      }
-      catch (Exception exception)
-      {
-        warnings.Add($"Civil 3D objects in the other drawing could not be read: {exception.Message}");
-      }
+      throw new JsonRpcDispatchException("CIVIL3D.FILE_IO_ERROR", $"Unable to read '{path}' as a side database: {exception.Message}");
     }
 
-    using var transaction = side.TransactionManager.StartOpenCloseTransaction();
-    var fingerprint = Capture(side, transaction, sideCivil, path, "side_database", includeCivil && sideCivil != null);
-    fingerprint.Warnings.InsertRange(0, warnings);
-    return fingerprint;
+    using (side)
+    {
+      CivilDocument? sideCivil = null;
+      var warnings = new List<string>();
+      if (includeCivil)
+      {
+        try
+        {
+          sideCivil = CivilDocument.GetCivilDocument(side);
+        }
+        catch (Exception exception)
+        {
+          warnings.Add($"Civil 3D objects in the other drawing could not be read: {exception.Message}");
+        }
+      }
+
+      using var transaction = side.TransactionManager.StartOpenCloseTransaction();
+      var fingerprint = Capture(side, transaction, sideCivil, path, "side_database", includeCivil && sideCivil != null);
+      fingerprint.Warnings.InsertRange(0, warnings);
+      return fingerprint;
+    }
+  }
+
+  private static Database ReadSideOnce(string path, FileOpenMode mode)
+  {
+    var side = new Database(false, true);
+    try
+    {
+      side.ReadDwgFile(path, mode, true, string.Empty);
+      side.CloseInput(true);
+      return side;
+    }
+    catch
+    {
+      side.Dispose();
+      throw;
+    }
   }
 
   internal static DrawingFingerprint Capture(

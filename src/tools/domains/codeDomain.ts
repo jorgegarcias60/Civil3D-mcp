@@ -2,7 +2,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, win32 } from "node:path";
-import { withApplicationConnection } from "../../utils/ConnectionManager.js";
+import { effectivePluginHost, withApplicationConnection } from "../../utils/ConnectionManager.js";
 import { readPluginToken } from "../../utils/pluginAuth.js";
 import { Civil3DRpcError, COMMAND_TIMEOUT_MS } from "../../utils/SocketClient.js";
 import type { DomainToolDefinition } from "../domainRuntime.js";
@@ -184,6 +184,12 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
       safeForRetry: false,
       pluginMethods: ["runCode"],
       execute: async (parsedArgs, context) => {
+        if (effectivePluginHost !== "127.0.0.1") {
+          throw new Civil3DRpcError(
+            `civil3d_run_code requires CIVIL3D_HOST to dial exactly 127.0.0.1 (effective host: ${effectivePluginHost}). Nothing ran.`,
+            "CIVIL3D.INVALID_INPUT", -32602,
+          );
+        }
         const args = parsedArgs as z.infer<typeof RunCodeArgsSchema>;
         const timeoutSeconds = args.timeoutSeconds ?? 30;
         // Added here, after approval and idempotency hashed the caller's

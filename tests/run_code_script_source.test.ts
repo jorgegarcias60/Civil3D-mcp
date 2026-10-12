@@ -18,6 +18,14 @@ const dispatchSource = readFileSync(
   fileURLToPath(new URL("../Civil3D-MCP-Plugin/HostDispatchState.cs", import.meta.url)),
   "utf8",
 ).replaceAll("\r\n", "\n");
+const jsonSource = readFileSync(
+  fileURLToPath(new URL("../Civil3D-MCP-Plugin/RunCodeJson.cs", import.meta.url)),
+  "utf8",
+).replaceAll("\r\n", "\n");
+const compareSource = readFileSync(
+  fileURLToPath(new URL("../Civil3D-MCP-Plugin/CompareCommands.cs", import.meta.url)),
+  "utf8",
+).replaceAll("\r\n", "\n").replace(/^[\t ]*\/\/.*$/gm, "");
 
 describe("OpenSide retry ownership", () => {
   it("opens each attempt in a new Database and disposes a failed attempt", () => {
@@ -33,6 +41,66 @@ describe("OpenSide retry ownership", () => {
   it("does not retry drawing-content failures and preserves the first error when both attempts fail", () => {
     expect(source).toContain("catch (Exception first) when (first is not RunCodeTimeoutException and not OperationCanceledException\n      && !RunCodeHelpers.IsDrawingContentError((first as AcRuntimeException)?.ErrorStatus.ToString()))");
     expect(source).toContain("ExceptionDispatchInfo.Capture(first).Throw()");
+  });
+});
+
+describe("drawing comparison side-database retry ownership (#24)", () => {
+  const helperStart = compareSource.indexOf("private static Database ReadSideOnce(");
+  const captureEnd = compareSource.indexOf("internal static DrawingFingerprint Capture(");
+  const capture = compareSource.slice(
+    compareSource.indexOf("private static DrawingFingerprint CaptureSideDatabase("),
+    helperStart < 0 ? captureEnd : helperStart,
+  );
+  const helper = helperStart < 0 ? "" : compareSource.slice(helperStart, captureEnd);
+
+  it("opens each attempt in a fresh database and disposes read or CloseInput failures", () => {
+    expect(capture.match(/ReadSideOnce\(path, FileOpenMode\./g) ?? []).toHaveLength(2);
+    expect(capture).toContain("ReadSideOnce(path, FileOpenMode.OpenForReadAndAllShare)");
+    expect(capture).toContain("ReadSideOnce(path, FileOpenMode.OpenTryForReadShare)");
+    expect(capture).not.toContain(".ReadDwgFile(");
+    expect(helper).toMatch(/var side = new Database\(false, true\);\s*try\s*\{/);
+    expect(helper).toMatch(/try\s*\{\s*side\.ReadDwgFile\(path, mode, true, string\.Empty\);\s*side\.CloseInput\(true\);\s*return side;\s*\}/);
+    expect(helper).toMatch(/catch\s*\{\s*side\.Dispose\(\);\s*throw;/);
+  });
+
+  it("retries only non-content errors once and reports the first failure if both attempts fail", () => {
+    expect(capture).toContain("catch (Exception first) when (!RunCodeHelpers.IsDrawingContentError((first as AcRuntimeException)?.ErrorStatus.ToString()))");
+    expect(capture).toMatch(/try\s*\{\s*side = ReadSideOnce\(path, FileOpenMode\.OpenTryForReadShare\);\s*\}\s*catch\s*\{\s*ExceptionDispatchInfo\.Capture\(first\)\.Throw\(\);\s*throw;/);
+    expect(capture).toMatch(/catch \(Exception exception\)\s*\{\s*throw new JsonRpcDispatchException\("CIVIL3D\.FILE_IO_ERROR",[^;]*exception\.Message/);
+  });
+
+  it("disposes the successful database after fingerprint capture", () => {
+    expect(capture).toMatch(/using \(side\)\s*\{[\s\S]*using var transaction = side\.TransactionManager\.StartOpenCloseTransaction\(\);[\s\S]*var fingerprint = Capture\(side,[\s\S]*return fingerprint;\s*\}/);
+  });
+});
+
+describe("run-code retention scheduling (#25)", () => {
+  it("keeps seven-day output pruning and passes the current folder to whole-folder cleanup", () => {
+    expect(commandsSource).toContain("OutputRetention = TimeSpan.FromDays(7)");
+    expect(commandsSource).toMatch(/if \(Interlocked\.Exchange\(ref _pruned, 1\) == 0\)\s*\{\s*_ = Task\.Run\(\(\) =>\s*\{\s*RunCodeLog\.PruneOldOutputs\(OutputRetention\);\s*RunCodeLog\.PruneOldRunFolders\(runFolder\);/);
+  });
+});
+
+describe("run-code streamed result integration (#12)", () => {
+  it("serializes into the confined result stream while host objects are still open", () => {
+    const execution = commandsSource.slice(
+      commandsSource.indexOf("var value = script.Run();"),
+      commandsSource.indexOf("private static bool RestoreRunTransaction("),
+    );
+    expect(jsonSource).not.toContain("SerializeToUtf8Bytes");
+    expect(jsonSource).toContain("new StreamBufferWriter(stream)");
+    expect(jsonSource).toContain("JsonSerializer.Serialize(writer,");
+    expect(execution).toContain("RunCodeResult.Save(runFolder, stream =>");
+    expect(execution.indexOf("RunCodeResult.Save(")).toBeLessThan(execution.indexOf("if (script.Tripped != null)"));
+    expect(execution.indexOf("RunCodeResult.Save(")).toBeLessThan(execution.indexOf("transaction!.Commit();"));
+    expect(execution.indexOf("RunCodeResult.Save(")).toBeLessThan(execution.indexOf("script.ReleaseOwned();"));
+  });
+
+  it("retains file metadata and excludes an incomplete result from output copies", () => {
+    expect(commandsSource).not.toContain("byte[]? Result");
+    expect(commandsSource).toContain("RunCodeResult? Result");
+    expect(commandsSource).toContain("includeResult: outcome.Result?.FilePath != null");
+    expect(commandsSource).toContain("outcome.Result?.AddTo(response, maxInlineBytes, PreviewChars)");
   });
 });
 

@@ -959,6 +959,8 @@ Every path passes the plugin's filesystem boundary: it must be absolute, inside 
 
 `civil3d_compare` never modifies a drawing. `drawing` and `compare_snapshot` are ungated reads. `snapshot` writes a file, so it is classified as an export and needs approval.
 
+Side-drawing reads skip retries for recovery, version and improperly read object errors. Other opening errors retry once on a fresh database after disposing the failed attempt. If both attempts fail, `CIVIL3D.FILE_IO_ERROR` reports the first error.
+
 | Action | Description |
 |------|-------------|
 | `drawing` | Compare the active drawing with another DWG (`otherPath`), which is read as a side database with `Database.ReadDwgFile` and never opened as a document. Returns entities added, removed, and modified, grouped by type and layer and matched by handle, plus Civil 3D object changes matched by kind and name: alignment length, stations, and geometry hash; profile PVIs; surface point count, elevations, TIN surface triangle count, and 2D/3D area (TIN and grid surfaces); pipe network counts, pipe inverts, and structure rims and sumps; corridor baselines. |
@@ -978,9 +980,13 @@ Every path passes the plugin's filesystem boundary: it must be absolute, inside 
 
 The code runs with your full Windows rights. By default, `CIVIL3D_RUN_CODE_APPROVAL=token` requires an approval token bound to the exact code, even with `CIVIL3D_APPROVAL_MODE=disabled`. With `CIVIL3D_RUN_CODE_APPROVAL=client`, a direct MCP client call without a token uses the client's tool permission and does not need an open drawing for approval. Supplied tokens are still validated. Calls through `civil3d_orchestrate`, `civil3d_docs`, or the HTTP bridge still need a token.
 
-The plugin saves every script with a summary (`script.cs`, `run.json`) in `%LOCALAPPDATA%\Civil3DMcpPlugin\run-code\<run id>\` next to `plugin.log`. Results and files written by scripts are deleted there after 7 days; scripts and summaries are kept.
+The plugin saves every script with a summary (`script.cs`, `run.json`) in `%LOCALAPPDATA%\Civil3DMcpPlugin\run-code\<run id>\` next to `plugin.log`. Results and files written by scripts are deleted there after 7 days. Entire run folders, including scripts and summaries, are deleted after 180 days by default.
+
+The first run-code call of each plugin session schedules background cleanup. Folder age comes from the local timestamp in a valid `yyyyMMdd-HHmmss-xxxxxxxx` run ID (eight trailing hex characters). Cleanup keeps the current run, stays inside the run-code root, refuses links at or below it, and skips folders containing links. Deletion failures do not stop cleanup; linked parents do not disable it. Copy outputs elsewhere to keep them. See [retention settings](#plugin-run-code-retention) to change the default.
 
 The plugin also refuses `runCode` without this Civil 3D session's token: it writes a random token to `%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token` when it starts listening on its port (and deletes it when it stops), and the MCP server reads it for every run and sends it only to `127.0.0.1`, where the plugin listens. The file is private to your Windows account (its own access list, nothing inherited; a low-integrity process of the same user could still read it). The server and the plugin must come from the same build: an older server gets `CIVIL3D.AUTH_REQUIRED` on this tool only. Over the HTTP bridge, any request that names the tool (directly, nested in orchestrate or docs, or in a request text) is refused until `MCP_HTTP_TOKEN` is set.
+
+Before reading the token or calling the plugin, `civil3d_run_code` requires the effective startup `CIVIL3D_HOST` to be `127.0.0.1`. `localhost` (case and whitespace ignored) and empty hosts map to it. Other values, including `::1` and `localhost.`, get `CIVIL3D.INVALID_INPUT` naming `CIVIL3D_HOST`: "Nothing ran." Other tools keep using the configured host.
 
 | Parameter | Description |
 |------|-------------|
@@ -994,6 +1000,14 @@ The plugin also refuses `runCode` without this Civil 3D session's token: it writ
 | `argsPath` | Absolute path to a UTF-8 JSON file containing a plain object. Approval binds to its content too. Code and args together must fit in 1,000,000 bytes as JSON, including file inputs. |
 | `copyOutputsTo` | Absolute output folder outside the run-code log root. Copies every output except `script.cs` and `run.json`. Existing destination files are replaced atomically. Copy failures are warnings. |
 | `keepOutputs` | Default `true`. With `false`, `copyOutputsTo` is required. Each source is removed only after its copy succeeds, and only after an `ok` run. Audit files stay. |
+
+Read mode also refuses Database calls that change settings, contents or undo state without opening an object for write. These include `SetDimstyleData`, `SetTimeZoneAsUtcOffset`, `SetWorldUcsBaseOrigin`, `SetWorldPaperspaceUcsBaseOrigin`, `DisableUndoRecording`, `EraseEmptyObjects`, style loading, memory reclamation, timestamp resets and xref restoration/binding. Write mode allows them. Changes outside `Tr` cannot be rolled back by the run.
+
+`ReadDwgFile`, `DxfIn` and partial-open changes require a proven detached database. `Wblock` overloads returning a new database are allowed. Explicit-output `Wblock` and `WblockCloneObjects` require a proven detached destination, regardless of the source. Use `new Database(..., noDocument: true)`, `OpenSide`/`OpenSideOrNull`, or a database returned by `Wblock`.
+
+The compiler follows local aliases and assignments. At least one definition must prove a detached database; every nonnull definition must do so. Null/default initialization and conditional/coalescing branches are allowed. Open-drawing or opaque targets from helpers, parameters, `Session` or method groups get a snippet-line diagnostic. `ref`/`out` exposure and ref aliases are refused, including through parentheses or null suppression.
+
+Queries, `TryGetObjectId`, `CloseInput` and `Purge` remain allowed. `Purge` filters the supplied IDs; it does not erase objects. `GetObjectId` requires a constant `createIfNotFound: false` in read mode, since `true` can create a stub.
 
 In scope: `Doc`, `Db`, `Ed`, `Civil` (`CivilDocument`), `Tr` (the run's transaction), `HasDrawing`, `Args`, `Log(x)`, `Check()`, `Open<T>(id, forWrite)` (objects of attached xrefs open read only), `ModelSpace<T>(db)`, `OpenSide(path)` (another DWG as a read-only side database, disposed by the run when it ends; do not dispose it yourself), `TransactionFor(db)`, `WriteFile(name, text | lines)` (into the run folder) and `Session` (a dictionary kept across runs until Civil 3D closes, for plain data such as geometry read from a background). Without an open drawing, `HasDrawing` is false and `Doc`, `Db`, `Ed`, `Civil` and `Tr` throw a clear error pointing to `OpenSide(path)`. Default namespaces: `System`, `System.Linq`, `System.IO`, `System.Text`, `System.Text.Json`, `Autodesk.AutoCAD.ApplicationServices` / `DatabaseServices` / `EditorInput` / `Geometry` / `Colors`, `Autodesk.Civil`, `Autodesk.Civil.ApplicationServices` / `DatabaseServices` / `DatabaseServices.Styles`; names both AutoCAD and Civil 3D define mean AutoCAD's (`DBObject`, `Entity`, `Table`, `Shape`...; Civil 3D's are `CivilDBObject`, `CivilEntity`...), except `Surface` and `Section`, which are Civil 3D's (`AcSurface`, `AcSection`); `AcException` is AutoCAD's exception.
 
@@ -1018,6 +1032,16 @@ Civil 3D does not respond to the user during a long read. When the client suppli
 A document-targeted write requires run-code API 5. The plugin activates the target while the command runs and retries restoration of the previous active drawing for up to 30 seconds before answering. The response and `run.json` set `activated: true` when it switched to the target and report whether restoration succeeded in `switchedBack`. If restoration fails, `warnings` includes `could not switch back to <previous drawing name>`. A failed snippet still rolls back its transaction and attempts to switch back. An untargeted write keeps the normal active-drawing command route.
 
 The return value becomes JSON: points and vectors as `[x, y, z]`, ObjectIds as handles, tuples as arrays, anonymous objects and records by property. The response has `status` (`ok`, `compile_error`, `rejected`, `runtime_error`, `timeout`, `cancelled`), `errors` / `error` with snippet line numbers, `output`, `result`, `files` written by the script, `timing` and `logFolder`. `scriptSha256` is the lowercase SHA-256 of the executed code. `copiedFiles` lists destination paths. `sideErrors` contains path, error status and message. `tryErrors` contains label, exception type, message and snippet line. Reports and copy failures also appear in `warnings` and `run.json`.
+
+The plugin streams return values, including nested tuples, to `result.json` while host objects are open. The buffer grows only for a single large JSON token. Completed files stay in the run folder; values at or below `maxInlineBytes` also return inline. Larger results return `result: null`, `resultFile` and a bounded `resultPreview`. `resultShape` describes the value; `resultBytes` is the completed file's UTF-8 byte count.
+
+Serialization, save or read failures produce `resultError` and preserve the script's outcome. Partial files are never returned or copied as completed results, even if cleanup fails. `copyOutputsTo` copies completed results of any size.
+
+Opt-in live checks (`live-run-code-smoke.mjs --hardening`) cover Database guards, saved results, host refusal and damaged-DWG comparison recovery. See [TESTING.md](./TESTING.md) for the command, inputs and recorded results.
+
+In token mode, the IPv6 check calls directly without approval, then with a token from the normal server. The foreign-token check accepts host refusal or unknown/expired-token refusal and requires no new run folder. Approval tokens are stored only in the server process that issued them. Damaged-DWG comparisons refused by import-root policy report SKIP with the policy message. The summary counts skips separately.
+
+Scripts that start the MCP server drain its stderr to prevent pipe-buffer stalls. They print only the last 200 lines on failure or timeout, with each line limited to 4096 characters.
 
 ```json
 {
@@ -1092,13 +1116,13 @@ For startup-suite and autoload registry details, use the version-specific guidan
 
 ## Environment Variables
 
-The Node MCP server reads the following variables at startup. All are optional; defaults are shown in the **Default** column and are suitable for a local Civil 3D plus Copilot install.
+The Node MCP server reads these variables at startup, except for the plugin retention setting below. All are optional; defaults are shown in the **Default** column and are suitable for a local Civil 3D plus Copilot install.
 
 ### Plugin connection (Node → Civil 3D plugin)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CIVIL3D_HOST` | `127.0.0.1` | Host of the Civil 3D plugin's JSON-RPC TCP server. The plugin listens on IPv4 loopback only; `localhost` is dialled as `127.0.0.1`. |
+| `CIVIL3D_HOST` | `127.0.0.1` | Plugin RPC host, captured at server startup. The plugin listens on IPv4 loopback. `localhost` (case and whitespace ignored) and empty hosts map to `127.0.0.1`. `civil3d_run_code` requires this effective host. |
 | `CIVIL3D_PORT` | `8757` | TCP port the plugin listens on (see `PluginRuntime.Port`). |
 | `CIVIL3D_CONNECT_TIMEOUT` | `5000` | Milliseconds the server waits for a TCP connection to the plugin before giving up. |
 | `CIVIL3D_COMMAND_TIMEOUT` | `120000` | Milliseconds any single JSON-RPC command may run before the Node side rejects the call. Increase for heavy corridor rebuilds. `civil3d_run_code` waits for the larger of this and its budget plus 60 s. |
@@ -1113,6 +1137,12 @@ The Node MCP server reads the following variables at startup. All are optional; 
 | `CIVIL3D_ENABLE_TOOL_ALIASES` | `false` | Set to `true` before the MCP server starts to expose all specialized aliases instead of the compact 35-tool surface. |
 | `CIVIL3D_APPROVAL_MODE` | enforced | Set to `disabled` only in an isolated disposable test environment; production should retain parameter-bound approvals. |
 | `CIVIL3D_RUN_CODE_APPROVAL` | `token` | Set to `client` to use the MCP client's permission for direct `civil3d_run_code` calls. Nested and HTTP calls still need tokens. |
+
+### Plugin run-code retention
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CIVIL3D_RUN_CODE_RETENTION_DAYS` | `180` | Whole-folder retention in days, read by the plugin from Civil 3D's environment. An integer of 0 or less disables whole-folder deletion. Invalid values use the default and warn once. Output files still expire after 7 days. |
 
 ### Local Autodesk help search
 

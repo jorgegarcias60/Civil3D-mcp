@@ -5,6 +5,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace Civil3DMcpPlugin;
 
@@ -339,6 +340,22 @@ internal static class ScriptCompiler
     "Move", "Copy", "Clear", "Reset", "Extract",
   };
 
+  private const string DatabaseTypeName = "Autodesk.AutoCAD.DatabaseServices.Database";
+  private const string ObjectIdTypeName = "Autodesk.AutoCAD.DatabaseServices.ObjectId";
+
+  // Reviewed against the 2026 (25.1) and 2027 (26.0) Database metadata.
+  // These change database contents/settings, undo state or saved output without
+  // needing an object opened ForWrite. Keep queries and Purge (an ID filter) out.
+  private static readonly HashSet<string> DatabaseWriteMethods = new(StringComparer.Ordinal)
+  {
+    "SaveAs", "Save", "Insert", "DeepCloneObjects", "Audit", "LoadLineTypeFile", "UpdateExt",
+    "AttachXref", "OverlayXref", "DetachXref", "BindXrefs", "ReloadXrefs", "UnloadXrefs",
+    "ResolveXrefs", "AddDBObject", "EvaluateFields", "SetDimstyleData", "SetTimeZoneAsUtcOffset",
+    "SetWorldUcsBaseOrigin", "SetWorldPaperspaceUcsBaseOrigin", "DisableUndoRecording",
+    "EraseEmptyObjects", "LoadMlineStyleFile", "ReclaimMemoryFromErasedObjects", "ResetTimes",
+    "RestoreForwardingXrefSymbols", "RestoreOriginalXrefSymbols", "XBindXrefs", "ForceWblockDatabaseCopy",
+  };
+
   // A snippet's own #line directive would map the code after it away from
   // "script", where the guard does not look (that is how it skips the
   // wrapper), so refuse any inside the snippet's body. Ours sit outside it,
@@ -562,8 +579,14 @@ internal static class ScriptCompiler
       return $"Read mode opens objects for read only: {display} is not allowed.{useWrite}";
     }
 
-    if (symbol is IMethodSymbol)
+    if (symbol is IMethodSymbol databaseMethod)
     {
+      if (typeName == DatabaseTypeName
+          && DatabaseDenyReason(databaseMethod, node, model) is { } databaseReason)
+      {
+        return databaseReason;
+      }
+
       if (name == "StartTransaction" && type != null && type.Name == "TransactionManager")
       {
         return $"{display}: a regular transaction outside a command clears the drawing's undo history. Use Tr, OpenSide/TransactionFor, or 'using var t = db.TransactionManager.StartOpenCloseTransaction();' in read mode.";
@@ -574,9 +597,6 @@ internal static class ScriptCompiler
           || (InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.SymbolTable") && name == "Add")
           || (InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.DBDictionary") && name is "SetAt" or "Remove")
           || (InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.Transaction") && name == "AddNewlyCreatedDBObject")
-          || (typeName == "Autodesk.AutoCAD.DatabaseServices.Database" && name is "SaveAs" or "Save" or "Insert" or "WblockCloneObjects"
-              or "DeepCloneObjects" or "Audit" or "LoadLineTypeFile" or "UpdateExt" or "AttachXref" or "OverlayXref" or "DetachXref"
-              or "BindXrefs" or "ReloadXrefs" or "UnloadXrefs" or "ResolveXrefs" or "AddDBObject" or "EvaluateFields")
           || (InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.BlockReference") && name == "ExplodeToOwnerSpace")
           || (InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.LayoutManager")
               && name is "CreateLayout" or "DeleteLayout" or "RenameLayout" or "CopyLayout" or "CloneLayout" or "SetCurrentLayoutId")
@@ -605,6 +625,182 @@ internal static class ScriptCompiler
     }
 
     return null;
+  }
+
+  private static string? DatabaseDenyReason(IMethodSymbol method, SimpleNameSyntax node, SemanticModel model)
+  {
+    const string useWrite = " Use mode 'write' to change the drawing.";
+    var display = "Database." + method.Name;
+    if (DatabaseWriteMethods.Contains(method.Name))
+    {
+      return $"{display} changes a drawing or database state.{useWrite}";
+    }
+
+    var call = InvocationOf(node);
+    if (method.Name == "GetObjectId")
+    {
+      // true creates a stub; a method group or a nonconstant flag cannot prove
+      // this is just a lookup. Named/reordered arguments use Roslyn's parameters.
+      return call != null && IsConstant(model, CallArgument(model, call, 0), false)
+        ? null
+        : $"{display} can create an object ID stub. Read mode requires createIfNotFound: false.{useWrite}";
+    }
+
+    ExpressionSyntax? destination;
+    var ownerId = false;
+    switch (method.Name)
+    {
+      case "ReadDwgFile":
+      case "DxfIn":
+      case "ApplyPartialOpenFilters":
+      case "DisablePartialOpen":
+        destination = call == null ? null : MethodReceiver(node);
+        break;
+      case "Wblock" when method.ReturnType.ToDisplayString() == DatabaseTypeName:
+        // These overloads create a new database; they do not change the source.
+        return null;
+      case "Wblock":
+        destination = call == null ? null : CallArgument(model, call, 0);
+        break;
+      case "WblockCloneObjects":
+        destination = call == null ? null : CallArgument(model, call, 1);
+        ownerId = true;
+        break;
+      default:
+        return null;
+    }
+
+    var hasDetachedValue = false;
+    var detached = destination != null && IsDetachedTarget(model, destination, ownerId,
+      new HashSet<ISymbol>(SymbolEqualityComparer.Default), ref hasDetachedValue) && hasDetachedValue;
+    return detached ? null
+      : $"{display}: read mode requires a proven detached {(ownerId ? "destination owner's database" : "destination database")}; Db, open drawings and ambiguous targets are refused.{useWrite}";
+  }
+
+  private static ExpressionSyntax? MethodReceiver(SimpleNameSyntax node) => node.Parent switch
+  {
+    MemberAccessExpressionSyntax access when access.Name == node => access.Expression,
+    MemberBindingExpressionSyntax binding when binding.Parent is InvocationExpressionSyntax invocation
+      && invocation.Parent is ConditionalAccessExpressionSyntax conditional => conditional.Expression,
+    _ => null,
+  };
+
+  private static ExpressionSyntax? CallArgument(SemanticModel model, InvocationExpressionSyntax call, int ordinal) =>
+    (model.GetOperation(call) as IInvocationOperation)?.Arguments
+      .FirstOrDefault(argument => argument.Parameter?.Ordinal == ordinal)?.Value.Syntax as ExpressionSyntax;
+
+  private static bool IsConstant(SemanticModel model, ExpressionSyntax? expression, bool value) =>
+    expression != null && model.GetConstantValue(expression) is { HasValue: true, Value: bool actual } && actual == value;
+
+  // A conservative provenance check, not execution or runtime reflection. Every
+  // nonnull definition of a local must be detached, even in branches/closures or after
+  // the call: aliases, reassignments and ref/out uses must not hide an open Db.
+  // Null/default database values are harmless, but cannot alone prove a target.
+  // hasDetachedValue records whether any definition proves a detached database.
+  // Unknown factories, parameters, Session values and cycles remain ambiguous.
+  private static bool IsDetachedTarget(SemanticModel model, ExpressionSyntax expression, bool ownerId,
+    HashSet<ISymbol> visiting, ref bool hasDetachedValue)
+  {
+    switch (expression)
+    {
+      case ParenthesizedExpressionSyntax parentheses:
+        return IsDetachedTarget(model, parentheses.Expression, ownerId, visiting, ref hasDetachedValue);
+      case CastExpressionSyntax cast:
+        return IsDetachedTarget(model, cast.Expression, ownerId, visiting, ref hasDetachedValue);
+      case PostfixUnaryExpressionSyntax suppressed when suppressed.IsKind(SyntaxKind.SuppressNullableWarningExpression):
+        return IsDetachedTarget(model, suppressed.Operand, ownerId, visiting, ref hasDetachedValue);
+      case ConditionalExpressionSyntax conditional:
+        return IsDetachedTarget(model, conditional.WhenTrue, ownerId, visiting, ref hasDetachedValue)
+          && IsDetachedTarget(model, conditional.WhenFalse, ownerId, visiting, ref hasDetachedValue);
+      case BinaryExpressionSyntax coalesce when coalesce.IsKind(SyntaxKind.CoalesceExpression):
+        return IsDetachedTarget(model, coalesce.Left, ownerId, visiting, ref hasDetachedValue)
+          && IsDetachedTarget(model, coalesce.Right, ownerId, visiting, ref hasDetachedValue);
+    }
+
+    if (!ownerId && model.GetConstantValue(expression) is { HasValue: true, Value: null }) return true;
+
+    var symbol = model.GetSymbolInfo(expression).Symbol;
+    if (symbol is ILocalSymbol local)
+    {
+      if (!visiting.Add(local)) return false;
+      try
+      {
+        var values = local.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax())
+          .OfType<VariableDeclaratorSyntax>().Where(variable => variable.Initializer != null)
+          .Select(variable => variable.Initializer!.Value).ToList();
+        foreach (var name in expression.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
+        {
+          if (!SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(name).Symbol, local)) continue;
+          SyntaxNode use = name;
+          while (use.Parent is ParenthesizedExpressionSyntax
+              || use.Parent is PostfixUnaryExpressionSyntax suppressed
+                && suppressed.IsKind(SyntaxKind.SuppressNullableWarningExpression))
+          {
+            use = use.Parent;
+          }
+          if (use.Parent is ArgumentSyntax argument && argument.RefOrOutKeyword.Kind() is SyntaxKind.RefKeyword or SyntaxKind.OutKeyword
+              || use.Parent is RefExpressionSyntax) return false;
+          var assignment = name.Ancestors().OfType<AssignmentExpressionSyntax>()
+            .FirstOrDefault(candidate => candidate.Left.Span.Contains(name.Span));
+          if (assignment == null) continue;
+          if (!assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+              || !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local)) return false;
+          values.Add(assignment.Right);
+        }
+        if (values.Count == 0) return false;
+        foreach (var value in values)
+        {
+          if (!IsDetachedTarget(model, value, ownerId, visiting, ref hasDetachedValue)) return false;
+        }
+        return true;
+      }
+      finally { visiting.Remove(local); }
+    }
+
+    if (!ownerId && model.GetOperation(expression) is IObjectCreationOperation creation
+        && creation.Type?.ToDisplayString() == DatabaseTypeName)
+    {
+      var noDocument = creation.Arguments.FirstOrDefault(argument => argument.Parameter?.Name == "noDocument");
+      if (noDocument?.Value.ConstantValue is not { HasValue: true, Value: true }) return false;
+      hasDetachedValue = true;
+      return true;
+    }
+
+    if (expression is InvocationExpressionSyntax call && symbol is IMethodSymbol method)
+    {
+      if (!ownerId)
+      {
+        var detached = IsOpenSide(method) || (method.ContainingType.ToDisplayString() == DatabaseTypeName
+          && method.Name == "Wblock" && method.ReturnType.ToDisplayString() == DatabaseTypeName);
+        hasDetachedValue |= detached;
+        return detached;
+      }
+      if ((method.ContainingType.ToDisplayString() == DatabaseTypeName && method.Name == "GetObjectId")
+          && call.Expression is MemberAccessExpressionSyntax lookup)
+      {
+        return IsDetachedTarget(model, lookup.Expression, false, visiting, ref hasDetachedValue);
+      }
+      if (method.ContainingType.ToDisplayString() == "Autodesk.AutoCAD.DatabaseServices.SymbolUtilityServices"
+          && method.Name is "GetBlockModelSpaceId" or "GetBlockPaperSpaceId")
+      {
+        return CallArgument(model, call, 0) is { } database
+          && IsDetachedTarget(model, database, false, visiting, ref hasDetachedValue);
+      }
+    }
+
+    if (expression is MemberAccessExpressionSyntax access && symbol is IPropertySymbol property)
+    {
+      if (ownerId && property.ContainingType.ToDisplayString() == DatabaseTypeName
+          && property.Type.ToDisplayString() == ObjectIdTypeName)
+      {
+        return IsDetachedTarget(model, access.Expression, false, visiting, ref hasDetachedValue);
+      }
+      if (!ownerId && property.ContainingType.ToDisplayString() == ObjectIdTypeName && property.Name == "Database")
+      {
+        return IsDetachedTarget(model, access.Expression, true, visiting, ref hasDetachedValue);
+      }
+    }
+    return false;
   }
 
   private static bool IsHostApi(INamedTypeSymbol? type)
@@ -639,7 +835,12 @@ internal static class ScriptCompiler
   // method group, for example).
   private static InvocationExpressionSyntax? InvocationOf(SimpleNameSyntax node)
   {
-    SyntaxNode callee = node.Parent is MemberAccessExpressionSyntax access && access.Name == node ? access : node;
+    SyntaxNode callee = node.Parent switch
+    {
+      MemberAccessExpressionSyntax access when access.Name == node => access,
+      MemberBindingExpressionSyntax binding when binding.Name == node => binding,
+      _ => node,
+    };
     return callee.Parent is InvocationExpressionSyntax invocation && invocation.Expression == callee ? invocation : null;
   }
 

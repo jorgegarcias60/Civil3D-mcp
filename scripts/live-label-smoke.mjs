@@ -13,6 +13,7 @@
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { drainServerStderr } from "./server-stderr.mjs";
 
 const { values: options } = parseArgs({ options: { "expect-drawing": { type: "string" } }, strict: true });
 const expectDrawing = options["expect-drawing"];
@@ -29,13 +30,17 @@ const transport = new StdioClientTransport({
   env: { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0" },
   stderr: "pipe",
 });
+const printServerStderr = drainServerStderr(transport.stderr);
 const client = new Client({ name: "civil3d-label-smoke", version: "1.0.0" });
 const results = [];
 let failures = 0;
 
 function record(name, passed, detail) {
   results.push({ name, passed, ...(detail === undefined ? {} : { detail }) });
-  if (!passed) failures++;
+  if (!passed) {
+    failures++;
+    printServerStderr();
+  }
   console.error(`${passed ? "ok  " : "FAIL"} ${name}${detail === undefined ? "" : ` :: ${JSON.stringify(detail).slice(0, 400)}`}`);
 }
 
@@ -199,6 +204,7 @@ try {
   console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", failures, drawing, prefix, results }, null, 2));
   process.exitCode = failures === 0 ? 0 : 1;
 } catch (error) {
+  printServerStderr();
   console.error(`Live label smoke stopped: ${error instanceof Error ? error.message : String(error)}`);
   console.log(JSON.stringify({ status: "stopped", failures, results }, null, 2));
   process.exitCode = 1;

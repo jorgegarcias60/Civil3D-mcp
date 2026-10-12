@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const { sendCommandMock } = vi.hoisted(() => ({ sendCommandMock: vi.fn() }));
 vi.mock("../src/utils/ConnectionManager.js", () => ({
+  effectivePluginHost: "127.0.0.1",
   withApplicationConnection: async <T>(
     operation: (client: { sendCommand: typeof sendCommandMock }) => Promise<T>,
   ) => await operation({ sendCommand: sendCommandMock }),
