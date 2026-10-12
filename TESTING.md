@@ -27,7 +27,12 @@ New installer checks use fake roots and cover:
 - #9: support-path order, reinstall and user edits, normalized and malformed paths, preserved saved loads, cycle and repeated-load guards, and downstream user code through an offline LISP evaluator.
 - #10: load failure messages, `C3DMCPLOAD` retry, one automatic attempt per session, startup preservation and LISP balance.
 
-Live installer checks have not been run yet.
+Live, Civil 3D 2026, 2026-10-12, on Jorge's machine. The install held only `R25.1`, with one marked roaming support folder (`enu`). The test used an integration build of `civil3d-2027` plus PRs #26, #27 and #28:
+- `-Uninstall` without `-SourceDir` removed the block and `R25.1` (exit 0). The `acaddoc.lsp` held only the block, so it was deleted.
+- Install with `-SourceDir` (the net8 build) copied 6 files and wrote the block. A second install copied 0 files and left `acaddoc.lsp` byte-identical.
+- Civil 3D started through `Start-Civil3D.ps1`. The block NETLOADed the plugin at drawing open with no security prompt; the plugin answered after 24 s.
+- `C3DMCPLOAD` was defined in both open drawings. Running it with the plugin already loaded did not NETLOAD again.
+- Not covered live: the failed-NETLOAD message, and chaining (this profile has no other `acaddoc.lsp` on its support path). The offline LISP evaluator covers both.
 
 ### PR 4 writes to another open drawing (2026-10-12)
 
