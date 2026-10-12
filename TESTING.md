@@ -8,6 +8,10 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 ### PR #14 follow-up: file-root refusal names the variable in use (2026-10-12)
 
 `CIVIL3D.PATH_NOT_ALLOWED` now names only the variable that `LoadRoots` reads (the import or export variable when it is set, otherwise `CIVIL3D_FILE_ROOTS`) and still lists the allowed roots.
+### Trusted installer checks (#8, #9, #10, 2026-10-12)
+
+Offline results from Jorge's machine on 2026-10-12, measured outside any
+sandbox for `jorgegarcias60/installer-hardening`:
 
 | Check | Result |
 |---|---|
@@ -28,6 +32,26 @@ PR #14 itself, live on Civil 3D 2026 (its own live run was on 2027), on the scra
 - `civil3d_standards style_list` returned names for `profile_view`, `profile_view_band_set`, `section_view` and `section_view_band_set`.
 - `createAlignment` from points with the default `addCurves` fitted curves: length 199,914.16 against 200,000 straight. With `addCurves: false` the length equalled the straight distance. Both test alignments were deleted.
 - `civil3d_profile view_update` set a user elevation range on a profile view, then restored the original range.
+| `npx vitest run --configLoader runner --cache=false` | 602 passed in 49 files |
+| `npm run docs:check` | ok |
+| Plugin Release net8, refs-2026 | 0 warnings |
+| Plugin Release net10, C_References | 0 warnings |
+| RunCodeHarness `-f net8.0` | pass |
+| RunCodeHarness `-f net10.0` | pass |
+| `tests/powershell/install-trusted.check.ps1` | 0 failures |
+
+New installer checks use fake roots and cover:
+
+- #8: all-release and explicit-release uninstall, orphan blocks, empty installs, locked DLLs, short aliases and bracketed paths; user code, backups and encodings across Civil 3D 2024-2027.
+- #9: support-path order, reinstall and user edits, normalized and malformed paths, preserved saved loads, cycle and repeated-load guards, and downstream user code through an offline LISP evaluator.
+- #10: load failure messages, `C3DMCPLOAD` retry, one automatic attempt per session, startup preservation and LISP balance.
+
+Live, Civil 3D 2026, 2026-10-12, on Jorge's machine. The install held only `R25.1`, with one marked roaming support folder (`enu`). The test used an integration build of `civil3d-2027` plus PRs #26, #27 and #28:
+- `-Uninstall` without `-SourceDir` removed the block and `R25.1` (exit 0). The `acaddoc.lsp` held only the block, so it was deleted.
+- Install with `-SourceDir` (the net8 build) copied 6 files and wrote the block. A second install copied 0 files and left `acaddoc.lsp` byte-identical.
+- Civil 3D started through `Start-Civil3D.ps1`. The block NETLOADed the plugin at drawing open with no security prompt; the plugin answered after 24 s.
+- `C3DMCPLOAD` was defined in both open drawings. Running it with the plugin already loaded did not NETLOAD again.
+- Not covered live: the failed-NETLOAD message, and chaining (this profile has no other `acaddoc.lsp` on its support path). The offline LISP evaluator covers both.
 
 ### PR 4 writes to another open drawing (2026-10-12)
 

@@ -39,6 +39,12 @@
 >
 > The ApplicationPlugins bundle lives under `%APPDATA%`, which is not a trusted folder, so Civil 3D asks "Security - Unsigned Executable File" about `Civil3DMcpPlugin.dll` at every start. Where a folder is in `TRUSTEDPATHS` (Jorge's machine: `C:\CAD-Tools\...`), `scripts\install-trusted.ps1 -SourceDir <build output>` installs the plugin there instead: it copies the build to `C:\CAD-Tools\plugins\Civil3DMcp\R<series>\`, adds a marked block to `acaddoc.lsp` in the Civil 3D roaming support folder that NETLOADs it once per session, and removes the bundle. No prompt; the plugin loads when a drawing opens (not on the Start tab). `-Uninstall` reverses it.
 >
+> New or block-only startup files link to the first `acaddoc.lsp` after their folder on the profile's support path; no link is added if the folder is absent. Marked targets load directly so later user edits and downstream chains still run. Reinstall drops upward links and preserves other loads, including unavailable shares. Folder comparisons normalize dot segments, separators and case; malformed support entries are skipped and malformed saved loads are preserved. Separate document guards prevent cycles and repeated target loads.
+>
+> A failed or missing plugin load prints the DLL path and recovery instructions. Fix `TRUSTEDPATHS`, a Do Not Load answer or missing files, then type `C3DMCPLOAD` to retry without restarting. Automatic attempts happen once per session; success stays silent.
+>
+> `scripts\install-trusted.ps1 -Uninstall` without `-SourceDir` removes all installed releases and marked roaming support blocks, including orphan blocks. Only direct folders with long names starting with `R` and containing `Civil3DMcpPlugin.dll` qualify; short aliases do not qualify and folder links are refused. User code and unmarked files stay; missing support folders and empty installs are allowed. All selected DLLs are checked for locks before any change; close Civil 3D completely if one is locked. Add `-SourceDir <build output>` to remove only that release.
+>
 > `civil3d_run_code` runs C# inside Civil 3D (see In-process C# below); `node scripts/run-code-file.mjs <file.cs>` runs a script file through the MCP server from a terminal.
 
 > [!IMPORTANT]

@@ -117,6 +117,21 @@
 ### Fixed
 
 - Path refusals (`CIVIL3D.PATH_NOT_ALLOWED`) name only the root variable in use and keep the allowed-root list (follow-up to PR #14).
+- `install-trusted.ps1 -Uninstall` without `-SourceDir` removes all installed
+  releases and marked roaming support blocks, including orphans, after checking
+  every selected DLL for locks. Explicit `-SourceDir` selects one release;
+  short aliases cannot select unrelated folders. Fixes #8.
+
+- `install-trusted.ps1` chains new or block-only startup files to the next
+  `acaddoc.lsp` on the support path. Marked targets retain user edits;
+  reinstall drops upward links and preserves other loads. Normalized paths,
+  malformed-path handling and document guards prevent lost code, cycles and
+  repeated loads. Fixes #9.
+
+- Failed or missing trusted plugin loads report the DLL path and recovery
+  instructions. `C3DMCPLOAD` retries without restarting; automatic attempts
+  stay limited to once per session. LISP balance checks allow preserved
+  startup loads. Fixes #10.
 
 - `label_add` (`civil3d_standards` / `civil3d_label`):
   - Alignment `label_set` imports the named label set (it replaces the
