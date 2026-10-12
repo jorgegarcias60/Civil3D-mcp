@@ -19,6 +19,16 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 | `tests/FileBoundaryHarness` (default and `--shared-roots`) | pass; both fail on the old message |
 | `install-trusted` check | 0 failures |
 
+Live, Civil 3D 2026, 2026-10-12, integration build of `civil3d-2027` plus PRs #26, #27 and #28, with no root variable set:
+- an import outside the roots (`civil3d_compare` drawing) and an export outside the roots (`civil3d_compare` snapshot) were both refused;
+- each message listed the allowed roots and named only `CIVIL3D_FILE_ROOTS`;
+- nothing was written.
+
+PR #14 itself, live on Civil 3D 2026 (its own live run was on 2027), on the scratch drawing:
+- `civil3d_standards style_list` returned names for `profile_view`, `profile_view_band_set`, `section_view` and `section_view_band_set`.
+- `createAlignment` from points with the default `addCurves` fitted curves: length 199,914.16 against 200,000 straight. With `addCurves: false` the length equalled the straight distance. Both test alignments were deleted.
+- `civil3d_profile view_update` set a user elevation range on a profile view, then restored the original range.
+
 ### PR 4 writes to another open drawing (2026-10-12)
 
 Verified in `jorgegarcias60/run-code-activate-write`, in the
