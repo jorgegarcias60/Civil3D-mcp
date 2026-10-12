@@ -5,6 +5,30 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Trusted installer checks (#8, #9, #10, 2026-10-12)
+
+Offline results from Jorge's machine on 2026-10-12, measured outside any
+sandbox for `jorgegarcias60/installer-hardening`:
+
+| Check | Result |
+|---|---|
+| `npm run build` | ok |
+| `npx vitest run --configLoader runner --cache=false` | 602 passed in 49 files |
+| `npm run docs:check` | ok |
+| Plugin Release net8, refs-2026 | 0 warnings |
+| Plugin Release net10, C_References | 0 warnings |
+| RunCodeHarness `-f net8.0` | pass |
+| RunCodeHarness `-f net10.0` | pass |
+| `tests/powershell/install-trusted.check.ps1` | 0 failures |
+
+New installer checks use fake roots and cover:
+
+- #8: all-release and explicit-release uninstall, orphan blocks, empty installs, locked DLLs, short aliases and bracketed paths; user code, backups and encodings across Civil 3D 2024-2027.
+- #9: support-path order, reinstall and user edits, normalized and malformed paths, preserved saved loads, cycle and repeated-load guards, and downstream user code through an offline LISP evaluator.
+- #10: load failure messages, `C3DMCPLOAD` retry, one automatic attempt per session, startup preservation and LISP balance.
+
+Live installer checks have not been run yet.
+
 ### PR 4 writes to another open drawing (2026-10-12)
 
 Verified in `jorgegarcias60/run-code-activate-write`, in the

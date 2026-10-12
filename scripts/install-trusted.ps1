@@ -25,6 +25,7 @@
 
 .PARAMETER SourceDir
   Build output folder, named by target framework (net8.0-windows = 2026, net10.0-windows = 2027).
+  With -Uninstall, selects only that release. Omit it to uninstall every installed release.
 
 .PARAMETER Destination
   Trusted root for the plugin. Default C:\CAD-Tools\plugins\Civil3DMcp.
@@ -35,7 +36,9 @@
   the trusted copy.
 
 .PARAMETER Uninstall
-  Remove the acaddoc.lsp block and this release's plugin folder. Reinstall the bundle with
+  Without SourceDir, remove every R* folder under Destination that contains Civil3DMcpPlugin.dll and
+  the marked block in every C3D <year> roaming support folder. Missing installations are allowed.
+  With SourceDir, remove only that release's block and plugin folder. Reinstall the bundle with
   install-bundle.ps1 if wanted. When acaddoc.lsp keeps other code, it hides again the acaddoc.lsp further
   down the support path that the block loaded; the uninstall warns about that.
 #>
@@ -51,20 +54,24 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $beginMarker = ';; >>> Civil3D-mcp plugin (written by Civil3D-mcp scripts\install-trusted.ps1; remove with -Uninstall)'
 $endMarker = ';; <<< Civil3D-mcp plugin'
 
-if (-not $SourceDir) {
-  $SourceDir = Join-Path $repoRoot "Civil3D-MCP-Plugin\bin\Release\net10.0-windows"
+# Choose all-release uninstall before applying the default build framework.
+$uninstallAll = $Uninstall -and -not $SourceDir
+if (-not $uninstallAll) {
+  if (-not $SourceDir) {
+    $SourceDir = Join-Path $repoRoot "Civil3D-MCP-Plugin\bin\Release\net10.0-windows"
+  }
+  $tfm = Split-Path -Leaf $SourceDir
+  $series, $year = switch ($tfm) {
+    "net8.0-windows"  { "R25.1", 2026 }
+    "net10.0-windows" { "R26.0", 2027 }
+    default { throw "Cannot infer the Civil 3D release from '$tfm'. Pass a build output folder named by target framework (net8.0-windows or net10.0-windows)." }
+  }
+  $target = Join-Path $Destination $series
 }
-$tfm = Split-Path -Leaf $SourceDir
-$series, $year = switch ($tfm) {
-  "net8.0-windows"  { "R25.1", 2026 }
-  "net10.0-windows" { "R26.0", 2027 }
-  default { throw "Cannot infer the Civil 3D release from '$tfm'. Pass a build output folder named by target framework (net8.0-windows or net10.0-windows)." }
-}
-$target = Join-Path $Destination $series
 
 function Get-LockedFile([string] $dir) {
-  if (-not (Test-Path $dir)) { return $null }
-  foreach ($f in Get-ChildItem $dir -Recurse -File -Filter *.dll) {
+  if (-not (Test-Path -LiteralPath $dir)) { return $null }
+  foreach ($f in Get-ChildItem -LiteralPath $dir -Recurse -File -Force -Filter *.dll) {
     $fs = $null
     try { $fs = [System.IO.File]::Open($f.FullName, 'Open', 'ReadWrite', 'None') }
     catch [System.IO.IOException] { return $f.FullName }
@@ -72,13 +79,6 @@ function Get-LockedFile([string] $dir) {
     finally { if ($fs) { $fs.Dispose() } }
   }
   return $null
-}
-
-# The roaming support folders of this Civil 3D release (one per installed language).
-$supportDirs = @(Get-ChildItem (Join-Path $env:APPDATA "Autodesk\C3D $year") -Directory -ErrorAction SilentlyContinue |
-  ForEach-Object { Join-Path $_.FullName 'Support' } | Where-Object { Test-Path $_ })
-if ($supportDirs.Count -eq 0) {
-  throw "No Civil 3D $year roaming support folder under $env:APPDATA\Autodesk\C3D $year. Start Civil 3D $year once, then re-run."
 }
 
 # Reads a text file in the encoding it was written in (BOM, else strict UTF-8, else the ANSI code page),
@@ -103,9 +103,7 @@ function Read-TextFile([string] $file) {
   }
 }
 
-# acaddoc.lsp files further down this profile's support path: AutoCAD loads only the first one it finds,
-# so a new file in the roaming folder (first on the path) would hide them; the block then loads it.
-function Find-OtherAcaddoc([string] $exclude) {
+function Get-ProfileSupportFolders {
   $releaseKey = "HKCU:\Software\Autodesk\AutoCAD\$series"
   $product = (Get-ItemProperty -LiteralPath $releaseKey -ErrorAction SilentlyContinue).CurVer
   if (-not $product) { return $null }
@@ -114,15 +112,37 @@ function Find-OtherAcaddoc([string] $exclude) {
   $supportPath = (Get-ItemProperty -LiteralPath "$releaseKey\$product\Profiles\$profileName\General" -ErrorAction SilentlyContinue).ACAD
   foreach ($folder in "$supportPath" -split ';') {
     $folder = [Environment]::ExpandEnvironmentVariables($folder.Trim())
-    if (-not $folder -or $folder.TrimEnd('\') -ieq $exclude.TrimEnd('\')) { continue }
+    if ($folder) {
+      $canonical = Get-CanonicalFolderPath $folder
+      if ($canonical) { $canonical }
+    }
+  }
+}
+
+function Get-CanonicalFolderPath([string] $folder) {
+  # Malformed profile entries cannot name a support folder.
+  try { $full = [IO.Path]::GetFullPath($folder) }
+  catch { return $null }
+  $root = [IO.Path]::GetPathRoot($full)
+  if ($full.Length -gt $root.Length) { return $full.TrimEnd('\', '/') }
+  return $full
+}
+
+# Only a file after ours is hidden by it. Marked files can also hold live user code.
+function Find-OtherAcaddoc([string] $exclude) {
+  $exclude = Get-CanonicalFolderPath $exclude
+  $foundExclude = $false
+  foreach ($folder in Get-ProfileSupportFolders) {
+    if ($folder -ieq $exclude) { $foundExclude = $true; continue }
+    if (-not $foundExclude) { continue }
     $candidate = Join-Path $folder 'acaddoc.lsp'
-    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
   }
   return $null
 }
 
 function Set-AcaddocBlock([string] $file, [string] $block) {
-  $existing = Test-Path $file
+  $existing = Test-Path -LiteralPath $file
   $read = if ($existing) { Read-TextFile $file } else { @{ Text = ''; Encoding = New-Object Text.UTF8Encoding($false) } }
   $text = $read.Text
   $pattern = '(?s)\r?\n?' + [regex]::Escape($beginMarker) + '.*?' + [regex]::Escape($endMarker) + '\r?\n?'
@@ -140,34 +160,110 @@ function Set-AcaddocBlock([string] $file, [string] $block) {
     $other = Find-OtherAcaddoc (Split-Path -Parent $file)
     if ($other) { $loads += $other -replace '\\', '/' }
   }
+  $earlierFolders = @()
+  if ($block) {
+    # Uninstall has no need to read a profile; all-release uninstall has no single $series.
+    $exclude = Get-CanonicalFolderPath (Split-Path -Parent $file)
+    $foundExclude = $false
+    foreach ($folder in Get-ProfileSupportFolders) {
+      if ($folder -ieq $exclude) { $foundExclude = $true; break }
+      $earlierFolders += $folder
+    }
+    if (-not $foundExclude) { $earlierFolders = @() }
+  }
   $unique = @()
-  foreach ($load in $loads) { if ($unique -notcontains $load) { $unique += $load } }
+  foreach ($load in $loads) {
+    # Drop old upward acaddoc links even when the target is currently unavailable.
+    $loadPath = Get-CanonicalFolderPath $load
+    if ($block -and $loadPath -and [IO.Path]::GetFileName($loadPath) -ieq 'acaddoc.lsp' -and
+        $earlierFolders -icontains (Get-CanonicalFolderPath (Split-Path -Parent $loadPath))) {
+      continue
+    }
+    if ($unique -notcontains $load) { $unique += $load }
+  }
   if ($block -and $unique) {
-    $lines = @($unique | ForEach-Object { "(vl-catch-all-apply 'load (list `"$_`"))" })
+    # Source visits stop cycles; loaded targets prevent repeated user initialization in one document.
+    $chainKey = [IO.Path]::GetFullPath($file).Replace('\', '/').ToUpperInvariant()
+    $lines = @("(if (not (member `"$chainKey`" c3dmcp:chain-visited))", '  (progn',
+      "    (setq c3dmcp:chain-visited (cons `"$chainKey`" c3dmcp:chain-visited))",
+      "    (if (not (member `"$chainKey`" c3dmcp:loaded-targets))",
+      "      (setq c3dmcp:loaded-targets (cons `"$chainKey`" c3dmcp:loaded-targets))")
+    $lines += '    )'
+    foreach ($load in $unique) {
+      $targetKey = Get-CanonicalFolderPath $load
+      # Keep malformed saved load lines, using their raw path when normalization fails.
+      if (-not $targetKey) { $targetKey = $load }
+      $targetKey = $targetKey.Replace('\', '/').ToUpperInvariant()
+      $lines += @("    (if (not (member `"$targetKey`" c3dmcp:loaded-targets))", '      (progn',
+        "        (setq c3dmcp:loaded-targets (cons `"$targetKey`" c3dmcp:loaded-targets))",
+        "        (vl-catch-all-apply 'load (list `"$load`"))", '      )', '    )')
+    }
+    $lines += @('  )', ')')
     $block = $block.Replace($beginMarker, (@($beginMarker) + $lines) -join "`r`n")
     $unique | ForEach-Object { "  (also loads the acaddoc.lsp further down the support path: $_)" }
   } elseif ($unique -and $text) {
     # -Uninstall keeps a file that holds other code, and that file hides them again.
     Write-Warning "$file keeps other code, so it hides the acaddoc.lsp further down the support path again: $($unique -join ', '). Load that file from it if it should still run."
   }
-  if ($existing -and -not $ours -and -not (Test-Path "$file.c3dmcp-backup")) {
+  if ($existing -and -not $ours -and -not (Test-Path -LiteralPath "$file.c3dmcp-backup")) {
     # Someone else's file: keep a copy of it as it was before the first change.
-    Copy-Item $file "$file.c3dmcp-backup"
+    Copy-Item -LiteralPath $file -Destination "$file.c3dmcp-backup"
   }
   if ($block) { $text = (($text, $block) | Where-Object { $_ }) -join "`r`n`r`n" }
   if ($text) {
     [IO.File]::WriteAllText($file, $text + "`r`n", $read.Encoding)
   } elseif ($existing) {
     # The file held only our block.
-    Remove-Item $file
+    Remove-Item -LiteralPath $file
+  }
+}
+
+if ($uninstallAll) {
+  # Discover only direct release folders that hold the plugin, and validate every deletion path.
+  $targets = @(if (Test-Path -LiteralPath $Destination -PathType Container) {
+    $destinationRoot = (Get-Item -LiteralPath $Destination).FullName.TrimEnd('\', '/')
+    foreach ($release in Get-ChildItem -LiteralPath $Destination -Directory -Force -Filter 'R*') {
+      if ($release.Name -notlike 'R*') { continue }
+      if (-not (Test-Path -LiteralPath (Join-Path $release.FullName 'Civil3DMcpPlugin.dll') -PathType Leaf)) { continue }
+      $releasePath = [IO.Path]::GetFullPath($release.FullName)
+      if ((Split-Path -Parent $releasePath).TrimEnd('\', '/') -ine $destinationRoot -or
+          ($release.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to remove release folder '$releasePath': it must be a direct folder under '$destinationRoot', not a link."
+      }
+      $releasePath
+    }
+  })
+  # Orphan blocks and plugin-only installations are independent; neither requires the other to exist.
+  $autodeskRoot = Join-Path $env:APPDATA 'Autodesk'
+  $supportDirs = @(if (Test-Path -LiteralPath $autodeskRoot -PathType Container) {
+    Get-ChildItem -LiteralPath $autodeskRoot -Directory -Force | Where-Object { $_.Name -match '^C3D \d{4}$' } |
+      ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -Force } |
+      ForEach-Object { Join-Path $_.FullName 'Support' } |
+      Where-Object {
+        $acaddoc = Join-Path $_ 'acaddoc.lsp'
+        (Test-Path -LiteralPath $acaddoc -PathType Leaf) -and (Read-TextFile $acaddoc).Text.Contains($beginMarker)
+      }
+  })
+} else {
+  $targets = @($target)
+  # The roaming support folders of the selected Civil 3D release (one per installed language).
+  $supportDirs = @(Get-ChildItem (Join-Path $env:APPDATA "Autodesk\C3D $year") -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName 'Support' } | Where-Object { Test-Path $_ })
+  if ($supportDirs.Count -eq 0) {
+    throw "No Civil 3D $year roaming support folder under $env:APPDATA\Autodesk\C3D $year. Start Civil 3D $year once, then re-run."
   }
 }
 
 if ($Uninstall) {
-  $locked = Get-LockedFile $target
-  if ($locked) { throw "'$locked' is loaded by a running Civil 3D. Close it completely, then re-run." }
+  # Check every selected release before changing any plugin folder or startup file.
+  foreach ($releaseTarget in $targets) {
+    $locked = Get-LockedFile $releaseTarget
+    if ($locked) { throw "'$locked' is loaded by a running Civil 3D. Close it completely, then re-run." }
+  }
   foreach ($dir in $supportDirs) { Set-AcaddocBlock (Join-Path $dir 'acaddoc.lsp') ''; "Removed the Civil3D-mcp block from $dir\acaddoc.lsp" }
-  if (Test-Path $target) { Remove-Item $target -Recurse -Force; "Removed $target" }
+  foreach ($releaseTarget in $targets) {
+    if (Test-Path -LiteralPath $releaseTarget) { Remove-Item -LiteralPath $releaseTarget -Recurse -Force; "Removed $releaseTarget" }
+  }
   'Restart Civil 3D for the change to take effect.'
   exit 0
 }
@@ -211,18 +307,28 @@ $copied = $changed.Count
 # S::STARTUP: one defined by others with defun-q is appended to, one defined with defun (a compiled
 # function, not a list) is wrapped. An acaddoc.lsp that our file hides is loaded first (Set-AcaddocBlock
 # adds that line), so its S::STARTUP is wrapped or appended to as well.
+# Keep failed attempts guarded to avoid repeating security prompts in every drawing. C3DMCPLOAD
+# explicitly clears the flag and retries after the user fixes the cause.
 $root = ($Destination -replace '\\', '/').TrimEnd('/')
 $block = @"
 $beginMarker
 (vl-load-com)
 (defun c3dmcp:load ( / dll)
   (setq dll (strcat "$root/R" (substr (getvar "ACADVER") 1 4) "/Civil3DMcpPlugin.dll"))
-  (if (and (not (vl-bb-ref 'c3dmcp:loaded)) (not (getcname "C3DMCPSTATUS")) (findfile dll))
+  (if (and (not (vl-bb-ref 'c3dmcp:loaded)) (not (getcname "C3DMCPSTATUS")))
     (progn
       (vl-bb-set 'c3dmcp:loaded T)
-      (command "_.NETLOAD" dll)
+      (if (findfile dll) (command "_.NETLOAD" dll))
+      (if (not (getcname "C3DMCPSTATUS"))
+        (princ (strcat "\nCivil3D-mcp: the plugin did not load: " dll "; fix the cause (TRUSTEDPATHS, a Do Not Load answer, missing files), then type C3DMCPLOAD."))
+      )
     )
   )
+  (princ)
+)
+(defun c:C3DMCPLOAD ()
+  (vl-bb-set 'c3dmcp:loaded nil)
+  (c3dmcp:load)
   (princ)
 )
 (defun-q c3dmcp:startup () (c3dmcp:load))
