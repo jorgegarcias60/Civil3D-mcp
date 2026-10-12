@@ -43,6 +43,7 @@ export const RunCodeArgsSchema = z.object({
   action: z.literal("run"),
   code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS).optional(),
   codePath: absolutePath.optional(),
+  document: z.string().min(1).max(1024).optional(),
   mode: z.enum(["read", "write"]).optional(),
   timeoutSeconds: z.number().int().min(1).optional(),
   maxInlineBytes: z.number().int().min(1024).max(1024 * 1024).optional(),
@@ -177,7 +178,7 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
       // "manage" + not safe for retry: approval is required (and forced for
       // this tool even when approvals are disabled).
       capabilities: ["query", "analyze", "manage"],
-      requiresActiveDrawing: true,
+      requiresActiveDrawing: false,
       safeForRetry: false,
       pluginMethods: ["runCode"],
       execute: async (parsedArgs, context) => {
@@ -193,20 +194,23 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
         try {
           const response = await withApplicationConnection(
             async (appClient) => {
-              if (args.copyOutputsTo !== undefined || args.keepOutputs !== undefined || timeoutSeconds > 90) {
+              if (args.document !== undefined || args.copyOutputsTo !== undefined || args.keepOutputs !== undefined || timeoutSeconds > 90) {
                 const health = await appClient.sendCommand("getCivil3DHealth", {}) as Record<string, unknown>;
                 const api = typeof health?.runCodeApi === "number" ? health.runCodeApi : 1;
-                if (api < 3) {
-                  const parameter = args.copyOutputsTo !== undefined ? "copyOutputsTo"
+                const requiredApi = args.document !== undefined ? 4 : 3;
+                if (api < requiredApi) {
+                  const parameter = args.document !== undefined ? "document"
+                    : args.copyOutputsTo !== undefined ? "copyOutputsTo"
                     : args.keepOutputs !== undefined ? "keepOutputs" : "timeoutSeconds";
                   throw new Civil3DRpcError(
-                    `The Civil 3D plugin is older than this server: ${parameter} needs runCode API 3, the loaded plugin has ${api}. Install the plugin from this build (Civil 3D closed). Nothing ran.`,
+                    `The Civil 3D plugin is older than this server: ${parameter} needs runCode API ${requiredApi}, the loaded plugin has ${api}. Install the plugin from this build (Civil 3D closed). Nothing ran.`,
                     "CIVIL3D.INVALID_INPUT", -32602,
                   );
                 }
               }
               return await appClient.sendCommand("runCode", {
                 code: args.code,
+                ...(args.document !== undefined ? { document: args.document } : {}),
                 ...(args.codePath ? { codePath: args.codePath } : {}),
                 ...(args.argsPath ? { argsPath: args.argsPath } : {}),
                 ...(args.copyOutputsTo !== undefined ? { copyOutputsTo: args.copyOutputsTo } : {}),
@@ -254,8 +258,9 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
           ? "Call this tool directly: your MCP client's tool permission is the approval; calls through civil3d_orchestrate, civil3d_docs or the HTTP bridge still need a civil3d_request_approval token. "
           : "Always needs approval: call civil3d_request_approval with toolName civil3d_run_code, action 'run' and the same parameters, then retry with approvalToken. ") +
         "The code runs with the user's full rights. " +
+        "For a read, document selects another open drawing by full path or unique file name without changing the active drawing; with no drawing open, OpenSide(path) can still read a DWG. Db, Doc, Ed, Civil and Tr need an open drawing. Writes target the active drawing only; a document write naming another drawing is refused. " +
         "The snippet is the body of `object Run()`: statements, local functions and leading `using` lines; `return` a value (JSON: points and vectors as [x,y,z], ObjectIds as handles, tuples as arrays, anonymous objects by property). " +
-        "In scope: Doc, Db, Ed, Civil (CivilDocument), Tr (the run's transaction), Args (the 'args' object), Log(x), Check(), Open<T>(id, forWrite), ModelSpace<T>(db), PaperSpace<T>(layout, db), ById(hex, db), OpenSide(path), OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, EnsureLayer(name, colorIndex?, linetype?, db) and Tag(obj, app, value?) in write mode, TagValue and Tagged<T>(app, value?, db), TransactionFor(db), WriteFile(name, text or lines) (into the run folder), Session (a dictionary kept across runs until Civil 3D closes; plain data only). OpenSide and OpenSideOrNull return managed read-only side databases; do not dispose them. " +
+        "In scope: Doc, Db, Ed, Civil (CivilDocument), Tr (the run's transaction), HasDrawing, Args (the 'args' object), Log(x), Check(), Open<T>(id, forWrite), ModelSpace<T>(db), PaperSpace<T>(layout, db), ById(hex, db), OpenSide(path), OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, EnsureLayer(name, colorIndex?, linetype?, db) and Tag(obj, app, value?) in write mode, TagValue and Tagged<T>(app, value?, db), TransactionFor(db), WriteFile(name, text or lines) (into the run folder), Session (a dictionary kept across runs until Civil 3D closes; plain data only). OpenSide and OpenSideOrNull return managed read-only side databases; do not dispose them. " +
         "Namespaces: System, Linq, IO, Text, Text.Json, Autodesk.AutoCAD ApplicationServices/DatabaseServices/EditorInput/Geometry/Colors, Autodesk.Civil, Civil ApplicationServices/DatabaseServices/Styles; names both AutoCAD and Civil 3D define mean AutoCAD's (DBObject, Entity, Table, Shape...; Civil 3D's are CivilDBObject, CivilEntity...), except Surface and Section, which are Civil 3D's (AcSurface, AcSection); AcException is AutoCAD's exception. " +
         "Civil 3D's user interface freezes during a long read and it does not answer other tool calls until the run finishes. Call Check() in long loops, which ends the run when timeoutSeconds (read 1-600, write 1-90, default 30) is used up or the request is cancelled; a timeout the script catches still ends the run as a timeout. The server sends MCP progress every 15 seconds when the client provides a progress token. " +
         "mode 'read' (default): an open-close transaction, never committed; the compiler refuses OpenMode.ForWrite, UpgradeOpen, Erase, AppendEntity, Civil 3D Create/Add/Update..., regular transactions and drawing-setting setters, including ++/-- and deconstruction (a guard against mistakes, not a sandbox). " +
@@ -266,6 +271,7 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
       inputShape: {
         code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS).optional(),
         codePath: absolutePath.optional(),
+        document: z.string().min(1).max(1024).optional(),
         mode: z.enum(["read", "write"]).optional(),
         timeoutSeconds: z.number().int().min(1).max(RUN_CODE_MAX_READ_TIMEOUT_SECONDS).optional(),
         maxInlineBytes: z.number().int().min(1024).max(1024 * 1024).optional(),

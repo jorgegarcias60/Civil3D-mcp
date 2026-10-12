@@ -16,7 +16,32 @@ internal static class RuntimeChecks
     CheckOutput(expect);
     CheckAuth(expect);
     CheckHelpers(expect);
+    CheckDocuments(expect);
     CheckCopies(expect);
+  }
+
+  private static void CheckDocuments(Action<bool, string> expect)
+  {
+    var names = new[] { @"C:\one\Alpha.dwg", @"C:\two\Shared.dwg", @"D:\three\Shared.dwg", "Drawing1.dwg", @"C:\one\Site.rev2.dwg" };
+    var full = RunCodeHelpers.MatchDocument("c:/ONE/ALPHA.dwg", names);
+    expect(full == (0, null), "MatchDocument normalizes full paths, case and forward slashes");
+    expect(RunCodeHelpers.MatchDocument(@"C:\one\..\one\Alpha.dwg", names) == (0, null), "MatchDocument resolves full-path dot segments");
+    expect(RunCodeHelpers.MatchDocument("ALPHA.dwg", names) == (0, null), "MatchDocument matches a unique bare filename");
+    expect(RunCodeHelpers.MatchDocument("alpha", names) == (0, null), "MatchDocument accepts a bare name without .dwg");
+    expect(RunCodeHelpers.MatchDocument("Drawing1.dwg", names) == (3, null)
+      && RunCodeHelpers.MatchDocument("Drawing1", names) == (3, null), "MatchDocument uses unsaved Document.Name values");
+    var ambiguous = RunCodeHelpers.MatchDocument("Shared", names);
+    expect(ambiguous.Index == -1 && ambiguous.Error!.Contains("ambiguous")
+      && ambiguous.Error.Contains(names[1]) && ambiguous.Error.Contains(names[2]), "ambiguous names list both open drawings");
+    var cwdUnsaved = RunCodeHelpers.MatchDocument(Path.Combine(Environment.CurrentDirectory, "Drawing1.dwg"), names);
+    expect(cwdUnsaved.Index == -1 && cwdUnsaved.Error!.Contains("not open"),
+      "a full path never matches an unsaved drawing through the process folder");
+    var missing = RunCodeHelpers.MatchDocument(@"C:\missing\Alpha.dwg", names);
+    expect(missing.Index == -1 && missing.Error!.Contains("not open") && names.All(missing.Error.Contains),
+      "a not-open full path does not fall back to its filename and lists all open drawings");
+    var empty = RunCodeHelpers.MatchDocument("Alpha", Array.Empty<string>());
+    expect(empty.Index == -1 && empty.Error!.Contains("Open drawings:"), "no open names produces a useful not-open error");
+    expect(RunCodeHelpers.MatchDocument("Site.rev2", names) == (4, null), "a dotted bare drawing name accepts omitted .dwg");
   }
 
   private static void CheckHelpers(Action<bool, string> expect)

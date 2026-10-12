@@ -42,7 +42,7 @@ const runTarget = {
   action: "run",
   capabilities: CODE_DOMAIN_DEFINITION.actions.run.capabilities,
   safeForRetry: CODE_DOMAIN_DEFINITION.actions.run.safeForRetry,
-  requiresActiveDrawing: true,
+  requiresActiveDrawing: CODE_DOMAIN_DEFINITION.actions.run.requiresActiveDrawing,
 };
 
 describe("civil3d_run_code domain", () => {
@@ -58,6 +58,8 @@ describe("civil3d_run_code domain", () => {
     expect(entry!.domain).toBe("code");
     expect(entry!.pluginMethods).toEqual(["runCode"]);
     expect(entry!.safeForRetry).toBe(false);
+    expect(entry!.requiresActiveDrawing).toBe(false);
+    expect(CODE_DOMAIN_DEFINITION.actions.run.requiresActiveDrawing).toBe(false);
     expect(findManifestAction("civil3d_run_code", "run")).toBeDefined();
   });
 
@@ -97,6 +99,10 @@ describe("civil3d_run_code domain", () => {
     const valid = { action: "run", code: "return Db.Filename;" };
     expect(RunCodeArgsSchema.safeParse(valid).success).toBe(true);
     expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "write", timeoutSeconds: 90, args: { dwg: "C:/bg.dwg" } }).success).toBe(true);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, document: "B.dwg" }).success).toBe(true);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, document: "C:/Drawings/B.dwg" }).success).toBe(true);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, document: "" }).success).toBe(false);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, document: "x".repeat(1025) }).success).toBe(false);
     expect(RunCodeArgsSchema.safeParse({ ...valid, code: "" }).success).toBe(false);
     expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "admin" }).success).toBe(false);
     expect(RunCodeArgsSchema.safeParse({ ...valid, timeoutSeconds: 0 }).success).toBe(false);
@@ -229,6 +235,27 @@ describe("civil3d_run_code execution", () => {
     expect(params.startWithinSeconds).toBe(30);
     expect(params).not.toHaveProperty("authToken");
     expect(options).toEqual({ timeoutMs: Math.max(COMMAND_TIMEOUT_MS, 90_000) });
+  });
+
+  it("sends document only when set and checks API 4 before runCode", async () => {
+    sendCommandMock.mockImplementation(async (method: string) =>
+      method === "getCivil3DHealth" ? { runCodeApi: 4 } : okResponse);
+    await execute(RunCodeArgsSchema.parse({ action: "run", code: "return Doc.Name;", document: "B.dwg" }));
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth", "runCode"]);
+    expect(sendCommandMock.mock.calls[1][1].document).toBe("B.dwg");
+    sendCommandMock.mockReset();
+    sendCommandMock.mockResolvedValue(okResponse);
+    await execute(RunCodeArgsSchema.parse({ action: "run", code: "return 1;" }));
+    expect(sendCommandMock.mock.calls[0][1]).not.toHaveProperty("document");
+  });
+
+  it.each([undefined, 3])("refuses document with runCode API %s before running", async (api) => {
+    sendCommandMock.mockResolvedValue({ runCodeApi: api });
+    const error = await execute(RunCodeArgsSchema.parse({ action: "run", code: "return 1;", document: "B.dwg" })).catch((e) => e);
+    expect(error).toBeInstanceOf(Civil3DRpcError);
+    expect(error.message).toMatch(/document needs runCode API 4/);
+    expect(error.message).toMatch(/Nothing ran/);
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth"]);
   });
 
   it("approves the caller's arguments, not the token added at execution", async () => {

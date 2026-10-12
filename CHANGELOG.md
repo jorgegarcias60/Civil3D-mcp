@@ -4,6 +4,8 @@
 
 ### Added
 
+- Run-code API 4: optional `document` selects another open drawing for read scripts by full path or unique file name, without changing the active drawing. With no drawing open, read scripts can use `OpenSide(path)`; `HasDrawing` reports whether drawing-backed accessors are available. Writes remain limited to the active drawing. The server checks API 4 before sending `document`.
+
 - Run-code API 3: `codePath` and `argsPath` with content-bound approvals,
   `copyOutputsTo`, and `keepOutputs`. Reads allow 600 seconds; writes stay at 90.
   Long runs send progress heartbeats when the client supplies a progress token.

@@ -8,6 +8,8 @@ using CoreApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace Civil3DMcpPlugin;
 
+public readonly record struct RunCodeHost(Document? Doc, CivilDocument? Civil, Database? Database, Transaction? Transaction);
+
 public static class CivilExecution
 {
   private static readonly SemaphoreSlim HostExecutionGate = new(1, 1);
@@ -27,72 +29,139 @@ public static class CivilExecution
 
   public static async Task<T> ExecuteAsync<T>(Func<Document, CivilDocument, Database, Transaction, T> action, bool write, bool inCommand = false, bool commandLine = false)
   {
+    return await ExecuteSerializedAsync(cancellationToken => ExecuteOnHostAsync(action, write, inCommand, commandLine, cancellationToken));
+  }
+
+  public static async Task<T> ExecuteRunCodeAsync<T>(string? document, bool writeMode, Func<RunCodeHost, T> action)
+  {
+    if (document == null && App.DocumentManager.MdiActiveDocument != null)
+      return await ExecuteAsync((doc, civil, db, tr) => action(new(doc, civil, db, tr)), write: false, inCommand: writeMode);
+
     return await ExecuteSerializedAsync(async cancellationToken =>
     {
-      // With zero documents open there is no command context, so the
-      // ExecuteInCommandContextAsync callback below never runs and the
-      // NO_DRAWING check inside it is unreachable. Hanging here would hold
-      // HostExecutionGate forever and wedge every later host operation, so
-      // fail fast before the hop. The inner check stays because the document
-      // can still close while this request waits in the queue.
-      if (App.DocumentManager.MdiActiveDocument == null)
-      {
-        throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
-      }
-
       T? result = default;
-      Exception? capturedException = null;
-
-      // Read on the request's thread: the expected identity is an AsyncLocal,
-      // and the Idle and plugin-command routes run on the UI thread's
-      // execution context, where it would read empty and skip the check.
-      var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
-
-      var hostTask = RunOnHostAsync(route =>
+      Document? target = null;
+      Exception? failure = null;
+      await RunOnHostAsync(_ =>
       {
         try
         {
           cancellationToken.ThrowIfCancellationRequested();
-          var doc = RequireExpectedDocument(expectedDrawingIdentity, "No drawing changes were made.");
-          var civilDoc = CivilApplication.ActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active Civil 3D document is available.");
-          var database = doc.Database;
-
-          using var documentLock = doc.LockDocument();
-          // Outside a command (the Idle route), a document lock plus a regular
-          // Transaction wipes the drawing's undo history even when it is only
-          // read and aborted; an OpenCloseTransaction does not. Only plain reads
-          // take the Idle route. Writes run in a command (PluginCommand) so they
-          // are one undoable step, and so do reads that create scratch objects:
-          // aborting a regular Transaction removes them again, aborting an
-          // OpenCloseTransaction does not.
-          using var transaction = route == HostRoute.Idle
-            ? database.TransactionManager.StartOpenCloseTransaction()
-            : database.TransactionManager.StartTransaction();
-
-          result = action(doc, civilDoc, database, transaction);
-
-          if (write)
+          var active = App.DocumentManager.MdiActiveDocument;
+          if (active == null)
           {
-            transaction.Commit();
+            if (writeMode || document != null)
+              throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
+            result = action(default);
+            return Task.CompletedTask;
           }
-        }
-        catch (Exception ex)
-        {
-          capturedException = ex;
-        }
 
+          var open = App.DocumentManager.Cast<Document>().ToArray();
+          var match = document == null ? (Index: Array.IndexOf(open, active), Error: (string?)null)
+            : RunCodeHelpers.MatchDocument(document, open.Select(doc => doc.Name).ToArray());
+          if (match.Error != null)
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", match.Error);
+          target = open[match.Index];
+          if (writeMode)
+          {
+            if (target != active) throw ActiveWriteOnly();
+            return Task.CompletedTask;
+          }
+
+          var civil = CivilDocument.GetCivilDocument(target.Database);
+          DocumentLock documentLock;
+          try { documentLock = target.LockDocument(); }
+          catch (Autodesk.AutoCAD.Runtime.Exception error) when (error.ErrorStatus == Autodesk.AutoCAD.Runtime.ErrorStatus.LockViolation)
+          {
+            throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"Drawing '{target.Name}' is locked by other work; nothing ran.");
+          }
+          using (documentLock)
+          using (var transaction = target.Database.TransactionManager.StartOpenCloseTransaction())
+            result = action(new(target, civil, target.Database, transaction));
+        }
+        catch (Exception error) { failure = error; }
         return Task.CompletedTask;
-      }, needsCommand: write || inCommand, needsQuietEditor: commandLine, cancellationToken);
-
-      await AwaitHostContextAsync(hostTask, cancellationToken);
-
-      if (capturedException != null)
+      }, needsCommand: false, needsQuietEditor: false, cancellationToken);
+      if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+      if (writeMode)
       {
-        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(capturedException).Throw();
+        // Keep the same host gate through the command hop. Recheck the target
+        // inside the command in case the user switched drawings while queued.
+        return await ExecuteOnHostAsync((doc, civil, db, tr) =>
+        {
+          if (doc != target) throw ActiveWriteOnly();
+          return action(new(doc, civil, db, tr));
+        }, write: false, inCommand: true, commandLine: false, cancellationToken);
       }
-
       return result!;
     });
+  }
+
+  private static JsonRpcDispatchException ActiveWriteOnly() => new("CIVIL3D.INVALID_INPUT", "write mode runs on the active drawing; switch to it first");
+
+  private static async Task<T> ExecuteOnHostAsync<T>(Func<Document, CivilDocument, Database, Transaction, T> action,
+    bool write, bool inCommand, bool commandLine, CancellationToken cancellationToken)
+  {
+    // These operations require a drawing. Idle itself also works with zero
+    // documents, as used by ExecuteRunCodeAsync for side-file-only reads.
+    // Check again in the callback because a drawing can close while queued.
+    if (App.DocumentManager.MdiActiveDocument == null)
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
+    }
+
+    T? result = default;
+    Exception? capturedException = null;
+
+    // Read on the request's thread: the expected identity is an AsyncLocal,
+    // and the Idle and plugin-command routes run on the UI thread's
+    // execution context, where it would read empty and skip the check.
+    var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
+
+    var hostTask = RunOnHostAsync(route =>
+    {
+      try
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        var doc = RequireExpectedDocument(expectedDrawingIdentity, "No drawing changes were made.");
+        var civilDoc = CivilApplication.ActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active Civil 3D document is available.");
+        var database = doc.Database;
+
+        using var documentLock = doc.LockDocument();
+        // Outside a command (the Idle route), a document lock plus a regular
+        // Transaction wipes the drawing's undo history even when it is only
+        // read and aborted; an OpenCloseTransaction does not. Only plain reads
+        // take the Idle route. Writes run in a command (PluginCommand) so they
+        // are one undoable step, and so do reads that create scratch objects:
+        // aborting a regular Transaction removes them again, aborting an
+        // OpenCloseTransaction does not.
+        using var transaction = route == HostRoute.Idle
+          ? database.TransactionManager.StartOpenCloseTransaction()
+          : database.TransactionManager.StartTransaction();
+
+        result = action(doc, civilDoc, database, transaction);
+
+        if (write)
+        {
+          transaction.Commit();
+        }
+      }
+      catch (Exception ex)
+      {
+        capturedException = ex;
+      }
+
+      return Task.CompletedTask;
+    }, needsCommand: write || inCommand, needsQuietEditor: commandLine, cancellationToken);
+
+    await AwaitHostContextAsync(hostTask, cancellationToken);
+
+    if (capturedException != null)
+    {
+      System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(capturedException).Throw();
+    }
+
+    return result!;
   }
 
   // Same host gate, command context, drawing-identity check, and document
@@ -398,8 +467,9 @@ public static class CivilExecution
         }
 
         var now = DateTime.UtcNow;
-        var busy = Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) != 0
-          || ((needsCommand || needsQuietEditor) && App.DocumentManager.MdiActiveDocument?.Editor.IsQuiescent == false);
+        var activeDocument = App.DocumentManager.MdiActiveDocument;
+        var busy = activeDocument != null && (Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) != 0
+          || ((needsCommand || needsQuietEditor) && activeDocument.Editor.IsQuiescent == false));
         if (busy)
         {
           busySince ??= now;

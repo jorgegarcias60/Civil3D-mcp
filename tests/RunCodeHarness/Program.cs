@@ -383,6 +383,10 @@ var again = Compile("return 1;");
 Expect(unique.Succeeded && again.Succeeded && unique.TypeName != again.TypeName, "each run gets its own class and assembly name");
 
 RuntimeChecks.Run((condition, name) => Expect(condition, name));
+var executionSource = File.ReadAllText(Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "CivilExecution.cs"));
+Expect(executionSource.Contains("return await ExecuteAsync((doc, civil, db, tr) => action(new(doc, civil, db, tr)), write: false, inCommand: writeMode);"),
+  "untargeted runCode keeps ExecuteAsync(write: false, inCommand: writeMode)");
+Expect(Compile("return HasDrawing;").Succeeded, "HasDrawing is available to read scripts");
 Console.WriteLine(failures == 0 ? $"PASS ({references.Count} references)" : $"{failures} FAILED");
 return failures == 0 ? 0 : 1;
 
