@@ -128,6 +128,17 @@
   - An unknown style name lists the available ones; profile `label_set` says
     the .NET API cannot set it instead of failing obscurely.
   - `scripts/live-label-smoke.mjs` checks all of it in a running Civil 3D.
+- `createAlignment` from `points` reported `curvesAdded: 0` while Civil 3D
+  fitted curves at the drawing's default radius (`addCurves` defaults to true
+  for points), so an alignment meant to follow the points came out shorter with
+  nothing in the result to say why. `curvesAdded` now counts those curves too,
+  with `curvesAutoFitted` and `curveCount` (arcs on the finished alignment;
+  arcs already in a traced polyline are not counted as fitted). A warning
+  names the default when it fitted curves the caller did not ask for, and the
+  `addCurves` field describes its default.
+- A path outside the plugin's file roots now names the allowed roots and the
+  variables that add one, instead of only "outside the configured roots".
+
 - Every plugin call hung until Civil 3D restarted once any COM client had run
   a command with `SendCommand`. Verified on 2027 with only this plugin loaded:
   in a disconnected Windows session the first such command (from PowerShell,
@@ -233,6 +244,20 @@
   Windows clone with `core.autocrlf=true`; comparisons now ignore CRLF/LF.
 
 ### Added
+
+- `civil3d_style list|get` takes `profile_view`, `profile_view_band_set`,
+  `section_view` and `section_view_band_set`, so the names that
+  `civil3d_profile view_create`/`view_band_set` and the section view tools
+  accept can be listed.
+- `civil3d_profile view_update` (also `civil3d_profile_view_update`, plugin
+  `profileViewUpdate`): set an existing profile view's style, layer, station
+  range (`stationStart`/`stationEnd`, or `stationRange: "auto"`), elevation
+  range (`elevationMin`/`elevationMax`, or `elevationRange: "auto"`) and
+  vertical exaggeration. `view_create` takes the same range and exaggeration
+  fields. Vertical exaggeration is part of the profile view style, so it
+  changes every view using the style; the result lists them in
+  `styleSharedWith` and warns when there are others. Approval-gated like
+  `view_band_set`.
 
 - Read-only geometry for the Civil 3D-Revit bridge. None of these is
   approval-gated (`query`/`inspect`, `safeForRetry`):

@@ -183,7 +183,9 @@ internal static class FileBoundary
     {
       throw new JsonRpcDispatchException(
         "CIVIL3D.PATH_NOT_ALLOWED",
-        $"The {operation} path is outside the configured roots: {canonicalPath}");
+        $"The {operation} path is outside the configured {operation} roots: {canonicalPath}. " +
+        $"Allowed roots: {string.Join("; ", roots)}. Add a folder with {(operation == "import" ? ImportRootsVariable : ExportRootsVariable)} " +
+        $"or {SharedRootsVariable} (semicolon-separated absolute paths, read when Civil 3D starts).");
     }
 
     RejectReparsePointTraversal(canonicalPath, matchedRoot);

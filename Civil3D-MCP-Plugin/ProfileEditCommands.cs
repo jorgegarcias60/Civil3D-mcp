@@ -1,14 +1,17 @@
 using System.Text.Json.Nodes;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
+using Autodesk.Civil;
 using Autodesk.Civil.DatabaseServices;
+using Autodesk.Civil.DatabaseServices.Styles;
 
 namespace Civil3DMcpPlugin;
 
 /// <summary>
 /// Editing commands for Civil 3D vertical profiles and profile views:
 /// add_pvi, delete_pvi, add_curve, set_grade, get_elevation,
-/// check_k_values, profile_view_create, profile_view_band_set.
+/// check_k_values, profile_view_create, profile_view_band_set,
+/// profile_view_update.
 /// </summary>
 public static class ProfileEditCommands
 {
@@ -291,6 +294,7 @@ public static class ProfileEditCommands
     var requestedStyle = PluginRuntime.GetOptionalString(parameters, "style");
     var requestedBandSet = PluginRuntime.GetOptionalString(parameters, "bandSet");
     var requestedLayer = PluginRuntime.GetOptionalString(parameters, "layer");
+    var settings = ProfileViewSettings.Read(parameters, includeStyle: false);
 
     return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
     {
@@ -391,7 +395,9 @@ public static class ProfileEditCommands
         profileView.LayerId = layerId;
       }
 
-      return new Dictionary<string, object?>
+      var styleSharedWith = ApplyViewSettings(civilDoc, transaction, profileView, settings, warnings);
+
+      var result = new Dictionary<string, object?>
       {
         ["profileViewName"] = profileView.Name,
         ["name"] = profileView.Name,
@@ -402,9 +408,11 @@ public static class ProfileEditCommands
         ["bandSet"] = bandSetName,
         ["insertX"] = insertX,
         ["insertY"] = insertY,
-        ["warnings"] = warnings,
-        ["success"] = true,
       };
+      AddViewState(transaction, profileView, result, styleSharedWith);
+      result["warnings"] = warnings;
+      result["success"] = true;
+      return result;
     });
   }
 
@@ -468,6 +476,278 @@ public static class ProfileEditCommands
         ["success"] = true,
       };
     });
+  }
+
+  // ─── profileViewUpdate ────────────────────────────────────────────────────
+
+  public static Task<object?> ProfileViewUpdateAsync(JsonObject? parameters)
+  {
+    var profileViewName = PluginRuntime.GetRequiredString(parameters, "profileViewName");
+    var requestedLayer = PluginRuntime.GetOptionalString(parameters, "layer");
+    var settings = ProfileViewSettings.Read(parameters, includeStyle: true);
+    if (!settings.Any && string.IsNullOrWhiteSpace(requestedLayer))
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.INVALID_INPUT",
+        "profileViewUpdate needs at least one of: style, verticalExaggeration, stationStart, stationEnd, stationRange, elevationMin, elevationMax, elevationRange, layer.");
+    }
+
+    return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
+    {
+      var found = FindProfileViewByName(civilDoc, transaction, profileViewName);
+      var profileView = CivilObjectUtils.GetRequiredObject<ProfileView>(transaction, found.ObjectId, OpenMode.ForWrite);
+      var warnings = new List<string>();
+
+      if (!string.IsNullOrWhiteSpace(requestedLayer))
+      {
+        profileView.LayerId = LookupUtils.GetLayerId(database, transaction, requestedLayer);
+      }
+
+      var styleSharedWith = ApplyViewSettings(civilDoc, transaction, profileView, settings, warnings);
+
+      var result = new Dictionary<string, object?>
+      {
+        ["profileViewName"] = profileView.Name,
+        ["handle"] = CivilObjectUtils.GetHandle(profileView),
+        ["layer"] = profileView.Layer,
+        ["style"] = NameOf(transaction, profileView.StyleId),
+      };
+      AddViewState(transaction, profileView, result, styleSharedWith);
+      result["warnings"] = warnings;
+      result["success"] = true;
+      return result;
+    });
+  }
+
+  // Style, vertical exaggeration and station/elevation ranges for a profile
+  // view. A range given as numbers switches that range to user-specified; a
+  // range of "auto" switches it back to Civil 3D's automatic range. Values
+  // that are not given leave the view as it is.
+  private sealed record ProfileViewSettings(
+    string? Style,
+    double? VerticalExaggeration,
+    double? StationStart,
+    double? StationEnd,
+    bool StationAuto,
+    double? ElevationMin,
+    double? ElevationMax,
+    bool ElevationAuto)
+  {
+    public bool Any => Style != null || VerticalExaggeration != null
+      || StationStart != null || StationEnd != null || StationAuto
+      || ElevationMin != null || ElevationMax != null || ElevationAuto;
+
+    // profileViewCreate resolves its own style (it is needed by Create), so it
+    // reads everything else here.
+    public static ProfileViewSettings Read(JsonObject? parameters, bool includeStyle)
+    {
+      var stationAuto = ReadRangeMode(parameters, "stationRange");
+      var elevationAuto = ReadRangeMode(parameters, "elevationRange");
+      var settings = new ProfileViewSettings(
+        includeStyle ? PluginRuntime.GetOptionalString(parameters, "style") : null,
+        PluginRuntime.GetOptionalDouble(parameters, "verticalExaggeration"),
+        PluginRuntime.GetOptionalDouble(parameters, "stationStart"),
+        PluginRuntime.GetOptionalDouble(parameters, "stationEnd"),
+        stationAuto,
+        PluginRuntime.GetOptionalDouble(parameters, "elevationMin"),
+        PluginRuntime.GetOptionalDouble(parameters, "elevationMax"),
+        elevationAuto);
+
+      if (settings.VerticalExaggeration is <= 0)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'verticalExaggeration' must be greater than zero.");
+      }
+      if (stationAuto && (settings.StationStart != null || settings.StationEnd != null))
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "stationRange 'auto' cannot be combined with stationStart/stationEnd.");
+      }
+      if (elevationAuto && (settings.ElevationMin != null || settings.ElevationMax != null))
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "elevationRange 'auto' cannot be combined with elevationMin/elevationMax.");
+      }
+      if (settings.StationStart != null && settings.StationEnd != null && settings.StationStart >= settings.StationEnd)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'stationStart' must be less than 'stationEnd'.");
+      }
+      if (settings.ElevationMin != null && settings.ElevationMax != null && settings.ElevationMin >= settings.ElevationMax)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'elevationMin' must be less than 'elevationMax'.");
+      }
+
+      return settings;
+    }
+
+    private static bool ReadRangeMode(JsonObject? parameters, string name)
+    {
+      var value = PluginRuntime.GetOptionalString(parameters, name);
+      if (value == null)
+      {
+        return false;
+      }
+      if (string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase))
+      {
+        return true;
+      }
+
+      // Numbers make a range user-specified; "auto" is the only mode to ask for.
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"'{name}' must be 'auto'; give numbers for a user-specified range.");
+    }
+  }
+
+  // Applies the settings to a profile view open for write. Vertical
+  // exaggeration belongs to the profile view style, so it changes every view
+  // that uses the style; returns those views' names (null when it was not set).
+  private static List<string>? ApplyViewSettings(
+    Autodesk.Civil.ApplicationServices.CivilDocument civilDoc,
+    Transaction transaction,
+    ProfileView profileView,
+    ProfileViewSettings settings,
+    List<string> warnings)
+  {
+    if (settings.Style != null)
+    {
+      var styleId = LookupUtils.GetProfileViewStyleId(civilDoc, transaction, settings.Style);
+      Apply(() => profileView.StyleId = styleId, $"style '{settings.Style}'");
+    }
+
+    if (settings.StationAuto)
+    {
+      Apply(() => profileView.StationRangeMode = StationRangeType.Automatic, "the automatic station range");
+    }
+    else if (settings.StationStart != null || settings.StationEnd != null)
+    {
+      var start = settings.StationStart ?? profileView.StationStart;
+      var end = settings.StationEnd ?? profileView.StationEnd;
+      if (start >= end)
+      {
+        throw new JsonRpcDispatchException(
+          "CIVIL3D.INVALID_INPUT", $"The station range {start:0.###} to {end:0.###} is empty; give both stationStart and stationEnd.");
+      }
+
+      Apply(() =>
+      {
+        profileView.StationRangeMode = StationRangeType.UserSpecified;
+        // When the new range starts past the current end, move the end first
+        // so the start never passes the end on the way.
+        if (start >= profileView.StationEnd)
+        {
+          profileView.StationEnd = end;
+          profileView.StationStart = start;
+        }
+        else
+        {
+          profileView.StationStart = start;
+          profileView.StationEnd = end;
+        }
+      }, $"the station range {start:0.###} to {end:0.###}");
+    }
+
+    if (settings.ElevationAuto)
+    {
+      Apply(() => profileView.ElevationRangeMode = ElevationRangeType.Automatic, "the automatic elevation range");
+    }
+    else if (settings.ElevationMin != null || settings.ElevationMax != null)
+    {
+      var min = settings.ElevationMin ?? profileView.ElevationMin;
+      var max = settings.ElevationMax ?? profileView.ElevationMax;
+      if (min >= max)
+      {
+        throw new JsonRpcDispatchException(
+          "CIVIL3D.INVALID_INPUT", $"The elevation range {min:0.###} to {max:0.###} is empty; give both elevationMin and elevationMax.");
+      }
+
+      Apply(() =>
+      {
+        profileView.ElevationRangeMode = ElevationRangeType.UserSpecified;
+        if (min >= profileView.ElevationMax)
+        {
+          profileView.ElevationMax = max;
+          profileView.ElevationMin = min;
+        }
+        else
+        {
+          profileView.ElevationMin = min;
+          profileView.ElevationMax = max;
+        }
+      }, $"the elevation range {min:0.###} to {max:0.###}");
+    }
+
+    if (settings.VerticalExaggeration == null)
+    {
+      return null;
+    }
+
+    var exaggeration = settings.VerticalExaggeration.Value;
+    var style = CivilObjectUtils.GetRequiredObject<ProfileViewStyle>(transaction, profileView.StyleId, OpenMode.ForWrite);
+    Apply(() => style.GraphStyle.VerticalExaggeration = exaggeration, $"vertical exaggeration {exaggeration:0.###}");
+
+    var sharedWith = ProfileViewsUsingStyle(civilDoc, transaction, profileView.StyleId);
+    var others = sharedWith.Where(name => !string.Equals(name, profileView.Name, StringComparison.Ordinal)).ToList();
+    if (others.Count > 0)
+    {
+      warnings.Add(
+        $"Vertical exaggeration is part of the profile view style '{style.Name}', so it also changed for: {string.Join(", ", others)}. " +
+        "Give this view its own style to change it alone.");
+    }
+
+    return sharedWith;
+
+    static void Apply(Action action, string what)
+    {
+      try
+      {
+        action();
+      }
+      catch (System.Exception ex) when (ex is not JsonRpcDispatchException)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Civil 3D could not apply {what} to the profile view: {ex.Message}");
+      }
+    }
+  }
+
+  private static List<string> ProfileViewsUsingStyle(
+    Autodesk.Civil.ApplicationServices.CivilDocument civilDoc, Transaction transaction, ObjectId styleId)
+  {
+    var names = new List<string>();
+    foreach (ObjectId alignmentId in civilDoc.GetAlignmentIds())
+    {
+      if (transaction.GetObject(alignmentId, OpenMode.ForRead) is not Alignment alignment)
+      {
+        continue;
+      }
+
+      foreach (ObjectId viewId in alignment.GetProfileViewIds())
+      {
+        if (transaction.GetObject(viewId, OpenMode.ForRead) is ProfileView view && view.StyleId == styleId)
+        {
+          names.Add(view.Name);
+        }
+      }
+    }
+
+    return names;
+  }
+
+  // The view's resulting ranges and vertical exaggeration. Extents are left out:
+  // a style change (vertical exaggeration) does not reach them until the
+  // transaction commits.
+  private static void AddViewState(
+    Transaction transaction, ProfileView profileView, Dictionary<string, object?> result, List<string>? styleSharedWith)
+  {
+    result["stationRange"] = profileView.StationRangeMode == StationRangeType.Automatic ? "auto" : "user";
+    result["stationStart"] = profileView.StationStart;
+    result["stationEnd"] = profileView.StationEnd;
+    result["elevationRange"] = profileView.ElevationRangeMode == ElevationRangeType.Automatic ? "auto" : "user";
+    result["elevationMin"] = profileView.ElevationMin;
+    result["elevationMax"] = profileView.ElevationMax;
+    if (transaction.GetObject(profileView.StyleId, OpenMode.ForRead) is ProfileViewStyle style)
+    {
+      result["verticalExaggeration"] = style.GraphStyle.VerticalExaggeration;
+    }
+    if (styleSharedWith != null)
+    {
+      result["styleSharedWith"] = styleSharedWith;
+    }
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────
