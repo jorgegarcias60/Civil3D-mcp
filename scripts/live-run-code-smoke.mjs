@@ -260,12 +260,14 @@ async function hardeningChecks(hasDrawing) {
         record("hardening #7: ::1 direct call without token refused with no new run folder",
           direct.isError === true && (/approval required/i.test(text(direct)) || hostRefused(direct)) && directAdded.length === 0,
           { error: text(direct), added: directAdded });
-        // Approval from the normal server is bound to these same parameters.
+        // The normal server's token is bound to these parameters but stored only in that process.
         const approvalToken = await approve("civil3d_run_code", "run", parameters);
         const response = await call("civil3d_run_code", { ...parameters, approvalToken }, requestOptions, badClient);
         const added = folders().filter((folder) => !before.has(folder));
-        record("hardening #7: ::1 host refused with normal-server token and no new run folder",
-          hostRefused(response) && added.length === 0, { error: text(response), added });
+        record("hardening #7: foreign token cannot make the ::1 server run anything; no new run folder",
+          response.isError === true && (hostRefused(response)
+            || /Approval token is missing, expired, or has already been used\./i.test(text(response)))
+            && added.length === 0, { error: text(response), added });
       } else {
         const response = await callGatedRun(parameters, badClient, requestOptions);
         const added = folders().filter((folder) => !before.has(folder));

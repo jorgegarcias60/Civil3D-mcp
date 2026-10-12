@@ -74,7 +74,18 @@ read of B counted 0. This was run twice with the same result.
 
 #### Live hardening checks
 
-Jorge reported a Civil 3D 2026 run on 2026-10-12 with two setup failures: token approval through the unreachable IPv6 child, and damaged files outside import roots. The smoke script now handles both. The revised checks have not been run live.
+Live, Civil 3D 2026, 2026-10-12, run by Claude Code on scratch drawings. The server came from this branch; the plugin was built from `civil3d-2027` plus PRs #26-#28 and installed with the new installer:
+- Full smoke, token mode: 51 passed, 1 skipped (the long read, not requested). Client mode: the same. `live-label-smoke`: 9/9.
+- `--hardening`, token mode: 48 passed, 0 failed. Client mode: 47 passed, 0 failed. The checks covered:
+  - #7: refusals with no new run folder;
+  - #11: `SetDimstyleData` and `GetObjectId(true)` rejected, with DIMSTYLE and DBMOD unchanged; both detached `ReadDwgFile` forms counted 131,305 objects of a 10 MB background;
+  - #12: 20,000 objects and a large tuple saved as complete JSON with matching byte counts; a small result stayed inline.
+- #24 fixtures were outside the import roots, so they were skipped there and tested separately with synthetic files inside the import root:
+  - a good copy compared in 2.7 s;
+  - a truncated copy failed with `eEndOfFile` in 4.4 s;
+  - zero-filled and text files failed with `eBadDwgHeader` in under 3 s;
+  - `civil3d_health` answered after each.
+- Before the stderr fix, the token-mode full smoke froze after about 45 runs; with it, the same run passes.
 
 Smoke scripts drain server stderr so repeated approval logs cannot fill the pipe and freeze the server; failures print a bounded tail.
 
@@ -93,9 +104,11 @@ Place damaged files inside the roots listed there (`CIVIL3D_IMPORT_ROOTS` or
 - #11: mutation refusals leave DIMSTYLE, dimension scale and DBMOD unchanged; handle lookup and both detached `ReadDwgFile` forms work.
 - #12: large saved JSON results have complete contents, matching byte counts and bounded previews; small results stay inline.
 - #24: damaged-DWG comparison reports a file-read error within 60 seconds, or SKIP if import-root policy refuses the path; plugin health responds afterwards.
+
 ### PR #14 follow-up: file-root refusal names the variable in use (2026-10-12)
 
 `CIVIL3D.PATH_NOT_ALLOWED` now names only the variable that `LoadRoots` reads (the import or export variable when it is set, otherwise `CIVIL3D_FILE_ROOTS`) and still lists the allowed roots.
+
 ### Trusted installer checks (#8, #9, #10, 2026-10-12)
 
 Offline results from Jorge's machine on 2026-10-12, measured outside any
@@ -484,6 +497,7 @@ entries, `build-2027.ps1` 0 warnings / 0 errors). Live results from
 | Publish multi-sheet | save drawing, `publish_sheet_set` with 2+ layouts; confirm page count and order; `keepDsd: true` to inspect the DSD | passed 2026-09-26 (2 sheets, DSD accepted by 2027) |
 | Publish unsaved guard | modify drawing, `publish_sheet_set` (expect `CIVIL3D.CONFLICT`) | passed 2026-09-26 (plotting itself marks the drawing modified) |
 | As job | `asJob: true`, poll `civil3d_job status`, cancel mid-batch | pending |
+
 ## Xrefs, data-shortcut references, drawing comparison (2026-09-26, `feature/xref-datashortcut-compare`)
 
 Offline, on the branch:

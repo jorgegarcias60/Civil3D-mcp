@@ -1039,7 +1039,7 @@ Serialization, save or read failures produce `resultError` and preserve the scri
 
 Opt-in live checks (`live-run-code-smoke.mjs --hardening`) cover Database guards, saved results, host refusal and damaged-DWG comparison recovery. See [TESTING.md](./TESTING.md) for the command, inputs and recorded results.
 
-In token mode, the IPv6 check calls directly without approval, then with a token from the normal server. Damaged-DWG comparisons refused by import-root policy report SKIP with the policy message. The summary counts skips separately.
+In token mode, the IPv6 check calls directly without approval, then with a token from the normal server. The foreign-token check accepts host refusal or unknown/expired-token refusal and requires no new run folder. Approval tokens are stored only in the server process that issued them. Damaged-DWG comparisons refused by import-root policy report SKIP with the policy message. The summary counts skips separately.
 
 Scripts that start the MCP server drain its stderr to prevent pipe-buffer stalls. They print only the last 200 lines on failure or timeout, with each line limited to 4096 characters.
 
