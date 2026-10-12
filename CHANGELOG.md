@@ -116,6 +116,7 @@
 
 ### Fixed
 
+- Path refusals (`CIVIL3D.PATH_NOT_ALLOWED`) name only the root variable in use and keep the allowed-root list (follow-up to PR #14).
 - `install-trusted.ps1 -Uninstall` without `-SourceDir` removes all installed
   releases and marked roaming support blocks, including orphans, after checking
   every selected DLL for locks. Explicit `-SourceDir` selects one release;

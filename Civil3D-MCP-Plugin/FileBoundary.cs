@@ -24,8 +24,10 @@ internal static class FileBoundary
   private const int ErrorFileNotFound = 2;
   private const int ErrorPathNotFound = 3;
 
-  private static readonly Lazy<string[]> ImportRoots = new(() => LoadRoots(ImportRootsVariable));
-  private static readonly Lazy<string[]> ExportRoots = new(() => LoadRoots(ExportRootsVariable));
+  private sealed record RootConfiguration(string[] Roots, string Variable);
+
+  private static readonly Lazy<RootConfiguration> ImportRoots = new(() => LoadRoots(ImportRootsVariable));
+  private static readonly Lazy<RootConfiguration> ExportRoots = new(() => LoadRoots(ExportRootsVariable));
 
   public static string ResolveImportPath(string rawPath, params string[] allowedExtensions)
   {
@@ -152,7 +154,7 @@ internal static class FileBoundary
 
   private static string ResolvePath(
     string rawPath,
-    IReadOnlyCollection<string> roots,
+    RootConfiguration configuration,
     string operation,
     IReadOnlyCollection<string> allowedExtensions)
   {
@@ -178,14 +180,15 @@ internal static class FileBoundary
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Invalid {operation} path: {exception.Message}");
     }
 
+    var roots = configuration.Roots;
     var matchedRoot = roots.FirstOrDefault(root => IsWithinRoot(canonicalPath, root));
     if (matchedRoot == null)
     {
       throw new JsonRpcDispatchException(
         "CIVIL3D.PATH_NOT_ALLOWED",
         $"The {operation} path is outside the configured {operation} roots: {canonicalPath}. " +
-        $"Allowed roots: {string.Join("; ", roots)}. Add a folder with {(operation == "import" ? ImportRootsVariable : ExportRootsVariable)} " +
-        $"or {SharedRootsVariable} (semicolon-separated absolute paths, read when Civil 3D starts).");
+        $"Allowed roots: {string.Join("; ", roots)}. Add a folder with {configuration.Variable} " +
+        "(semicolon-separated absolute paths, read when Civil 3D starts).");
     }
 
     RejectReparsePointTraversal(canonicalPath, matchedRoot);
@@ -204,11 +207,13 @@ internal static class FileBoundary
     return canonicalPath;
   }
 
-  private static string[] LoadRoots(string operationVariable)
+  private static RootConfiguration LoadRoots(string operationVariable)
   {
+    var variable = operationVariable;
     var configured = Environment.GetEnvironmentVariable(operationVariable);
     if (string.IsNullOrWhiteSpace(configured))
     {
+      variable = SharedRootsVariable;
       configured = Environment.GetEnvironmentVariable(SharedRootsVariable);
     }
 
@@ -222,10 +227,11 @@ internal static class FileBoundary
       }
     }
 
-    return roots
+    var canonicalRoots = roots
       .Select(Path.GetFullPath)
       .Distinct(StringComparer.OrdinalIgnoreCase)
       .ToArray();
+    return new RootConfiguration(canonicalRoots, variable);
   }
 
   private static IEnumerable<string> SplitRoots(string? configured)
@@ -658,7 +664,7 @@ internal static class FileBoundary
   private static DirectoryChainLock LockExportDirectoryChain(string directory)
   {
     var canonicalDirectory = Path.GetFullPath(directory);
-    var matchedRoot = ExportRoots.Value
+    var matchedRoot = ExportRoots.Value.Roots
       .Where(root => IsWithinRoot(canonicalDirectory, root))
       .OrderByDescending(root => root.Length)
       .FirstOrDefault()
