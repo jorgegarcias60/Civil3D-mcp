@@ -179,6 +179,14 @@ describe("civil3d_run_code domain", () => {
     expect(RunCodeResponseSchema.safeParse({ ...base, committed: false }).success).toBe(true);
     expect(RunCodeResponseSchema.safeParse({ ...base, committed: "unknown" }).success).toBe(true);
     expect(RunCodeResponseSchema.safeParse({ ...base, committed: "maybe" }).success).toBe(false);
+    expect(RunCodeResponseSchema.safeParse({ ...base, activated: true, switchedBack: true }).success).toBe(true);
+    expect(RunCodeResponseSchema.safeParse({ ...base, activated: "yes" }).success).toBe(false);
+  });
+
+  it("describes temporary activation for a targeted write", () => {
+    const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
+    expect(description).toMatch(/write.*document.*another open drawing/i);
+    expect(description).toMatch(/briefly activates it.*switches back/i);
   });
 });
 
@@ -256,6 +264,24 @@ describe("civil3d_run_code execution", () => {
     expect(error.message).toMatch(/document needs runCode API 4/);
     expect(error.message).toMatch(/Nothing ran/);
     expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth"]);
+  });
+
+  it.each([undefined, 4])("refuses a targeted write with runCode API %s before running", async (api) => {
+    sendCommandMock.mockResolvedValue({ runCodeApi: api });
+    const error = await execute(RunCodeArgsSchema.parse({ action: "run", code: "return 1;", mode: "write", document: "B.dwg" })).catch((e) => e);
+    expect(error).toBeInstanceOf(Civil3DRpcError);
+    expect(error.message).toMatch(/document needs runCode API 5/);
+    expect(error.message).toMatch(/Nothing ran/);
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth"]);
+  });
+
+  it("sends a targeted write to runCode with API 5", async () => {
+    sendCommandMock.mockImplementation(async (method: string) =>
+      method === "getCivil3DHealth" ? { runCodeApi: 5 } : { ...okResponse, mode: "write", activated: true, switchedBack: true });
+    const response = await execute(RunCodeArgsSchema.parse({ action: "run", code: "return Doc.Name;", mode: "write", document: "B.dwg" }));
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth", "runCode"]);
+    expect(sendCommandMock.mock.calls[1][1]).toMatchObject({ document: "B.dwg", mode: "write" });
+    expect(response).toMatchObject({ activated: true, switchedBack: true });
   });
 
   it("approves the caller's arguments, not the token added at execution", async () => {

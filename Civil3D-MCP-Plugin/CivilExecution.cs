@@ -10,6 +10,15 @@ namespace Civil3DMcpPlugin;
 
 public readonly record struct RunCodeHost(Document? Doc, CivilDocument? Civil, Database? Database, Transaction? Transaction);
 
+public sealed class RunCodeActivation
+{
+  public bool Activated { get; internal set; }
+  public bool SwitchedBack { get; internal set; }
+  public string? Warning { get; internal set; }
+
+  internal void AddWarning(string warning) => Warning = Warning == null ? warning : $"{Warning}; {warning}";
+}
+
 public static class CivilExecution
 {
   private static readonly SemaphoreSlim HostExecutionGate = new(1, 1);
@@ -32,75 +41,137 @@ public static class CivilExecution
     return await ExecuteSerializedAsync(cancellationToken => ExecuteOnHostAsync(action, write, inCommand, commandLine, cancellationToken));
   }
 
-  public static async Task<T> ExecuteRunCodeAsync<T>(string? document, bool writeMode, Func<RunCodeHost, T> action)
+  public static async Task<T> ExecuteRunCodeAsync<T>(string? document, bool writeMode, Func<RunCodeHost, T> action,
+    RunCodeActivation? activation = null)
   {
     if (document == null && App.DocumentManager.MdiActiveDocument != null)
       return await ExecuteAsync((doc, civil, db, tr) => action(new(doc, civil, db, tr)), write: false, inCommand: writeMode);
 
+    activation ??= new RunCodeActivation();
     return await ExecuteSerializedAsync(async cancellationToken =>
     {
       T? result = default;
       Document? target = null;
+      Document? previous = null;
+      string? previousName = null;
+      var restorePrevious = false;
       Exception? failure = null;
-      await RunOnHostAsync(_ =>
+      try
       {
-        try
+        await RunOnHostAsync(_ =>
         {
-          cancellationToken.ThrowIfCancellationRequested();
-          var active = App.DocumentManager.MdiActiveDocument;
-          if (active == null)
+          try
           {
-            if (writeMode || document != null)
-              throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
-            result = action(default);
-            return Task.CompletedTask;
-          }
+            cancellationToken.ThrowIfCancellationRequested();
+            var active = App.DocumentManager.MdiActiveDocument;
+            if (active == null)
+            {
+              if (writeMode || document != null)
+                throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
+              result = action(default);
+              return Task.CompletedTask;
+            }
 
-          var open = App.DocumentManager.Cast<Document>().ToArray();
-          var match = document == null ? (Index: Array.IndexOf(open, active), Error: (string?)null)
-            : RunCodeHelpers.MatchDocument(document, open.Select(doc => doc.Name).ToArray());
-          if (match.Error != null)
-            throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", match.Error);
-          target = open[match.Index];
-          if (writeMode)
-          {
-            if (target != active) throw ActiveWriteOnly();
-            return Task.CompletedTask;
-          }
+            var open = App.DocumentManager.Cast<Document>().ToArray();
+            var match = document == null ? (Index: Array.IndexOf(open, active), Error: (string?)null)
+              : RunCodeHelpers.MatchDocument(document, open.Select(doc => doc.Name).ToArray());
+            if (match.Error != null)
+              throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", match.Error);
+            target = open[match.Index];
+            if (writeMode)
+            {
+              if (target != active)
+              {
+                previous = active;
+                previousName = active.Name;
+                // The setter is an application-context API. Restore even if it
+                // throws after partially changing the active document.
+                restorePrevious = true;
+                try
+                {
+                  App.DocumentManager.MdiActiveDocument = target;
+                  activation.Activated = App.DocumentManager.MdiActiveDocument == target;
+                }
+                catch (Exception error)
+                {
+                  PluginLog.Warn("RunCode", "Could not activate the target drawing.", error);
+                  throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"could not activate {target.Name}; nothing changed");
+                }
+                if (!activation.Activated)
+                  throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"could not activate {target.Name}; nothing changed");
+              }
+              return Task.CompletedTask;
+            }
 
-          var civil = CivilDocument.GetCivilDocument(target.Database);
-          DocumentLock documentLock;
-          try { documentLock = target.LockDocument(); }
-          catch (Autodesk.AutoCAD.Runtime.Exception error) when (error.ErrorStatus == Autodesk.AutoCAD.Runtime.ErrorStatus.LockViolation)
-          {
-            throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"Drawing '{target.Name}' is locked by other work; nothing ran.");
+            var civil = CivilDocument.GetCivilDocument(target.Database);
+            DocumentLock documentLock;
+            try { documentLock = target.LockDocument(); }
+            catch (Autodesk.AutoCAD.Runtime.Exception error) when (error.ErrorStatus == Autodesk.AutoCAD.Runtime.ErrorStatus.LockViolation)
+            {
+              throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"Drawing '{target.Name}' is locked by other work; nothing ran.");
+            }
+            using (documentLock)
+            using (var transaction = target.Database.TransactionManager.StartOpenCloseTransaction())
+              result = action(new(target, civil, target.Database, transaction));
           }
-          using (documentLock)
-          using (var transaction = target.Database.TransactionManager.StartOpenCloseTransaction())
-            result = action(new(target, civil, target.Database, transaction));
+          catch (Exception error) { failure = error; }
+          return Task.CompletedTask;
+        }, needsCommand: false, needsQuietEditor: writeMode, cancellationToken, drainOnCancellation: writeMode);
+        if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        if (writeMode)
+        {
+          // Send C3DMCPHOP to the resolved document, and check its identity
+          // inside the command before locking or opening a transaction.
+          return await ExecuteOnHostAsync((doc, civil, db, tr) => action(new(doc, civil, db, tr)),
+            write: false, inCommand: true, commandLine: false, cancellationToken, targetDocument: target, activation: activation);
         }
-        catch (Exception error) { failure = error; }
-        return Task.CompletedTask;
-      }, needsCommand: false, needsQuietEditor: false, cancellationToken);
-      if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-      if (writeMode)
-      {
-        // Keep the same host gate through the command hop. Recheck the target
-        // inside the command in case the user switched drawings while queued.
-        return await ExecuteOnHostAsync((doc, civil, db, tr) =>
-        {
-          if (doc != target) throw ActiveWriteOnly();
-          return action(new(doc, civil, db, tr));
-        }, write: false, inCommand: true, commandLine: false, cancellationToken);
+        return result!;
       }
-      return result!;
+      finally
+      {
+        // Still inside ExecuteSerializedAsync: nobody else may use the host
+        // until the restoration hop finishes, including after cancellation.
+        if (restorePrevious && previous != null)
+        {
+          activation.SwitchedBack = await SwitchBackAsync(previous);
+          if (!activation.SwitchedBack)
+            activation.AddWarning($"could not switch back to {previousName}");
+        }
+      }
     });
   }
 
-  private static JsonRpcDispatchException ActiveWriteOnly() => new("CIVIL3D.INVALID_INPUT", "write mode runs on the active drawing; switch to it first");
+  private static async Task<bool> SwitchBackAsync(Document previous)
+  {
+    var switchedBack = false;
+    // Cleanup has its own budget: a disconnected client must not strand the
+    // user in the target drawing, or release the gate before this hop ends.
+    using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    try
+    {
+      await RunOnHostAsync(_ =>
+      {
+        cleanup.Token.ThrowIfCancellationRequested();
+        if (App.DocumentManager.Cast<Document>().Contains(previous))
+        {
+          App.DocumentManager.MdiActiveDocument = previous;
+          switchedBack = App.DocumentManager.MdiActiveDocument == previous;
+        }
+        return Task.CompletedTask;
+      }, needsCommand: false, needsQuietEditor: true, cleanup.Token,
+        busyTimeout: TimeSpan.FromSeconds(30), drainOnCancellation: true);
+    }
+    catch (Exception error)
+    {
+      // Restoration must never turn a committed write into an RPC error.
+      PluginLog.Warn("RunCode", "Could not switch back to the previous drawing.", error);
+    }
+    return switchedBack;
+  }
 
   private static async Task<T> ExecuteOnHostAsync<T>(Func<Document, CivilDocument, Database, Transaction, T> action,
-    bool write, bool inCommand, bool commandLine, CancellationToken cancellationToken)
+    bool write, bool inCommand, bool commandLine, CancellationToken cancellationToken, Document? targetDocument = null,
+    RunCodeActivation? activation = null)
   {
     // These operations require a drawing. Idle itself also works with zero
     // documents, as used by ExecuteRunCodeAsync for side-file-only reads.
@@ -123,7 +194,9 @@ public static class CivilExecution
       try
       {
         cancellationToken.ThrowIfCancellationRequested();
-        var doc = RequireExpectedDocument(expectedDrawingIdentity, "No drawing changes were made.");
+        if (targetDocument != null && App.DocumentManager.MdiActiveDocument != targetDocument)
+          throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", "the active drawing changed before the write; nothing changed");
+        var doc = targetDocument ?? RequireExpectedDocument(expectedDrawingIdentity, "No drawing changes were made.");
         var civilDoc = CivilApplication.ActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active Civil 3D document is available.");
         var database = doc.Database;
 
@@ -152,9 +225,14 @@ public static class CivilExecution
       }
 
       return Task.CompletedTask;
-    }, needsCommand: write || inCommand, needsQuietEditor: commandLine, cancellationToken);
+    }, needsCommand: write || inCommand, needsQuietEditor: commandLine, cancellationToken,
+      targetDocument: targetDocument, drainOnCancellation: targetDocument != null,
+      dispatchWarning: activation == null ? null : activation.AddWarning);
 
-    await AwaitHostContextAsync(hostTask, cancellationToken);
+    // A targeted write must finish its host work before its caller restores
+    // the previous drawing. RunOnHostAsync drains started work on cancellation.
+    if (targetDocument != null) await hostTask;
+    else await AwaitHostContextAsync(hostTask, cancellationToken);
 
     if (capturedException != null)
     {
@@ -420,16 +498,17 @@ public static class CivilExecution
   //  - while no Idle tick arrives at all for HostBusyTimeout (a modal dialog).
   // The busy checks, the no-Idle watchdog and the claim flag come from
   // jorgegarcias60/Civil3D-mcp#1 and #2.
-  private static async Task RunOnHostAsync(Func<HostRoute, Task> operation, bool needsCommand, bool needsQuietEditor, CancellationToken cancellationToken)
+  private static async Task RunOnHostAsync(Func<HostRoute, Task> operation, bool needsCommand, bool needsQuietEditor,
+    CancellationToken cancellationToken, Document? targetDocument = null, TimeSpan? busyTimeout = null,
+    bool drainOnCancellation = false, Action<string>? dispatchWarning = null)
   {
-    var claimed = 0;
+    var timeout = busyTimeout ?? HostBusyTimeout;
+    var dispatch = new RunCodeDispatchGate();
     var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    // Completes when the operation itself has finished, wherever it ran.
-    var operationDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
     async Task RunOnce(HostRoute route)
     {
-      if (Interlocked.Exchange(ref claimed, 1) != 0)
+      if (!dispatch.TryStart())
       {
         return;
       }
@@ -438,11 +517,11 @@ public static class CivilExecution
       try
       {
         await operation(route);
-        operationDone.TrySetResult(true);
+        dispatch.CompleteOperation();
       }
       catch (Exception ex)
       {
-        operationDone.TrySetException(ex);
+        dispatch.CompleteOperation(ex);
       }
     }
 
@@ -460,7 +539,7 @@ public static class CivilExecution
       try
       {
         Interlocked.Exchange(ref lastIdleTicks, DateTime.UtcNow.Ticks);
-        if (Volatile.Read(ref claimed) != 0 || Volatile.Read(ref started) != 0)
+        if (!dispatch.IsNotStarted || Volatile.Read(ref started) != 0)
         {
           CoreApp.Idle -= idle;
           return;
@@ -473,7 +552,7 @@ public static class CivilExecution
         if (busy)
         {
           busySince ??= now;
-          if (now - busySince.Value >= HostBusyTimeout && Interlocked.Exchange(ref claimed, 1) == 0)
+          if (now - busySince.Value >= timeout && dispatch.TryAbandon())
           {
             CoreApp.Idle -= idle;
             done.TrySetException(new JsonRpcDispatchException(
@@ -487,10 +566,16 @@ public static class CivilExecution
         CoreApp.Idle -= idle;
         Interlocked.Exchange(ref started, 1);
         // The COM document must be fetched on the main thread.
-        var acadDocument = App.DocumentManager.MdiActiveDocument?.GetAcadDocument();
+        var acadDocument = (targetDocument ?? activeDocument)?.GetAcadDocument();
         if (needsCommand)
         {
-          await StartPluginCommandAsync(() => RunOnce(HostRoute.PluginCommand), () => Volatile.Read(ref claimed) != 0);
+          var commandDocument = targetDocument ?? activeDocument
+            ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
+          // Register the whole COM dispatch before cancellation can start its
+          // drain. If cancellation won first, do not fetch/queue the command.
+          if (!dispatch.TryDispatch(() => StartPluginCommandAsync(commandDocument,
+                () => RunOnce(HostRoute.PluginCommand), () => !dispatch.IsNotStarted))) return;
+          await dispatch.DispatchDone;
         }
         else
         {
@@ -500,7 +585,8 @@ public static class CivilExecution
         // Work in C3DMCPHOP may still be awaiting commands (-PLOT) after
         // SendCommand returned; wait for the operation, then send any
         // command-line input it queued.
-        await operationDone.Task;
+        await dispatch.OperationDone;
+        if (cancellationToken.IsCancellationRequested) return;
         if (PendingCommandLine.Count > 0 && acadDocument != null)
         {
           var input = PendingCommandLine.ToList();
@@ -513,10 +599,8 @@ public static class CivilExecution
       catch (Exception ex)
       {
         CoreApp.Idle -= idle;
-        if (Interlocked.Exchange(ref claimed, 1) == 0)
-        {
-          done.TrySetException(ex);
-        }
+        dispatch.TryAbandon();
+        done.TrySetException(ex);
       }
     };
     CoreApp.Idle += idle;
@@ -532,13 +616,13 @@ public static class CivilExecution
     }
     using var nudge = new Timer(_ =>
     {
-      if (Volatile.Read(ref claimed) != 0 || Volatile.Read(ref started) != 0)
+      if (!dispatch.IsNotStarted || Volatile.Read(ref started) != 0)
       {
         return;
       }
 
       var sinceIdle = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref lastIdleTicks));
-      if (sinceIdle >= HostBusyTimeout && Interlocked.Exchange(ref claimed, 1) == 0)
+      if (sinceIdle >= timeout && dispatch.TryAbandon())
       {
         done.TrySetException(new JsonRpcDispatchException(
           "CIVIL3D.HOST_BUSY",
@@ -556,14 +640,25 @@ public static class CivilExecution
     {
       await AwaitHostContextAsync(done.Task, cancellationToken);
     }
+    catch (OperationCanceledException) when (drainOnCancellation)
+    {
+      // Start and abandonment compete atomically. Drain the COM dispatch even
+      // if RunOnce never started, before the caller restores the drawing and
+      // the single ExecuteSerializedAsync finally releases the host gate.
+      await dispatch.DrainAsync(TimeSpan.FromSeconds(30), warning =>
+      {
+        PluginLog.Warn("Host", warning);
+        dispatchWarning?.Invoke(warning);
+      });
+      throw;
+    }
     finally
     {
       // Request finished, failed or was cancelled: nothing may run it later,
       // and an Idle handler still waiting for queued C3DMCPHOP work that will
       // now never run must not wait forever.
-      Interlocked.Exchange(ref claimed, 1);
       CoreApp.Idle -= idle;
-      operationDone.TrySetCanceled();
+      dispatch.CancelUnstartedOperation();
     }
   }
 
@@ -604,10 +699,8 @@ public static class CivilExecution
   // main thread like an external client's and runs it at once, also in a
   // disconnected Windows session with nobody at the keyboard. Completes when SendCommand
   // has returned; the work itself reports through the request's own task.
-  private static async Task StartPluginCommandAsync(Func<Task> work, Func<bool> finished)
+  private static async Task StartPluginCommandAsync(Document doc, Func<Task> work, Func<bool> finished)
   {
-    var doc = App.DocumentManager.MdiActiveDocument
-      ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
     // The COM document must be fetched on the main thread.
     var acadDocument = doc.GetAcadDocument();
     PluginCommandWork.Enqueue(work);

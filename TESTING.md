@@ -5,6 +5,71 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### PR 4 writes to another open drawing (2026-10-12)
+
+Verified in `jorgegarcias60/run-code-activate-write`, in the
+`c3d-pr4-activate` worktree. Changes remain uncommitted. No npm packages were
+installed, no plugin was installed, and no Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `npm.cmd run build` | Pass. |
+| `npx.cmd vitest run --configLoader runner --cache=false` | 602 tests passed in 49 files. |
+| Focused tests against pre-PR server and plugin source | Expected failure: 9 failures, 38 passes in 2 files; implementation restored afterwards. |
+| `npm.cmd run docs:check` | Pass; generated reference current (210 entries). |
+| Plugin Release net8.0-windows, refs-2026 | 0 warnings, 0 errors. |
+| Plugin Release net10.0-windows, C_References | 0 warnings, 0 errors. |
+| Final net8 rebuild with `--restore` | 0 warnings, 0 errors. |
+| RunCodeHarness `-f net8.0` | 181 checks passed; 230 references. |
+| RunCodeHarness `-f net10.0` | 181 checks passed; 238 references. |
+| `node --check scripts/live-run-code-smoke.mjs` | Pass. |
+| `git diff --check` | Pass. |
+
+The plugin builds used the requested commands, with default restore succeeding:
+
+```powershell
+dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026
+dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows
+# Rebuild net8 with the first command after net10.
+```
+
+Both harness runs used the existing local NuGet cache for offline restore, with
+`-p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false`.
+Each received its matching references directory and Release plugin DLL as
+positional arguments. The `.cmd` wrappers avoid PowerShell's `npm.ps1` policy
+restriction and run the same npm/npx commands without installing dependencies.
+
+Regression checks cover API 4 refusal and API 5 forwarding for document writes,
+API 4 reads, the tool description, activation fields, explicit target command
+dispatch, and restoration in `finally` inside the host gate. Source checks also
+cover the unchanged untargeted `ExecuteAsync(write: false, inCommand: writeMode)`
+route, checking the active target before locking or opening a transaction,
+checking that the previous drawing is still open, and the separate 30-second
+cleanup budget. Started targeted host callbacks are drained on cancellation
+before restoration or gate release; this prevents switch-back racing a running
+write or a restoration callback. Commit and rollback logic is unchanged.
+
+Live checks are written but unrun. With run-code API 5 or newer and scratch A
+active/B open, use `--other <B full path>` together with
+`--expect-drawing <A scratch name>` or `--allow-writes`. The script checks a
+tagged DBText committed in B (`committed: true`, `drawing: B`, `activated: true`,
+`switchedBack: true`), a plain `Doc.Name` read confirming A is active again, a
+targeted read finding exactly one tagged text, a failing targeted write rolling
+back without changing the count and restoring A, and a targeted cleanup write
+erasing both smoke tags. Undo in B is deliberately skipped because checking it
+would require activating B. The existing active-drawing undo smoke check remains.
+Live behavior, including Civil 3D's actual activation/undo behavior, still needs
+verification in the host.
+
+
+Live, Civil 3D 2026, 2026-10-12, trusted install of this build, with drawing A active and scratch drawing B open:
+- `live-run-code-smoke --other <B> ...` passed **52/52**:
+  - a write with `document` = B committed in B (activated, switchedBack) and A was active again;
+  - a failing write to B rolled back and switched back;
+  - a cleanup write left B empty.
+- Undo in B was not checked from the script.
+- Review (GPT 6.1 Sol, xhigh): one P1, fixed with harness tests (265 checks per framework). A cancel between the queued command and its start could switch back while the command was still pending. Start and cancel are now exclusive, and the switch-back waits for the dispatch.
+
 ### PR 3 document reads and no-drawing runs (2026-10-12)
 
 Verified in `jorgegarcias60/run-code-document`; changes remain uncommitted. No plugin was installed and no Civil 3D live checks were run.
