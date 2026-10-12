@@ -39,7 +39,7 @@ const log = createLogger("DomainRuntime");
 export interface DomainActionDefinition<TArgs = JsonObject> {
   action: string;
   inputSchema: z.ZodType<TArgs>;
-  execute: (args: TArgs) => Promise<unknown>;
+  execute: (args: TArgs, context?: { approval?: "not_required" | "token" | "client" }) => Promise<unknown>;
   responseSchema?: ZodTypeAny;
   capabilities: ToolCapability[];
   requiresActiveDrawing: boolean;
@@ -131,6 +131,7 @@ async function executeExposure(
   definition: DomainToolDefinition,
   exposure: DomainToolExposure,
   rawArgs: JsonObject,
+  options: { directClientCall: boolean },
   progressExtra?: ToolProgressExtra,
 ) {
   const resolved = exposure.resolveAction(rawArgs);
@@ -159,7 +160,7 @@ async function executeExposure(
   }
 
   const executeOnce = async () => {
-    await approvalPolicy.enforce(
+    const approval = await approvalPolicy.authorize(
       {
         toolName: exposure.toolName,
         action: actionName,
@@ -168,6 +169,7 @@ async function executeExposure(
         requiresActiveDrawing: actionDefinition.requiresActiveDrawing,
       },
       rawArgs,
+      options,
     );
     await emitProgress(
       progressExtra,
@@ -175,7 +177,7 @@ async function executeExposure(
       100,
       `${exposure.displayName}: validated and executing '${actionName}'.`,
     );
-    const response = await actionDefinition.execute(parsedArgs);
+    const response = await actionDefinition.execute(parsedArgs, { approval });
     const validatedResponse = actionDefinition.responseSchema
       ? actionDefinition.responseSchema.parse(response)
       : response;
@@ -287,6 +289,7 @@ export function registerDomainTools(server: McpServer, definition: DomainToolDef
 function createExposureHandler(
   definition: DomainToolDefinition,
   exposure: DomainToolExposure,
+  options: { directClientCall: boolean },
 ) {
   return async (rawArgs: JsonObject, extra?: unknown) => {
     const progressExtra = extra && typeof extra === "object"
@@ -298,7 +301,7 @@ function createExposureHandler(
       try {
         log.info("Tool request started", { requestId, tool: exposure.toolName });
         await emitProgress(progressExtra, 0, 100, `${exposure.displayName}: request received.`);
-        const result = await executeExposure(definition, exposure, rawArgs, progressExtra);
+        const result = await executeExposure(definition, exposure, rawArgs, options, progressExtra);
         await emitProgress(progressExtra, 100, 100, `${exposure.displayName}: completed.`);
         log.info("Tool request completed", {
           requestId,
@@ -329,7 +332,7 @@ function createExposureHandler(
 
 export function captureDomainToolHandlers(definition: DomainToolDefinition) {
   for (const exposure of definition.exposures) {
-    captureToolHandler(exposure.toolName, createExposureHandler(definition, exposure));
+    captureToolHandler(exposure.toolName, createExposureHandler(definition, exposure, { directClientCall: false }));
   }
 }
 
@@ -352,7 +355,7 @@ export function registerSelectedDomainTools(
         outputSchema: buildExposureOutputSchema(definition, exposure),
         annotations: buildExposureAnnotations(definition, exposure),
       },
-      createExposureHandler(definition, exposure),
+      createExposureHandler(definition, exposure, { directClientCall: true }),
     );
   }
 }

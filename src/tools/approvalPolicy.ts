@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { withApplicationConnection } from "../utils/ConnectionManager.js";
 import { Civil3DRpcError } from "../utils/SocketClient.js";
+import { createLogger } from "../utils/logger.js";
 import type { ToolCapability } from "./toolMetadata.js";
 
 type JsonObject = Record<string, unknown>;
@@ -35,6 +36,20 @@ export type DrawingFingerprintProvider = () => Promise<string>;
 
 const APPROVAL_TOKEN_TTL_MS = 5 * 60 * 1000;
 const NO_ACTIVE_DRAWING_FINGERPRINT = "no-active-drawing";
+export const RUN_CODE_APPROVAL_ENV = "CIVIL3D_RUN_CODE_APPROVAL";
+const log = createLogger("ApprovalPolicy");
+let warnedUnknownMode = false;
+
+export function runCodeApprovalMode(): "token" | "client" {
+  const mode = process.env[RUN_CODE_APPROVAL_ENV]?.trim().toLowerCase();
+  if (!mode || mode === "token") return "token";
+  if (mode === "client") return "client";
+  if (!warnedUnknownMode) {
+    warnedUnknownMode = true;
+    log.warn(`Unknown ${RUN_CODE_APPROVAL_ENV} value; using token mode.`, { value: mode });
+  }
+  return "token";
+}
 const MUTATING_CAPABILITIES = new Set<ToolCapability>([
   "create",
   "edit",
@@ -68,9 +83,10 @@ function hashParameters(parameters: JsonObject): string {
 }
 
 // Tools whose gate CIVIL3D_APPROVAL_MODE=disabled does not lift, and that the
-// HTTP bridge refuses without MCP_HTTP_TOKEN: civil3d_run_code runs arbitrary C#
-// with the user's full rights inside Civil 3D.
+// HTTP bridge refuses without MCP_HTTP_TOKEN. Client mode only applies to a
+// direct MCP client call; internal and HTTP handlers still require a token.
 export const ALWAYS_GATED_TOOLS: ReadonlySet<string> = new Set<string>(["civil3d_run_code"]);
+export const CLIENT_APPROVABLE_TOOLS: ReadonlySet<string> = new Set<string>(["civil3d_run_code"]);
 
 export function isApprovalRequired(target: ApprovalTarget): boolean {
   if (ALWAYS_GATED_TOOLS.has(target.toolName)) {
@@ -165,16 +181,25 @@ export class ApprovalPolicyService {
     };
   }
 
-  public async enforce(target: ApprovalTarget, parameters: JsonObject): Promise<void> {
+  public async authorize(
+    target: ApprovalTarget,
+    parameters: JsonObject,
+    options: { directClientCall?: boolean } = {},
+  ): Promise<"not_required" | "token" | "client"> {
     if (!isApprovalRequired(target)) {
-      return;
+      return "not_required";
     }
 
     const approvalToken = typeof parameters.approvalToken === "string" ? parameters.approvalToken : undefined;
     if (!approvalToken) {
+      if (options.directClientCall === true && CLIENT_APPROVABLE_TOOLS.has(target.toolName)
+        && runCodeApprovalMode() === "client") return "client";
       throw new ApprovalRequiredError(
         `Approval required for '${target.toolName}' action '${target.action}'. ` +
-        "Call civil3d_request_approval with the same toolName, action, and parameters, then retry with approvalToken.",
+        "Call civil3d_request_approval with the same toolName, action, and parameters, then retry with approvalToken." +
+        (target.toolName === "civil3d_run_code" && runCodeApprovalMode() === "client"
+          ? " In client mode, calls through civil3d_orchestrate, civil3d_docs or the HTTP bridge still need a token."
+          : ""),
       );
     }
 
@@ -201,6 +226,15 @@ export class ApprovalPolicyService {
     if (grant.drawingFingerprint !== activeDrawingFingerprint) {
       throw new ApprovalValidationError("The active drawing changed after approval. Request approval for the current drawing.");
     }
+    return "token";
+  }
+
+  public async enforce(
+    target: ApprovalTarget,
+    parameters: JsonObject,
+    options: { directClientCall?: boolean } = {},
+  ): Promise<void> {
+    await this.authorize(target, parameters, options);
   }
 }
 

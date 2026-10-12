@@ -4,6 +4,9 @@
 
 ### Added
 
+- Optional `CIVIL3D_RUN_CODE_APPROVAL=client` for direct MCP client calls to
+  `civil3d_run_code`. Nested and HTTP calls still require a token.
+
 - `civil3d_run_code` (plugin method `runCode`): runs a C# snippet inside Civil
   3D, compiled with Roslyn into a uniquely named in-memory assembly (its own
   collectible load context, unloaded after the run) and run on the main thread
@@ -12,8 +15,8 @@
   in-process, about 20 minutes in LISP. Scripts are compiled inside the
   already-trusted plugin, so no DLL is written and no AutoCAD security prompt
   appears per script.
-  - Always approval-gated, even with `CIVIL3D_APPROVAL_MODE=disabled`; the
-    token is bound to the exact code. Every script is saved with a summary in
+  - Token mode stays approval-gated, even with `CIVIL3D_APPROVAL_MODE=disabled`;
+    the token is bound to the exact code. Every script is saved with a summary in
     `run-code\<run id>\` next to `plugin.log`.
   - `mode: "read"` (default) runs from an idle tick in an open-close
     transaction that is never committed, and the compiler refuses write APIs
