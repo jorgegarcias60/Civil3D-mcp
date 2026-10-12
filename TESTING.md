@@ -29,6 +29,40 @@ New tests and checks cover:
 - #24: fresh-database retries, disposal, drawing-content error filtering and preservation of the first error.
 - #25: retention settings and age boundaries, current-run and audit-file protection, confinement, filesystem links and deletion failures.
 
+#### Smoke-script stderr fix (2026-10-12)
+
+Offline follow-up in the same worktree, inside the Codex sandbox. Changes remain uncommitted. No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `node --check` on the six changed `.mjs` scripts | Exit 0 for each. |
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | 637 tests passed in 51 files. |
+| `npm run docs:check` | Exit 0; 210 entries current. |
+| Plugin Release net10, then net8 rebuilt with `--restore --ignore-failed-sources -p:NuGetAudit=false` | Both exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+
+The static check rejected all five undrained transports in the committed scripts. Buffer tests drain over 450 KB and check the 200-line limit and bounded unterminated lines. NuGet was unreachable: the first net8 plugin build and both harness runs reported NU1900 audit warnings; plugin rebuilds used cached packages with the network audit disabled. The net10 harness skipped file-symlink checks because the sandbox lacks that privilege.
+
+#### Live-check setup fixes (2026-10-12)
+
+Offline follow-up in this worktree. Existing stderr changes were preserved. No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. The other five changed smoke/helper scripts also passed `node --check`. |
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 637 tests passed in 51 files. |
+| `npm run docs:check` | Exit 0; 210 entries current. |
+| Plugin Release net8, then net10, then net8 rebuilt, each with `--restore` and the matching references | Each exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+
+Both harness runs reported NU1900 warnings because the NuGet audit service was unreachable. The net10 harness skipped two file-symlink checks because the sandbox lacks the required privilege. Plugin builds had no warnings.
+
 #### Live results
 
 Follow-up live result for PR #18, Civil 3D 2026, 2026-10-12 (run by Claude Code on scratch drawings):
@@ -38,7 +72,11 @@ A targeted read of B then counted 1, with A still active. After activating B,
 one `UNDO 1` sent over COM removed it. A was activated again, and a targeted
 read of B counted 0. This was run twice with the same result.
 
-#### Live hardening checks (not run live yet)
+#### Live hardening checks
+
+Jorge reported a Civil 3D 2026 run on 2026-10-12 with two setup failures: token approval through the unreachable IPv6 child, and damaged files outside import roots. The smoke script now handles both. The revised checks have not been run live.
+
+Smoke scripts drain server stderr so repeated approval logs cannot fill the pipe and freeze the server; failures print a bounded tail.
 
 With a running plugin from this build and a scratch active drawing, run:
 
@@ -46,13 +84,15 @@ With a running plugin from this build and a scratch active drawing, run:
 
 Repeat with `--approval client` for client approval mode. Keep the DWGs inside
 the plugin's allowed import roots; `--damaged` also accepts a directory.
-Missing paths skip their checks; `--no-drawing` skips active-drawing checks
-and comparison.
+Omitted paths skip their checks; `--no-drawing` skips active-drawing checks
+and comparison. Import-root refusals report SKIP with the full policy message.
+Place damaged files inside the roots listed there (`CIVIL3D_IMPORT_ROOTS` or
+`CIVIL3D_FILE_ROOTS`) to exercise comparison recovery. The summary counts skips separately.
 
-- #7: IPv6 host refusal creates no run folder; the normal server still runs code afterwards.
+- #7: token mode calls the IPv6 child directly without a token, then with approval from the normal server for the same parameters. The first call must require approval or refuse the host; the second must name `CIVIL3D_HOST`. Neither creates a run folder. Client mode checks host refusal as before. The normal server still runs code afterwards.
 - #11: mutation refusals leave DIMSTYLE, dimension scale and DBMOD unchanged; handle lookup and both detached `ReadDwgFile` forms work.
 - #12: large saved JSON results have complete contents, matching byte counts and bounded previews; small results stay inline.
-- #24: damaged-DWG comparison reports an error within 60 seconds; plugin health responds afterwards.
+- #24: damaged-DWG comparison reports a file-read error within 60 seconds, or SKIP if import-root policy refuses the path; plugin health responds afterwards.
 
 ### PR 4 writes to another open drawing (2026-10-12)
 

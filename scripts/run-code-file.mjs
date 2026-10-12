@@ -7,6 +7,7 @@
 import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { drainServerStderr } from "./server-stderr.mjs";
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -35,6 +36,7 @@ const transport = new StdioClientTransport({
   env: { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0" },
   stderr: "pipe",
 });
+const printServerStderr = drainServerStderr(transport.stderr);
 const client = new Client({ name: "civil3d-run-code-file", version: "1.0.0" });
 const options = { timeout: 180_000, maxTotalTimeout: 180_000 };
 const text = (result) => (result.content ?? []).map((item) => item.text ?? "").join("\n");
@@ -64,6 +66,7 @@ try {
   console.error(`run-code-file failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 } finally {
+  if (process.exitCode === 1) printServerStderr();
   // Closing the stdio transport can leave a promise that never settles once
   // the server exits; Node would then end with code 13 (unsettled top-level
   // await) over the real result, so bound it and exit explicitly.

@@ -116,6 +116,12 @@
 
 ### Fixed
 
+- The live IPv6 host check uses a direct call and normal-server approval in token mode, avoiding approval through the unreachable child. Fixes #7.
+
+- Live damaged-DWG comparisons report SKIP for import-root refusals and preserve the policy message. The summary counts skips separately. Fixes #24.
+
+- Smoke scripts drain server stderr and print a bounded tail on failure, preventing approval logs from filling the pipe and freezing the server. Fixes #27.
+
 - `civil3d_run_code` requires the effective startup host to be `127.0.0.1` before token reads or plugin calls. `localhost` and empty hosts map to it; refusals say "Nothing ran." Opt-in live checks cover refusal and recovery. Fixes #7.
 
 - Read mode refuses Database mutations and requires proven detached destinations for loading and copying. Alias checks allow null/default definitions alongside detached ones and refuse open-drawing targets or ref/out exposure. Queries and write-mode calls remain allowed. Opt-in live checks cover guards and detached reads. Fixes #11.

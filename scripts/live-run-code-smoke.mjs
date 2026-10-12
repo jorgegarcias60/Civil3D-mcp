@@ -23,6 +23,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { drainServerStderr } from "./server-stderr.mjs";
 import { pluginTokenPath, readPluginToken } from "../build/utils/pluginAuth.js";
 
 // Strict: an unknown option or a missing value is an error, never a silently disabled guard.
@@ -66,14 +67,25 @@ const transport = new StdioClientTransport({
   env: serverEnv,
   stderr: "pipe",
 });
+const printServerStderr = drainServerStderr(transport.stderr);
 const client = new Client({ name: "civil3d-run-code-smoke", version: "1.0.0" });
 const results = [];
 let failures = 0;
+let skips = 0;
 
 function record(name, passed, detail) {
   results.push({ name, passed, ...(detail === undefined ? {} : { detail }) });
-  if (!passed) failures++;
+  if (!passed) {
+    failures++;
+    printServerStderr();
+  }
   console.error(`${passed ? (options.hardening ? "PASS" : "ok  ") : "FAIL"} ${name}${detail === undefined ? "" : ` :: ${JSON.stringify(detail).slice(0, 400)}`}`);
+}
+
+function skip(name, detail) {
+  skips++;
+  results.push({ name, passed: null, skipped: true, ...(detail === undefined ? {} : { detail }) });
+  console.error(`SKIP ${name}${detail === undefined ? "" : ` :: ${String(detail).replace(/[\r\n]+/g, " ")}`}`);
 }
 
 async function call(name, args, requestOptions = {}, targetClient = client) {
@@ -126,7 +138,7 @@ function damagedPaths() {
 
 async function hardeningChecks(hasDrawing) {
   if (!hasDrawing) {
-    record("hardening #11: active-drawing guards skipped (--no-drawing)", true);
+    skip("hardening #11: active-drawing guards (--no-drawing)");
   } else {
     await check("hardening #11: SetDimstyleData rejected; DIMSTYLE and DBMOD unchanged", async () => {
       const snapshot = 'return new { dimstyle = Convert.ToString(Application.GetSystemVariable("DIMSTYLE")), id = Db.Dimstyle.Handle.ToString(), dimscale = Db.Dimscale, dbmod = Convert.ToInt32(Application.GetSystemVariable("DBMOD")) };';
@@ -156,7 +168,7 @@ async function hardeningChecks(hasDrawing) {
   }
 
   if (!sidePath) {
-    record("hardening #11: detached ReadDwgFile checks skipped (no --side)", true);
+    skip("hardening #11: detached ReadDwgFile checks (no --side)");
   } else {
     const countSide = [
       'side.ReadDwgFile((string)Args["path"]!, FileOpenMode.OpenForReadAndAllShare, true, "");',
@@ -232,17 +244,37 @@ async function hardeningChecks(hasDrawing) {
       command: process.execPath, args: ["./build/index.js"], cwd: process.cwd(),
       env: { ...serverEnv, CIVIL3D_HOST: "::1" }, stderr: "pipe",
     });
+    const printBadServerStderr = drainServerStderr(badTransport.stderr, "CIVIL3D_HOST=::1 MCP server");
+    const failuresBefore = failures;
+    let completed = false;
     try {
       await badClient.connect(badTransport);
-      const response = await callGatedRun({ mode: "read", code: "return 7;" }, badClient,
-        { timeout: 30_000, maxTotalTimeout: 30_000 });
-      const added = folders().filter((folder) => !before.has(folder));
-      const message = text(response);
-      record("hardening #7: ::1 host refused with nothing run and no new run folder",
-        response.isError === true && response.errorCode === "CIVIL3D.INVALID_INPUT"
-          && /CIVIL3D_HOST/.test(message) && /nothing ran/i.test(message) && added.length === 0,
-        { error: message, added });
+      const parameters = { mode: "read", code: "return 7;" };
+      const requestOptions = { timeout: 30_000, maxTotalTimeout: 30_000 };
+      const hostRefused = (response) => response.isError === true && response.errorCode === "CIVIL3D.INVALID_INPUT"
+        && /CIVIL3D_HOST/.test(text(response)) && /nothing ran/i.test(text(response));
+      if (approvalMode === "token") {
+        // Do not request approval from the unreachable ::1 child.
+        const direct = await call("civil3d_run_code", parameters, requestOptions, badClient);
+        const directAdded = folders().filter((folder) => !before.has(folder));
+        record("hardening #7: ::1 direct call without token refused with no new run folder",
+          direct.isError === true && (/approval required/i.test(text(direct)) || hostRefused(direct)) && directAdded.length === 0,
+          { error: text(direct), added: directAdded });
+        // Approval from the normal server is bound to these same parameters.
+        const approvalToken = await approve("civil3d_run_code", "run", parameters);
+        const response = await call("civil3d_run_code", { ...parameters, approvalToken }, requestOptions, badClient);
+        const added = folders().filter((folder) => !before.has(folder));
+        record("hardening #7: ::1 host refused with normal-server token and no new run folder",
+          hostRefused(response) && added.length === 0, { error: text(response), added });
+      } else {
+        const response = await callGatedRun(parameters, badClient, requestOptions);
+        const added = folders().filter((folder) => !before.has(folder));
+        record("hardening #7: ::1 host refused with nothing run and no new run folder",
+          hostRefused(response) && added.length === 0, { error: text(response), added });
+      }
+      completed = true;
     } finally {
+      if (!completed || failures > failuresBefore) printBadServerStderr();
       // Use the same bounded close as the normal server, including failed startup.
       await Promise.race([badClient.close().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 5000))]);
     }
@@ -254,7 +286,7 @@ async function hardeningChecks(hasDrawing) {
   });
 
   if (damagedDir === undefined || !hasDrawing) {
-    record(`hardening #24: damaged comparison skipped (${!hasDrawing ? "--no-drawing" : "no --damaged"})`, true);
+    skip(`hardening #24: damaged comparison (${!hasDrawing ? "--no-drawing" : "no --damaged"})`);
   } else {
     await check("hardening #24: damaged DWG comparison errors within 60 seconds", async () => {
       for (const otherPath of damagedPaths()) {
@@ -263,6 +295,11 @@ async function hardeningChecks(hasDrawing) {
           { timeout: 60_000, maxTotalTimeout: 60_000 });
         const elapsedMs = Math.round(performance.now() - started);
         const message = text(response);
+        if (response.isError === true && response.errorCode === "CIVIL3D.PATH_NOT_ALLOWED") {
+          skip(`hardening #24: damaged DWG comparison (${otherPath})`,
+            `Files must be inside the import roots listed in this message (CIVIL3D_IMPORT_ROOTS or CIVIL3D_FILE_ROOTS): ${message}`);
+          continue;
+        }
         record(`hardening #24: damaged DWG comparison errors within 60 seconds (${otherPath})`,
           response.isError === true && response.errorCode === "CIVIL3D.FILE_IO_ERROR" && elapsedMs < 60_000
             && /Unable to read.*as a side database/i.test(message) && message.toLowerCase().includes(otherPath.toLowerCase()),
@@ -327,7 +364,7 @@ try {
     if (health.structuredContent?.result?.drawingLoaded !== false) {
       throw new Error("--no-drawing requires every drawing to be closed before testing");
     }
-    if (runCodeApi < 4) record("PR 3 no-drawing checks: skipped (plugin runCodeApi below 4)", true, { runCodeApi });
+    if (runCodeApi < 4) skip("PR 3 no-drawing checks (plugin runCodeApi below 4)", `runCodeApi=${runCodeApi}`);
     else {
     await check("PR 3: OpenSide read with no drawing", async () => {
       if (!sidePath) throw new Error("--no-drawing requires --side <scratch drawing path>");
@@ -355,7 +392,7 @@ try {
 
   if (options.other) {
     if (runCodeApi < 4) {
-      record("PR 3 other-drawing checks: skipped (plugin runCodeApi below 4)", true, { runCodeApi });
+      skip("PR 3 other-drawing checks (plugin runCodeApi below 4)", `runCodeApi=${runCodeApi}`);
     }
     else {
     const otherPath = resolve(options.other);
@@ -400,7 +437,7 @@ try {
         response.isError === true && /older than this server/i.test(text(response)) && /nothing ran/i.test(text(response)),
         { runCodeApi, response: text(response).slice(0, 240) });
     });
-    record("PR 2 checks: skipped (plugin runCodeApi below 3)", true, { runCodeApi });
+    skip("PR 2 checks (plugin runCodeApi below 3)", `runCodeApi=${runCodeApi}`);
   } else {
     await check("PR 2: codePath/argsPath strips BOM and hashes script", async () => {
       const folder = mkdtempSync(join(tmpdir(), "run-code-files-"));
@@ -459,7 +496,7 @@ try {
     });
 
     if (longSeconds === undefined) {
-      record("PR 2: long read skipped (no --long)", true);
+      skip("PR 2: long read (no --long)");
     } else {
       await check("PR 2: long read and MCP progress", async () => {
         const progress = [];
@@ -480,7 +517,7 @@ try {
     }
 
     if (damagedDir === undefined) {
-      record("PR 2: damaged drawings skipped (no --damaged)", true);
+      skip("PR 2: damaged drawings (no --damaged)");
     } else {
       await check("PR 2: OpenSideOrNull reports every failed drawing", async () => {
         const paths = damagedPaths();
@@ -723,7 +760,7 @@ try {
         { later: later.status, error: later.error?.message, after: after.status });
     });
   } else {
-    record("side database: skipped (no --side)", true);
+    skip("side database (no --side)");
   }
 
   // Writes: add a tagged text, check it, undo once, check it is gone.
@@ -731,7 +768,7 @@ try {
   const countTagged = `return ModelSpace<DBText>().Count(t => t.TextString == (string)Args["tag"]);`;
   const writesAllowed = Boolean(expectDrawing) || options["allow-writes"];
   if (!writesAllowed) {
-    record("write cases: skipped (pass --expect-drawing <scratch drawing name>, or --allow-writes)", true);
+    skip("write cases (pass --expect-drawing <scratch drawing name>, or --allow-writes)");
   }
 
   if (writesAllowed) {
@@ -797,7 +834,7 @@ try {
       });
     }
   } else if (options.other) {
-    record("PR 4 targeted write checks: skipped (plugin runCodeApi below 5)", true, { runCodeApi });
+    skip("PR 4 targeted write checks (plugin runCodeApi below 5)", `runCodeApi=${runCodeApi}`);
   }
   if (runCodeApi >= 3) {
     await check("PR 2 write: EnsureLayer twice returns the same handle", async () => {
@@ -987,11 +1024,13 @@ try {
 
   }
   if (options.hardening) await hardeningChecks(!options["no-drawing"]);
-  console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", failures, drawing: drawingName, results }, null, 2));
+  console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", passes: results.filter((result) => result.passed === true).length,
+    failures, skips, drawing: drawingName, results }, null, 2));
   process.exitCode = failures === 0 ? 0 : 1;
 } catch (error) {
+  printServerStderr();
   console.error(`Live run-code smoke stopped: ${error instanceof Error ? error.message : String(error)}`);
-  console.log(JSON.stringify({ status: "stopped", failures, results }, null, 2));
+  console.log(JSON.stringify({ status: "stopped", passes: results.filter((result) => result.passed === true).length, failures, skips, results }, null, 2));
   process.exitCode = 1;
 } finally {
   // Closing the stdio transport can leave a promise that never settles once

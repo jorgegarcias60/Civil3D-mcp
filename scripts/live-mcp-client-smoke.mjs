@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { drainServerStderr } from "./server-stderr.mjs";
 
 const transport = new StdioClientTransport({
   command: process.execPath,
@@ -8,6 +9,7 @@ const transport = new StdioClientTransport({
   env: { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0" },
   stderr: "pipe",
 });
+const printServerStderr = drainServerStderr(transport.stderr);
 const client = new Client({ name: "civil3d-live-smoke", version: "1.0.0" });
 
 try {
@@ -51,6 +53,9 @@ try {
     reportResource: reportLink.uri,
     liveActions: ["health", "drawing.info"],
   }, null, 2));
+} catch (error) {
+  printServerStderr();
+  throw error;
 } finally {
   await client.close().catch(() => undefined);
   await transport.close().catch(() => undefined);
