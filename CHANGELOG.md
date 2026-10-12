@@ -131,6 +131,22 @@
 - Run folders expire after 180 days by default; `CIVIL3D_RUN_CODE_RETENTION_DAYS` overrides this, with 0 or less keeping folders. Seven-day output pruning remains. Cleanup protects the current run, stays inside the log root, skips filesystem links and continues after deletion failures. Linked parents do not disable it. Fixes #25.
 
 - Drawing comparison retries opening once on a fresh database after disposing the failed attempt. Drawing-content errors are not retried; a second failure reports the first error. Opt-in live checks cover damaged-DWG errors and plugin recovery. Fixes #24.
+- Path refusals (`CIVIL3D.PATH_NOT_ALLOWED`) name only the root variable in use and keep the allowed-root list (follow-up to PR #14).
+- `install-trusted.ps1 -Uninstall` without `-SourceDir` removes all installed
+  releases and marked roaming support blocks, including orphans, after checking
+  every selected DLL for locks. Explicit `-SourceDir` selects one release;
+  short aliases cannot select unrelated folders. Fixes #8.
+
+- `install-trusted.ps1` chains new or block-only startup files to the next
+  `acaddoc.lsp` on the support path. Marked targets retain user edits;
+  reinstall drops upward links and preserves other loads. Normalized paths,
+  malformed-path handling and document guards prevent lost code, cycles and
+  repeated loads. Fixes #9.
+
+- Failed or missing trusted plugin loads report the DLL path and recovery
+  instructions. `C3DMCPLOAD` retries without restarting; automatic attempts
+  stay limited to once per session. LISP balance checks allow preserved
+  startup loads. Fixes #10.
 
 - `label_add` (`civil3d_standards` / `civil3d_label`):
   - Alignment `label_set` imports the named label set (it replaces the
@@ -144,6 +160,17 @@
   - An unknown style name lists the available ones; profile `label_set` says
     the .NET API cannot set it instead of failing obscurely.
   - `scripts/live-label-smoke.mjs` checks all of it in a running Civil 3D.
+- `createAlignment` from `points` reported `curvesAdded: 0` while Civil 3D
+  fitted curves at the drawing's default radius (`addCurves` defaults to true
+  for points), so an alignment meant to follow the points came out shorter with
+  nothing in the result to say why. `curvesAdded` now counts those curves too,
+  with `curvesAutoFitted` and `curveCount` (arcs on the finished alignment;
+  arcs already in a traced polyline are not counted as fitted). A warning
+  names the default when it fitted curves the caller did not ask for, and the
+  `addCurves` field describes its default.
+- A path outside the plugin's file roots now names the allowed roots and the
+  variables that add one, instead of only "outside the configured roots".
+
 - Every plugin call hung until Civil 3D restarted once any COM client had run
   a command with `SendCommand`. Verified on 2027 with only this plugin loaded:
   in a disconnected Windows session the first such command (from PowerShell,
@@ -249,6 +276,20 @@
   Windows clone with `core.autocrlf=true`; comparisons now ignore CRLF/LF.
 
 ### Added
+
+- `civil3d_style list|get` takes `profile_view`, `profile_view_band_set`,
+  `section_view` and `section_view_band_set`, so the names that
+  `civil3d_profile view_create`/`view_band_set` and the section view tools
+  accept can be listed.
+- `civil3d_profile view_update` (also `civil3d_profile_view_update`, plugin
+  `profileViewUpdate`): set an existing profile view's style, layer, station
+  range (`stationStart`/`stationEnd`, or `stationRange: "auto"`), elevation
+  range (`elevationMin`/`elevationMax`, or `elevationRange: "auto"`) and
+  vertical exaggeration. `view_create` takes the same range and exaggeration
+  fields. Vertical exaggeration is part of the profile view style, so it
+  changes every view using the style; the result lists them in
+  `styleSharedWith` and warns when there are others. Approval-gated like
+  `view_band_set`.
 
 - Read-only geometry for the Civil 3D-Revit bridge. None of these is
   approval-gated (`query`/`inspect`, `safeForRetry`):

@@ -39,6 +39,12 @@
 >
 > The ApplicationPlugins bundle lives under `%APPDATA%`, which is not a trusted folder, so Civil 3D asks "Security - Unsigned Executable File" about `Civil3DMcpPlugin.dll` at every start. Where a folder is in `TRUSTEDPATHS` (Jorge's machine: `C:\CAD-Tools\...`), `scripts\install-trusted.ps1 -SourceDir <build output>` installs the plugin there instead: it copies the build to `C:\CAD-Tools\plugins\Civil3DMcp\R<series>\`, adds a marked block to `acaddoc.lsp` in the Civil 3D roaming support folder that NETLOADs it once per session, and removes the bundle. No prompt; the plugin loads when a drawing opens (not on the Start tab). `-Uninstall` reverses it.
 >
+> New or block-only startup files link to the first `acaddoc.lsp` after their folder on the profile's support path; no link is added if the folder is absent. Marked targets load directly so later user edits and downstream chains still run. Reinstall drops upward links and preserves other loads, including unavailable shares. Folder comparisons normalize dot segments, separators and case; malformed support entries are skipped and malformed saved loads are preserved. Separate document guards prevent cycles and repeated target loads.
+>
+> A failed or missing plugin load prints the DLL path and recovery instructions. Fix `TRUSTEDPATHS`, a Do Not Load answer or missing files, then type `C3DMCPLOAD` to retry without restarting. Automatic attempts happen once per session; success stays silent.
+>
+> `scripts\install-trusted.ps1 -Uninstall` without `-SourceDir` removes all installed releases and marked roaming support blocks, including orphan blocks. Only direct folders with long names starting with `R` and containing `Civil3DMcpPlugin.dll` qualify; short aliases do not qualify and folder links are refused. User code and unmarked files stay; missing support folders and empty installs are allowed. All selected DLLs are checked for locks before any change; close Civil 3D completely if one is locked. Add `-SourceDir <build output>` to remove only that release.
+>
 > `civil3d_run_code` runs C# inside Civil 3D (see In-process C# below); `node scripts/run-code-file.mjs <file.cs>` runs a script file through the MCP server from a terminal.
 
 > [!IMPORTANT]
@@ -527,7 +533,7 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 </details>
 
 <details>
-<summary><strong>Profile (10 tools)</strong></summary>
+<summary><strong>Profile (11 tools)</strong></summary>
 
 | Tool | Description |
 |------|-------------|
@@ -539,7 +545,8 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 | `civil3d_profile_delete_pvi` | Deletes the PVI nearest to a specified station |
 | `civil3d_profile_set_grade` | Sets the grade of a tangent entity |
 | `civil3d_profile_check_k_values` | Validates K-values against AASHTO minimums for design speed |
-| `civil3d_profile_view_create` | Creates a profile view at a specified insertion point |
+| `civil3d_profile_view_create` | Creates a profile view at a specified insertion point, optionally with station/elevation ranges and vertical exaggeration |
+| `civil3d_profile_view_update` | Changes an existing profile view's style, layer, station/elevation ranges (or back to automatic) and vertical exaggeration |
 | `civil3d_profile_view_band_set` | Applies a band set style to an existing profile view |
 
 </details>
@@ -1085,7 +1092,7 @@ methods directly; these MCP actions expose the same data. All coordinates are dr
 | `civil3d_standards_lookup` | Looks up Civil 3D standards, template governance, layer/style guidance, and labeling conventions |
 | `civil3d_assembly` | Lists and inspects assemblies and subassemblies |
 | `civil3d_label` | Manages labels on Civil 3D objects |
-| `civil3d_style` | Lists and inspects Civil 3D styles |
+| `civil3d_style` | Lists and inspects Civil 3D styles, including profile/section view styles and band sets |
 | `civil3d_parcel` | Reads parcel and site data |
 | `civil3d_data_shortcut` | Manages data shortcuts: listing, syncing, creating references |
 | `civil3d_orchestrate` | Routes natural-language Civil 3D requests to the best tool |
@@ -1195,6 +1202,10 @@ the current user's Documents folder.
 | `CIVIL3D_FILE_ROOTS` | User Documents | Shared fallback roots for imports and exports. |
 | `CIVIL3D_IMPORT_ROOTS` | `CIVIL3D_FILE_ROOTS` | Optional import-only roots for templates, DEM files, LandXML, STM, and other source artifacts. |
 | `CIVIL3D_EXPORT_ROOTS` | `CIVIL3D_FILE_ROOTS` | Optional export-only roots for drawings and generated reports. |
+
+An import or export variable overrides `CIVIL3D_FILE_ROOTS` when non-empty.
+`CIVIL3D.PATH_NOT_ALLOWED` lists the allowed roots and names the variable in use.
+Add the folder to that variable and restart Civil 3D.
 
 Xref (`attach`, `overlay`, `repath`), data-shortcut `data_shortcut_repair`, and
 `civil3d_compare` `drawing`/`compare_snapshot` read from the import roots;

@@ -205,6 +205,50 @@ export const ProfileCheckKValuesArgsSchema = z.object({
   speedUnits: SpeedUnitsSchema.optional(),
 });
 
+// Station/elevation ranges and vertical exaggeration for a profile view. Numbers
+// make a range user-specified; "auto" returns it to Civil 3D's automatic range.
+// Vertical exaggeration lives on the profile view style, so it changes every
+// view that uses that style (the result lists them).
+const ProfileViewRangeShape = {
+  stationStart: z.number().optional(),
+  stationEnd: z.number().optional(),
+  stationRange: z.literal("auto").optional(),
+  elevationMin: z.number().optional(),
+  elevationMax: z.number().optional(),
+  elevationRange: z.literal("auto").optional(),
+  verticalExaggeration: z.number().positive().optional(),
+};
+
+function checkProfileViewRanges(args: {
+  stationStart?: number; stationEnd?: number; stationRange?: string;
+  elevationMin?: number; elevationMax?: number; elevationRange?: string;
+}, ctx: z.RefinementCtx) {
+  if (args.stationStart !== undefined && args.stationEnd !== undefined && args.stationStart >= args.stationEnd) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "'stationStart' must be less than 'stationEnd'." });
+  }
+  if (args.elevationMin !== undefined && args.elevationMax !== undefined && args.elevationMin >= args.elevationMax) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "'elevationMin' must be less than 'elevationMax'." });
+  }
+  if (args.stationRange === "auto" && (args.stationStart !== undefined || args.stationEnd !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "stationRange 'auto' cannot be combined with stationStart/stationEnd." });
+  }
+  if (args.elevationRange === "auto" && (args.elevationMin !== undefined || args.elevationMax !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "elevationRange 'auto' cannot be combined with elevationMin/elevationMax." });
+  }
+}
+
+function profileViewRangeParams(args: Record<string, unknown>) {
+  return {
+    stationStart: args.stationStart,
+    stationEnd: args.stationEnd,
+    stationRange: args.stationRange,
+    elevationMin: args.elevationMin,
+    elevationMax: args.elevationMax,
+    elevationRange: args.elevationRange,
+    verticalExaggeration: args.verticalExaggeration,
+  };
+}
+
 export const ProfileViewCreateArgsSchema = z.object({
   action: z.literal("view_create"),
   alignmentName: z.string(),
@@ -214,7 +258,22 @@ export const ProfileViewCreateArgsSchema = z.object({
   style: z.string().optional(),
   bandSet: z.string().optional(),
   layer: z.string().optional(),
-});
+  ...ProfileViewRangeShape,
+}).superRefine(checkProfileViewRanges);
+
+export const ProfileViewUpdateArgsSchema = z.object({
+  action: z.literal("view_update"),
+  profileViewName: z.string(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  ...ProfileViewRangeShape,
+}).superRefine(checkProfileViewRanges).refine(
+  (args) => [
+    args.style, args.layer, args.stationStart, args.stationEnd, args.stationRange,
+    args.elevationMin, args.elevationMax, args.elevationRange, args.verticalExaggeration,
+  ].some((value) => value !== undefined),
+  { message: "view_update needs at least one setting to change." },
+);
 
 const ProfileViewBandSetArgsSchema = z.object({
   action: z.literal("view_band_set"),
@@ -241,6 +300,7 @@ const canonicalProfileInputShape = {
     "check_k_values",
     "view_create",
     "view_band_set",
+    "view_update",
   ]),
   alignmentName: z.string().optional(),
   profileName: z.string().optional(),
@@ -266,6 +326,7 @@ const canonicalProfileInputShape = {
   insertY: z.number().optional(),
   bandSet: z.string().optional(),
   bandSetName: z.string().optional(),
+  ...ProfileViewRangeShape,
 };
 
 // ─── Report helper ────────────────────────────────────────────────────────────
@@ -574,6 +635,24 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
           style: args.style,
           bandSet: args.bandSet,
           layer: args.layer,
+          ...profileViewRangeParams(args),
+        }),
+      ),
+    },
+    view_update: {
+      action: "view_update",
+      inputSchema: ProfileViewUpdateArgsSchema,
+      responseSchema: GenericProfileResponseSchema,
+      capabilities: ["edit", "manage"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["profileViewUpdate"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("profileViewUpdate", {
+          profileViewName: args.profileViewName,
+          style: args.style,
+          layer: args.layer,
+          ...profileViewRangeParams(args),
         }),
       ),
     },
@@ -615,6 +694,7 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
         "check_k_values",
         "view_create",
         "view_band_set",
+        "view_update",
       ],
       resolveAction: (rawArgs) => ({
         action: String(rawArgs.action ?? ""),
@@ -780,7 +860,7 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_profile_view_create",
       displayName: "Civil 3D Profile View Create",
-      description: "Creates a Civil 3D profile view at the specified insertion point in model space. Optionally applies a style, band set and layer (created if missing); without a style or band set the drawing's first one is used, and a style or band set name that does not exist is an error listing the available names.",
+      description: "Creates a Civil 3D profile view at the specified insertion point in model space. Optionally applies a style, band set and layer (created if missing); without a style or band set the drawing's first one is used, and a style or band set name that does not exist is an error listing the available names. Optional stationStart/stationEnd and elevationMin/elevationMax set user-specified ranges, and verticalExaggeration sets the exaggeration of the view's style (shared by every view using that style).",
       inputShape: {
         alignmentName: z.string(),
         profileViewName: z.string(),
@@ -789,6 +869,7 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
         style: z.string().optional(),
         bandSet: z.string().optional(),
         layer: z.string().optional(),
+        ...ProfileViewRangeShape,
       },
       supportedActions: ["view_create"],
       resolveAction: (rawArgs) => ({
@@ -802,6 +883,29 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
           style: rawArgs.style,
           bandSet: rawArgs.bandSet,
           layer: rawArgs.layer,
+          ...profileViewRangeParams(rawArgs),
+        },
+      }),
+    },
+    {
+      toolName: "civil3d_profile_view_update",
+      displayName: "Civil 3D Profile View Update",
+      description: "Changes an existing Civil 3D profile view: its style, layer, station range (stationStart/stationEnd, or stationRange 'auto'), elevation range (elevationMin/elevationMax, or elevationRange 'auto') and vertical exaggeration. Vertical exaggeration belongs to the profile view style, so it changes every view using that style; the result lists them in styleSharedWith and warns. Returns the resulting ranges (Civil 3D's computed values for an 'auto' range) and exaggeration.",
+      inputShape: {
+        profileViewName: z.string(),
+        style: z.string().optional(),
+        layer: z.string().optional(),
+        ...ProfileViewRangeShape,
+      },
+      supportedActions: ["view_update"],
+      resolveAction: (rawArgs) => ({
+        action: "view_update",
+        args: {
+          action: "view_update",
+          profileViewName: rawArgs.profileViewName,
+          style: rawArgs.style,
+          layer: rawArgs.layer,
+          ...profileViewRangeParams(rawArgs),
         },
       }),
     },

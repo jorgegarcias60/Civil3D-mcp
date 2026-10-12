@@ -11,11 +11,34 @@ var outsideRoot = Path.Combine(testRoot, "outside");
 Directory.CreateDirectory(allowedRoot);
 Directory.CreateDirectory(outsideRoot);
 
-Environment.SetEnvironmentVariable("CIVIL3D_IMPORT_ROOTS", allowedRoot);
-Environment.SetEnvironmentVariable("CIVIL3D_EXPORT_ROOTS", allowedRoot);
+var sharedRoots = args.Contains("--shared-roots");
+Environment.SetEnvironmentVariable("CIVIL3D_IMPORT_ROOTS", sharedRoots ? "   " : allowedRoot);
+Environment.SetEnvironmentVariable("CIVIL3D_EXPORT_ROOTS", sharedRoots ? null : allowedRoot);
+Environment.SetEnvironmentVariable("CIVIL3D_FILE_ROOTS", sharedRoots ? allowedRoot : outsideRoot);
 
 try
 {
+  ExpectRootMessage(
+    () => FileBoundary.ResolveImportPath(Path.Combine(outsideRoot, "input.csv"), ".csv"),
+    sharedRoots ? "CIVIL3D_FILE_ROOTS" : "CIVIL3D_IMPORT_ROOTS",
+    allowedRoot);
+  ExpectRootMessage(
+    () => FileBoundary.ResolveExportPath(Path.Combine(outsideRoot, "output.csv"), false, ".csv"),
+    sharedRoots ? "CIVIL3D_FILE_ROOTS" : "CIVIL3D_EXPORT_ROOTS",
+    allowedRoot);
+
+  // Guidance must describe the cached configuration even if the environment changes.
+  Environment.SetEnvironmentVariable("CIVIL3D_IMPORT_ROOTS", sharedRoots ? outsideRoot : null);
+  Environment.SetEnvironmentVariable("CIVIL3D_EXPORT_ROOTS", sharedRoots ? outsideRoot : null);
+  ExpectRootMessage(
+    () => FileBoundary.ResolveImportPath(Path.Combine(outsideRoot, "input.csv"), ".csv"),
+    sharedRoots ? "CIVIL3D_FILE_ROOTS" : "CIVIL3D_IMPORT_ROOTS",
+    allowedRoot);
+  ExpectRootMessage(
+    () => FileBoundary.ResolveExportPath(Path.Combine(outsideRoot, "output.csv"), false, ".csv"),
+    sharedRoots ? "CIVIL3D_FILE_ROOTS" : "CIVIL3D_EXPORT_ROOTS",
+    allowedRoot);
+
   var nestedOutput = Path.Combine(allowedRoot, "reports", "quantities.csv");
   var canonical = FileBoundary.ResolveExportPath(nestedOutput, overwrite: false, ".csv");
   Assert(canonical == Path.GetFullPath(nestedOutput), "Allowed output was not canonicalized.");
@@ -339,6 +362,29 @@ try
 finally
 {
   Directory.Delete(testRoot, recursive: true);
+}
+
+static void ExpectRootMessage(Action action, string variable, string allowedRoot)
+{
+  try
+  {
+    action();
+  }
+  catch (JsonRpcDispatchException exception) when (exception.Code == "CIVIL3D.PATH_NOT_ALLOWED")
+  {
+    Assert(exception.Message.Contains($"Allowed roots: {Path.GetFullPath(allowedRoot)}. "),
+      "The path refusal did not list the allowed roots.");
+    Assert(exception.Message.Contains($"Add a folder with {variable} (semicolon-separated absolute paths, read when Civil 3D starts)."),
+      $"The path refusal did not recommend only {variable}: {exception.Message}");
+    foreach (var otherVariable in new[] { "CIVIL3D_IMPORT_ROOTS", "CIVIL3D_EXPORT_ROOTS", "CIVIL3D_FILE_ROOTS" })
+    {
+      Assert(otherVariable == variable || !exception.Message.Contains(otherVariable),
+        $"The path refusal recommended an ineffective variable: {exception.Message}");
+    }
+    return;
+  }
+
+  throw new InvalidOperationException("Expected a path refusal with root configuration guidance.");
 }
 
 static void ExpectCode(string expectedCode, Action action)
