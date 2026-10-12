@@ -37,7 +37,8 @@ describe("host routes", () => {
   it("reads from Application.Idle with an OpenCloseTransaction, which keeps the undo history", () => {
     expect(execution).toMatch(/route == HostRoute\.Idle\s*\?\s*database\.TransactionManager\.StartOpenCloseTransaction\(\)/);
     expect(execution).toContain("needsCommand: write || inCommand");
-    expect(execution).toMatch(/if \(needsCommand\)\s*\{\s*await StartPluginCommandAsync\(/);
+    expect(execution).toMatch(/if \(needsCommand\)\s*\{\s*var commandDocument = targetDocument \?\? activeDocument[\s\S]*?dispatch\.TryDispatch\(\(\) => StartPluginCommandAsync\(commandDocument,/);
+    expect(execution).toContain("await dispatch.DispatchDone;");
   });
 
   it("runs writes, command sequences and lock-only work inside the plugin's own command", () => {
@@ -53,7 +54,11 @@ describe("host routes", () => {
     expect(execution).toContain("HostBusyTimeout = TimeSpan.FromSeconds(15)");
     expect(execution).toContain('"CIVIL3D.HOST_BUSY"');
     expect(execution).toContain("Editor.IsQuiescent == false");
-    expect(execution).toContain("Interlocked.Exchange(ref claimed, 1)");
+    const dispatch = withoutComments(source("HostDispatchState.cs"));
+    expect(execution).toContain("dispatch.TryStart()");
+    expect(execution).toContain("dispatch.TryAbandon()");
+    expect(dispatch).toContain("Interlocked.CompareExchange(ref state, Started, NotStarted)");
+    expect(dispatch).toContain("Interlocked.CompareExchange(ref state, Abandoned, NotStarted)");
   });
 
   // An OpenCloseTransaction is not rolled back on abort, and Idle ticks run

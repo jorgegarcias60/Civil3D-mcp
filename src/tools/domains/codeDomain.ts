@@ -133,6 +133,8 @@ export const RunCodeResponseSchema = z.object({
   ok: z.boolean(),
   approvedBy: z.enum(["token", "client"]).optional(),
   drawing: z.string().optional(),
+  activated: z.boolean().optional(),
+  switchedBack: z.boolean().optional(),
   output: z.string().optional(),
   outputFile: z.string().optional(),
   result: z.unknown().optional(),
@@ -197,7 +199,8 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
               if (args.document !== undefined || args.copyOutputsTo !== undefined || args.keepOutputs !== undefined || timeoutSeconds > 90) {
                 const health = await appClient.sendCommand("getCivil3DHealth", {}) as Record<string, unknown>;
                 const api = typeof health?.runCodeApi === "number" ? health.runCodeApi : 1;
-                const requiredApi = args.document !== undefined ? 4 : 3;
+                const requiredApi = args.document !== undefined && (args.mode ?? "read") === "write" ? 5
+                  : args.document !== undefined ? 4 : 3;
                 if (api < requiredApi) {
                   const parameter = args.document !== undefined ? "document"
                     : args.copyOutputsTo !== undefined ? "copyOutputsTo"
@@ -258,7 +261,7 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
           ? "Call this tool directly: your MCP client's tool permission is the approval; calls through civil3d_orchestrate, civil3d_docs or the HTTP bridge still need a civil3d_request_approval token. "
           : "Always needs approval: call civil3d_request_approval with toolName civil3d_run_code, action 'run' and the same parameters, then retry with approvalToken. ") +
         "The code runs with the user's full rights. " +
-        "For a read, document selects another open drawing by full path or unique file name without changing the active drawing; with no drawing open, OpenSide(path) can still read a DWG. Db, Doc, Ed, Civil and Tr need an open drawing. Writes target the active drawing only; a document write naming another drawing is refused. " +
+        "For a read, document selects another open drawing by full path or unique file name without changing the active drawing; with no drawing open, OpenSide(path) can still read a DWG. Db, Doc, Ed, Civil and Tr need an open drawing. For a write, document can select another open drawing: Civil 3D briefly activates it, runs the command there, then switches back. The response reports activated and switchedBack. " +
         "The snippet is the body of `object Run()`: statements, local functions and leading `using` lines; `return` a value (JSON: points and vectors as [x,y,z], ObjectIds as handles, tuples as arrays, anonymous objects by property). " +
         "In scope: Doc, Db, Ed, Civil (CivilDocument), Tr (the run's transaction), HasDrawing, Args (the 'args' object), Log(x), Check(), Open<T>(id, forWrite), ModelSpace<T>(db), PaperSpace<T>(layout, db), ById(hex, db), OpenSide(path), OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, EnsureLayer(name, colorIndex?, linetype?, db) and Tag(obj, app, value?) in write mode, TagValue and Tagged<T>(app, value?, db), TransactionFor(db), WriteFile(name, text or lines) (into the run folder), Session (a dictionary kept across runs until Civil 3D closes; plain data only). OpenSide and OpenSideOrNull return managed read-only side databases; do not dispose them. " +
         "Namespaces: System, Linq, IO, Text, Text.Json, Autodesk.AutoCAD ApplicationServices/DatabaseServices/EditorInput/Geometry/Colors, Autodesk.Civil, Civil ApplicationServices/DatabaseServices/Styles; names both AutoCAD and Civil 3D define mean AutoCAD's (DBObject, Entity, Table, Shape...; Civil 3D's are CivilDBObject, CivilEntity...), except Surface and Section, which are Civil 3D's (AcSurface, AcSection); AcException is AutoCAD's exception. " +

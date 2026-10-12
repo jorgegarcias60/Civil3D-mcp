@@ -1,5 +1,5 @@
 // Offline checks of runCode's AutoCAD-free runtime helpers, called from
-// Program.cs: the Log cap (RunCodeOutput.cs) and the runCode token (RpcAuth.cs).
+// Program.cs: the Log cap, runCode token and host dispatch gate.
 // RunTransaction (RunCodeScript.cs) needs AutoCAD at runtime, so it is only
 // compiled here (with the plugin build) and checked live in Civil 3D.
 using System.Runtime.Versioning;
@@ -18,6 +18,197 @@ internal static class RuntimeChecks
     CheckHelpers(expect);
     CheckDocuments(expect);
     CheckCopies(expect);
+    CheckDispatchGateAsync(expect).GetAwaiter().GetResult();
+  }
+
+  private static async Task CheckDispatchGateAsync(Action<bool, string> expect)
+  {
+    await CheckCancelBeforeDispatchAsync(expect);
+    await CheckStartBeforeCancelAsync(expect);
+    await CheckDispatchRegistrationRaceAsync(expect);
+    await CheckDispatchTimeoutAsync(expect);
+    await CheckStartCancelRaceAsync(expect);
+  }
+
+  private static async Task CheckCancelBeforeDispatchAsync(Action<bool, string> expect)
+  {
+    var gate = new RunCodeDispatchGate();
+    var dispatch = NewCompletion();
+    var warnings = new List<string>();
+    using var semaphore = new SemaphoreSlim(0, 1);
+    var releases = 0;
+    var restored = false;
+    var factoryCalls = 0;
+    gate.TryDispatch(() => { factoryCalls++; return dispatch.Task; });
+    gate.CancelUnstartedOperation();
+    gate.CancelUnstartedOperation();
+    expect(gate.OperationDone.IsCanceled && !gate.TryStart() && gate.TryAbandon(),
+      "cancellation before the host starts abandons the operation once and refuses a late start");
+    gate.TryDispatch(() => { factoryCalls++; return Task.CompletedTask; });
+    expect(factoryCalls == 1, "abandoned dispatch refuses a later factory call");
+
+    var cleanup = CleanupAsync(gate, semaphore, () => restored = true, () => releases++, warnings);
+    await Task.Yield();
+    expect(!cleanup.IsCompleted && !restored && releases == 0 && semaphore.CurrentCount == 0,
+      "outer cleanup waits for the pending dispatch before restoring and releasing the gate");
+    dispatch.SetResult();
+    await cleanup.WaitAsync(TimeSpan.FromSeconds(2));
+    expect(restored && releases == 1 && semaphore.CurrentCount == 1 && warnings.Count == 0,
+      "canceled dispatch drains before restoration and exactly one gate release");
+  }
+
+  private static async Task CheckStartBeforeCancelAsync(Action<bool, string> expect)
+  {
+    await CheckStartedDrainOrderAsync(expect, completeDispatchFirst: true);
+    await CheckStartedDrainOrderAsync(expect, completeDispatchFirst: false);
+  }
+
+  private static async Task CheckStartedDrainOrderAsync(Action<bool, string> expect, bool completeDispatchFirst)
+  {
+    var gate = new RunCodeDispatchGate();
+    var dispatch = NewCompletion();
+    var warnings = new List<string>();
+    using var semaphore = new SemaphoreSlim(0, 1);
+    var releases = 0;
+    var restored = false;
+    gate.TryDispatch(() => dispatch.Task);
+    expect(gate.TryStart(), "host starts the runCode operation once");
+    gate.CancelUnstartedOperation();
+    gate.CancelUnstartedOperation();
+    expect(!gate.TryAbandon() && !gate.OperationDone.IsCompleted,
+      "cancellation after the host starts keeps its operation running");
+
+    var cleanup = CleanupAsync(gate, semaphore, () => restored = true, () => releases++, warnings);
+    await Task.Yield();
+    if (completeDispatchFirst) dispatch.SetResult();
+    else gate.CompleteOperation();
+    await Task.Yield();
+    expect(!cleanup.IsCompleted && releases == 0 && !restored && semaphore.CurrentCount == 0
+      && (completeDispatchFirst ? !gate.OperationDone.IsCompleted : !gate.DispatchDone.IsCompleted),
+      completeDispatchFirst
+        ? "completed dispatch cannot release the gate while the host operation runs"
+        : "completed operation cannot release the gate while dispatch is pending");
+    if (completeDispatchFirst) gate.CompleteOperation();
+    else dispatch.SetResult();
+    await cleanup.WaitAsync(TimeSpan.FromSeconds(2));
+    expect(restored && releases == 1 && semaphore.CurrentCount == 1 && warnings.Count == 0,
+      "running operation and dispatch both finish before one restoration and gate release");
+    expect(!gate.TryStart(), "a completed operation cannot start a second time");
+  }
+
+  private static async Task CheckDispatchRegistrationRaceAsync(Action<bool, string> expect)
+  {
+    var gate = new RunCodeDispatchGate();
+    var dispatch = NewCompletion();
+    var factoryEntered = NewCompletion();
+    var factoryRelease = NewCompletion();
+    var cancelEntered = NewCompletion();
+    var cleanupEntered = NewCompletion();
+    var warnings = new List<string>();
+    using var semaphore = new SemaphoreSlim(0, 1);
+    var releases = 0;
+    var restored = false;
+    var registration = Task.Factory.StartNew(() => gate.TryDispatch(() =>
+    {
+      factoryEntered.SetResult();
+      factoryRelease.Task.GetAwaiter().GetResult();
+      return dispatch.Task;
+    }), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+    try
+    {
+      await factoryEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+      var cancellation = Task.Factory.StartNew(() =>
+      {
+        cancelEntered.SetResult();
+        gate.CancelUnstartedOperation();
+      }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+      var cleanup = Task.Factory.StartNew(async () =>
+      {
+        cleanupEntered.SetResult();
+        await CleanupAsync(gate, semaphore, () => restored = true, () => releases++, warnings);
+      }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+      await Task.WhenAll(cancelEntered.Task, cleanupEntered.Task).WaitAsync(TimeSpan.FromSeconds(2));
+      await Task.Yield();
+      expect(!registration.IsCompleted && !cancellation.IsCompleted && !cleanup.IsCompleted
+        && !restored && releases == 0, "cancellation and drain cannot pass a factory holding dispatch registration");
+
+      factoryRelease.SetResult();
+      expect(await registration.WaitAsync(TimeSpan.FromSeconds(2)), "dispatch factory registers while cancellation is waiting");
+      await cancellation.WaitAsync(TimeSpan.FromSeconds(2));
+      expect(ReferenceEquals(gate.DispatchDone, dispatch.Task) && !cleanup.IsCompleted
+        && !restored && releases == 0 && semaphore.CurrentCount == 0,
+        "drain sees the registered dispatch and holds the gate until it finishes");
+      dispatch.SetResult();
+      await cleanup.WaitAsync(TimeSpan.FromSeconds(2));
+      expect(restored && releases == 1 && semaphore.CurrentCount == 1 && warnings.Count == 0
+        && !gate.TryStart(), "registered dispatch drains before one restoration and gate release");
+    }
+    finally
+    {
+      factoryRelease.TrySetResult();
+      dispatch.TrySetResult();
+    }
+  }
+
+  private static async Task CheckDispatchTimeoutAsync(Action<bool, string> expect)
+  {
+    var gate = new RunCodeDispatchGate();
+    var neverDispatched = NewCompletion();
+    var warnings = new List<string>();
+    using var semaphore = new SemaphoreSlim(0, 1);
+    var releases = 0;
+    var restored = false;
+    gate.TryDispatch(() => neverDispatched.Task);
+    gate.CancelUnstartedOperation();
+    await CleanupAsync(gate, semaphore, () => restored = true, () => releases++, warnings,
+      TimeSpan.FromMilliseconds(30)).WaitAsync(TimeSpan.FromSeconds(2));
+    expect(warnings.Count == 1 && restored && releases == 1 && semaphore.CurrentCount == 1,
+      "stuck dispatch times out with a warning, then outer cleanup restores and releases once");
+    expect(!gate.TryStart() && gate.TryAbandon(), "timed-out, unstarted dispatch remains abandoned");
+    neverDispatched.SetResult();
+  }
+
+  private static async Task CheckStartCancelRaceAsync(Action<bool, string> expect)
+  {
+    for (var attempt = 0; attempt < 32; attempt++)
+    {
+      var gate = new RunCodeDispatchGate();
+      using var start = new ManualResetEventSlim();
+      var starter = Task.Run(() => { start.Wait(); return gate.TryStart(); });
+      var canceler = Task.Run(() => { start.Wait(); gate.CancelUnstartedOperation(); });
+      start.Set();
+      await Task.WhenAll(starter, canceler);
+      var running = starter.Result;
+      expect(running != gate.OperationDone.IsCanceled && !gate.TryStart(),
+        "simultaneous host start and cancellation produce one terminal dispatch decision");
+      if (running)
+      {
+        expect(!gate.TryAbandon(), "a started operation cannot be abandoned by a later cancellation");
+        gate.CompleteOperation();
+      }
+      else
+      {
+        expect(gate.TryAbandon(), "an abandoned operation stays abandoned after repeated cancellation");
+      }
+    }
+  }
+
+  private static TaskCompletionSource NewCompletion() =>
+    new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+  private static async Task CleanupAsync(RunCodeDispatchGate gate, SemaphoreSlim semaphore,
+    Action restore, Action released, List<string> warnings, TimeSpan? timeout = null)
+  {
+    try
+    {
+      await gate.DrainAsync(timeout ?? TimeSpan.FromSeconds(2), warnings.Add);
+    }
+    finally
+    {
+      restore();
+      semaphore.Release();
+      released();
+    }
   }
 
   private static void CheckDocuments(Action<bool, string> expect)

@@ -30,7 +30,7 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class RunCodeCommands
 {
-  internal const int ApiVersion = 4;
+  internal const int ApiVersion = 5;
   private const int MaxCodeChars = 200_000;
   private const int DefaultTimeoutSeconds = 30;
   // Reads may take ten minutes and keep Civil 3D's UI busy. Writes stay short.
@@ -46,6 +46,7 @@ public static class RunCodeCommands
 
   private sealed class RunOutcome
   {
+    public readonly RunCodeActivation Activation = new();
     public RunCodeScript? Script;
     public string? Drawing;
     public long RunMs;
@@ -313,6 +314,14 @@ public static class RunCodeCommands
     }
     finally
     {
+      if (outcome.Activation.Activated)
+      {
+        response["activated"] = true;
+        response["switchedBack"] = outcome.Activation.SwitchedBack;
+        summary["activated"] = true;
+        summary["switchedBack"] = outcome.Activation.SwitchedBack;
+      }
+      if (outcome.Activation.Warning != null) warnings.Add(outcome.Activation.Warning);
       response["status"] = status;
       response["ok"] = status == "ok";
       if (outcome.Drawing != null)
@@ -502,7 +511,7 @@ public static class RunCodeCommands
         }
 
         return true;
-      });
+      }, outcome.Activation);
       return "ok";
     }
     catch (Exception exception) when (outcome.Script != null)

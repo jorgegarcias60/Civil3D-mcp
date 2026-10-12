@@ -1,6 +1,7 @@
 // Live smoke test of civil3d_run_code through the real MCP server (build/index.js)
 // and the plugin in a running Civil 3D. Run it against a SCRATCH drawing: the
-// write cases add and remove a text object, and one undo is sent.
+// write cases add and remove text objects in scratch drawings. Active-drawing
+// cases send one undo; a targeted write cleans up in its target drawing.
 //
 //   npm run build
 //   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
@@ -8,7 +9,8 @@
 //
 // --expect-drawing: the write cases run only when the active drawing's name contains
 //   this text (guards against testing on a real job by accident); without it, or
-//   --allow-writes, only the read cases run.
+//   --allow-writes, only the read cases run. --other must name a disposable open
+//   drawing too when writes are enabled: the PR 4 case commits and erases text there.
 // --side: a DWG read as a side database (never opened, never changed) for the
 //   OpenSide and bulk-sampling cases; skipped when not given.
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -202,11 +204,13 @@ try {
           { selected: selected.result, responseDrawing: selected.drawing, activeBefore: before.result, activeAfter: after.result });
       });
     }
-    await check("PR 3: write to other open drawing is refused", async () => {
-      const response = await callGatedRun({ code: "return 1;", mode: "write", document: otherPath });
-      record("PR 3: write to other open drawing is refused", response.isError === true && response.errorCode === "CIVIL3D.INVALID_INPUT"
-        && /active drawing|active document/i.test(text(response)), text(response));
-    });
+    if (runCodeApi < 5) {
+      await check("PR 3: write to other open drawing is refused", async () => {
+        const response = await callGatedRun({ code: "return 1;", mode: "write", document: otherPath });
+        record("PR 3: write to other open drawing is refused", response.isError === true && response.errorCode === "CIVIL3D.INVALID_INPUT"
+          && /active drawing|active document/i.test(text(response)), text(response));
+      });
+    }
     await check("PR 3: missing drawing lists open drawings", async () => {
       const response = await callGatedRun({ code: "return 1;", document: join(resolve(options.other, ".."), `missing-pr3-${process.pid}.dwg`) });
       record("PR 3: missing drawing lists open drawings", response.isError === true
@@ -563,6 +567,70 @@ try {
   }
 
   if (writesAllowed) {
+  if (options.other && runCodeApi >= 5) {
+    const otherPath = resolve(options.other);
+    const otherTag = `${tag}-OTHER`;
+    const countOther = async (value) => await run({ document: otherPath,
+      code: "return Tagged<DBText>(\"RUNCODE-SMOKE-PR4\").Count(t => t.TextString == (string)Args[\"tag\"]);",
+      args: { tag: value } });
+    const activeName = async () => (await run({ code: "return Doc.Name;" })).result;
+    const addOther = [
+      "var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), forWrite: true);",
+      "var text = new DBText { TextString = (string)Args[\"tag\"], Position = new Point3d(-1e6, -1e6, 0), Height = 1 };",
+      "ms.AppendEntity(text);",
+      "Tr.AddNewlyCreatedDBObject(text, true);",
+      "Tag(text, \"RUNCODE-SMOKE-PR4\");",
+      "return text.Handle.ToString();",
+    ].join("\n");
+    try {
+      await check("PR 4: targeted write commits in B and switches back to A", async () => {
+        const added = await run({ document: otherPath, mode: "write", code: addOther, args: { tag: otherTag } });
+        const count = await countOther(otherTag);
+        const active = await activeName();
+        record("PR 4: targeted write commits in B and switches back to A",
+          added.status === "ok" && added.committed === true && added.activated === true && added.switchedBack === true
+            && added.drawing?.toLowerCase() === otherPath.toLowerCase()
+            && count.status === "ok" && count.result === 1 && active?.toLowerCase() === drawingName.toLowerCase(),
+          { status: added.status, committed: added.committed, activated: added.activated,
+            switchedBack: added.switchedBack, drawing: added.drawing, count: count.result, active });
+      });
+      await check("PR 4: failing targeted write rolls back and switches back", async () => {
+        const before = await countOther(`${otherTag}-ROLLBACK`);
+        const failed = await run({ document: otherPath, mode: "write", args: { tag: `${otherTag}-ROLLBACK` },
+          code: addOther.replace("return text.Handle.ToString();", "throw new InvalidOperationException(\"roll back\");") });
+        const after = await countOther(`${otherTag}-ROLLBACK`);
+        const committedCount = await countOther(otherTag);
+        const active = await activeName();
+        record("PR 4: failing targeted write rolls back and switches back",
+          failed.status === "runtime_error" && failed.committed === false && failed.activated === true
+            && failed.switchedBack === true && failed.drawing?.toLowerCase() === otherPath.toLowerCase()
+            && before.status === "ok" && before.result === 0 && after.status === "ok" && after.result === before.result
+            && committedCount.status === "ok" && committedCount.result === 1
+            && active?.toLowerCase() === drawingName.toLowerCase(),
+          { status: failed.status, committed: failed.committed, activated: failed.activated,
+            switchedBack: failed.switchedBack, drawing: failed.drawing, before: before.result,
+            after: after.result, committedCount: committedCount.result, active });
+      });
+    } finally {
+      await check("PR 4: targeted cleanup erases smoke text in B", async () => {
+        const cleanup = await run({ document: otherPath, mode: "write", args: { tag: otherTag }, code: [
+          "foreach (var item in Tagged<DBText>(\"RUNCODE-SMOKE-PR4\").Where(t => t.TextString == (string)Args[\"tag\"] || t.TextString == (string)Args[\"tag\"] + \"-ROLLBACK\").ToList())",
+          "  Open<DBText>(item.ObjectId, forWrite: true).Erase();",
+          "return 1;",
+        ].join("\n") });
+        const count = await countOther(otherTag);
+        const rollbackCount = await countOther(`${otherTag}-ROLLBACK`);
+        const active = await activeName();
+        record("PR 4: targeted cleanup erases smoke text in B",
+          cleanup.status === "ok" && cleanup.switchedBack === true && count.status === "ok" && count.result === 0
+            && rollbackCount.status === "ok" && rollbackCount.result === 0
+            && active?.toLowerCase() === drawingName.toLowerCase(),
+          { status: cleanup.status, count: count.result, rollbackCount: rollbackCount.result, active });
+      });
+    }
+  } else if (options.other) {
+    record("PR 4 targeted write checks: skipped (plugin runCodeApi below 5)", true, { runCodeApi });
+  }
   if (runCodeApi >= 3) {
     await check("PR 2 write: EnsureLayer twice returns the same handle", async () => {
       const response = await run({ mode: "write", code: [
