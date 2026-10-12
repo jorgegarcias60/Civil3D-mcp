@@ -215,6 +215,11 @@ mutations use a three-step policy flow:
 Set `CIVIL3D_APPROVAL_MODE=disabled` only for isolated local development or
 test environments; production deployments should retain the default policy.
 
+For `civil3d_run_code`, set `CIVIL3D_RUN_CODE_APPROVAL=client` in your MCP
+client's server environment to use the client's tool permission for direct calls.
+Nested calls through `civil3d_orchestrate`, `civil3d_docs`, and the HTTP bridge
+still need a token. The default `token` mode keeps the flow above.
+
 ### Canonical tools and aliases
 
 Aliases do not unlock extra Civil 3D capabilities. They are narrower convenience
@@ -964,7 +969,9 @@ Every path passes the plugin's filesystem boundary: it must be absolute, inside 
 
 `civil3d_run_code` compiles a C# snippet with Roslyn inside the plugin and runs it on Civil 3D's main thread with the drawing locked, for work the fixed tools and COM/LISP make too slow or cannot do: bulk geometry over thousands of objects, reading other DWGs as side databases, anything the AutoCAD/Civil 3D .NET API reaches. Measured on Civil 3D 2026: walking 96,913 objects of a 10 MB background into 547,441 sample points took 1.2 s in-process, about 20 minutes in LISP.
 
-The code runs with your full Windows rights. The tool **always** needs an approval token, even with `CIVIL3D_APPROVAL_MODE=disabled`, and the token is bound to the exact code. The plugin saves every script with a summary (`script.cs`, `run.json`) in `%LOCALAPPDATA%\Civil3DMcpPlugin\run-code\<run id>\` next to `plugin.log`. Results and files written by scripts are deleted there after 7 days; scripts and summaries are kept.
+The code runs with your full Windows rights. By default, `CIVIL3D_RUN_CODE_APPROVAL=token` requires an approval token bound to the exact code, even with `CIVIL3D_APPROVAL_MODE=disabled`. With `CIVIL3D_RUN_CODE_APPROVAL=client`, a direct MCP client call without a token uses the client's tool permission and does not need an open drawing for approval. Supplied tokens are still validated. Calls through `civil3d_orchestrate`, `civil3d_docs`, or the HTTP bridge still need a token.
+
+The plugin saves every script with a summary (`script.cs`, `run.json`) in `%LOCALAPPDATA%\Civil3DMcpPlugin\run-code\<run id>\` next to `plugin.log`. Results and files written by scripts are deleted there after 7 days; scripts and summaries are kept.
 
 The plugin also refuses `runCode` without this Civil 3D session's token: it writes a random token to `%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token` when it starts listening on its port (and deletes it when it stops), and the MCP server reads it for every run and sends it only to `127.0.0.1`, where the plugin listens. The file is private to your Windows account (its own access list, nothing inherited; a low-integrity process of the same user could still read it). The server and the plugin must come from the same build: an older server gets `CIVIL3D.AUTH_REQUIRED` on this tool only. Over the HTTP bridge, any request that names the tool (directly, nested in orchestrate or docs, or in a request text) is refused until `MCP_HTTP_TOKEN` is set.
 
@@ -1073,6 +1080,7 @@ The Node MCP server reads the following variables at startup. All are optional; 
 |---|---|---|
 | `CIVIL3D_ENABLE_TOOL_ALIASES` | `false` | Set to `true` before the MCP server starts to expose all specialized aliases instead of the compact 35-tool surface. |
 | `CIVIL3D_APPROVAL_MODE` | enforced | Set to `disabled` only in an isolated disposable test environment; production should retain parameter-bound approvals. |
+| `CIVIL3D_RUN_CODE_APPROVAL` | `token` | Set to `client` to use the MCP client's permission for direct `civil3d_run_code` calls. Nested and HTTP calls still need tokens. |
 
 ### Local Autodesk help search
 

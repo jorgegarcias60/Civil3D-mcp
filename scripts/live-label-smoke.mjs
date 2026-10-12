@@ -56,9 +56,12 @@ async function gated(toolName, args) {
 // civil3d_run_code has no action parameter; its approval is for action 'run'.
 async function runCode(code, args = {}, mode = "read") {
   const parameters = { code, args, mode, timeoutSeconds: 60 };
-  const approval = await call("civil3d_request_approval", { toolName: "civil3d_run_code", action: "run", parameters });
-  if (approval.isError) throw new Error(`approval failed: ${text(approval)}`);
-  const response = await call("civil3d_run_code", { ...parameters, approvalToken: approval.structuredContent.approvalToken });
+  let response = await call("civil3d_run_code", parameters);
+  if (response.isError && /approval required/i.test(text(response))) {
+    const approval = await call("civil3d_request_approval", { toolName: "civil3d_run_code", action: "run", parameters });
+    if (approval.isError) throw new Error(`approval failed: ${text(approval)}`);
+    response = await call("civil3d_run_code", { ...parameters, approvalToken: approval.structuredContent.approvalToken });
+  }
   if (response.isError) throw new Error(`civil3d_run_code failed: ${text(response)}`);
   const result = response.structuredContent.result;
   if (result.status !== "ok") throw new Error(`run_code ${result.status}: ${JSON.stringify(result.errors ?? result.error).slice(0, 400)}`);

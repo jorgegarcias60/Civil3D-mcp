@@ -41,15 +41,21 @@ const text = (result) => (result.content ?? []).map((item) => item.text ?? "").j
 
 try {
   await client.connect(transport);
-  const approval = await client.callTool({
-    name: "civil3d_request_approval",
-    arguments: { toolName: "civil3d_run_code", action: "run", parameters },
-  }, undefined, options);
-  if (approval.isError) throw new Error(text(approval));
-  const response = await client.callTool({
+  let response = await client.callTool({
     name: "civil3d_run_code",
-    arguments: { ...parameters, approvalToken: approval.structuredContent.approvalToken },
+    arguments: parameters,
   }, undefined, options);
+  if (response.isError && /approval required/i.test(text(response))) {
+    const approval = await client.callTool({
+      name: "civil3d_request_approval",
+      arguments: { toolName: "civil3d_run_code", action: "run", parameters },
+    }, undefined, options);
+    if (approval.isError) throw new Error(text(approval));
+    response = await client.callTool({
+      name: "civil3d_run_code",
+      arguments: { ...parameters, approvalToken: approval.structuredContent.approvalToken },
+    }, undefined, options);
+  }
   if (response.isError) throw new Error(text(response));
   const result = response.structuredContent.result;
   console.log(JSON.stringify(result, null, 2));

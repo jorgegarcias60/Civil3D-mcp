@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { approvalPolicy, isApprovalRequired } from "./approvalPolicy.js";
+import { approvalPolicy, isApprovalRequired, runCodeApprovalMode } from "./approvalPolicy.js";
 import { captureToolHandler } from "./toolHandlerRegistry.js";
 import { findManifestAction } from "./toolManifest.js";
 
@@ -86,7 +86,9 @@ export function registerApprovalTool(server: McpServer) {
         capabilities: target.actionDefinition.capabilities,
         safeForRetry: target.actionDefinition.safeForRetry,
         instruction: requiresApproval
-          ? "Call civil3d_request_approval with the same toolName, action, and parameters before execution."
+          ? args.toolName === "civil3d_run_code" && runCodeApprovalMode() === "client"
+            ? "A direct civil3d_run_code call needs no token; calls through civil3d_orchestrate, civil3d_docs or the HTTP bridge need civil3d_request_approval with the same parameters."
+            : "Call civil3d_request_approval with the same toolName, action, and parameters before execution."
           : "This action may be executed directly.",
       });
     } catch (error) {

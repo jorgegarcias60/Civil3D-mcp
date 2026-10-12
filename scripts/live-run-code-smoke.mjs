@@ -3,7 +3,7 @@
 // write cases add and remove a text object, and one undo is sent.
 //
 //   npm run build
-//   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>]
+//   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
 //
 // --expect-drawing: the write cases run only when the active drawing's name contains
 //   this text (guards against testing on a real job by accident); without it, or
@@ -23,17 +23,23 @@ const { values: options } = parseArgs({
     side: { type: "string" },
     "expect-drawing": { type: "string" },
     "allow-writes": { type: "boolean", default: false },
+    approval: { type: "string", default: "token" },
   },
   strict: true,
 });
 const sidePath = options.side;
 const expectDrawing = options["expect-drawing"];
+const approvalMode = options.approval;
+if (approvalMode !== "token" && approvalMode !== "client") {
+  console.error("--approval must be token or client");
+  process.exit(2);
+}
 
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ["./build/index.js"],
   cwd: process.cwd(),
-  env: { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0" },
+  env: { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0", CIVIL3D_RUN_CODE_APPROVAL: approvalMode },
   stderr: "pipe",
 });
 const client = new Client({ name: "civil3d-run-code-smoke", version: "1.0.0" });
@@ -62,8 +68,11 @@ async function approve(toolName, action, parameters) {
 
 // One approved run; returns the plugin's response object (structuredContent.result).
 async function run(parameters) {
-  const approvalToken = await approve("civil3d_run_code", "run", parameters);
-  const response = await call("civil3d_run_code", { ...parameters, approvalToken });
+  let response = await call("civil3d_run_code", parameters);
+  if (response.isError && /approval required/i.test(text(response))) {
+    const approvalToken = await approve("civil3d_run_code", "run", parameters);
+    response = await call("civil3d_run_code", { ...parameters, approvalToken });
+  }
   if (response.isError) throw new Error(`civil3d_run_code failed: ${text(response)}`);
   return response.structuredContent.result;
 }
@@ -117,15 +126,25 @@ try {
     throw new Error(`Active drawing '${drawingName}' does not contain '${expectDrawing}'; stopping before any write.`);
   }
 
-  await check("approval: refused without a token", async () => {
+  const noTokenName = approvalMode === "client"
+    ? "approval: direct run without a token succeeds with approvedBy client"
+    : "approval: refused without a token";
+  await check(noTokenName, async () => {
     const response = await call("civil3d_run_code", { code: "return 1;" });
-    record("approval: refused without a token", response.isError === true && /approval required/i.test(text(response)), text(response).slice(0, 160));
+    const passed = approvalMode === "client"
+      ? response.isError !== true && response.structuredContent?.result?.approvedBy === "client"
+        && response.structuredContent?.result?.status === "ok" && response.structuredContent?.result?.result === 1
+      : response.isError === true && /approval required/i.test(text(response));
+    record(noTokenName, passed, text(response).slice(0, 160));
   });
 
-  await check("approval: a token for other code is refused", async () => {
+  const wrongTokenName = approvalMode === "client"
+    ? "approval: a token for other code is still refused"
+    : "approval: a token for other code is refused";
+  await check(wrongTokenName, async () => {
     const token = await approve("civil3d_run_code", "run", { code: "return 1;" });
     const response = await call("civil3d_run_code", { code: "return 2;", approvalToken: token });
-    record("approval: a token for other code is refused", response.isError === true && /does not match/i.test(text(response)), text(response).slice(0, 160));
+    record(wrongTokenName, response.isError === true && /does not match/i.test(text(response)), text(response).slice(0, 160));
   });
 
   await check("read: counts model space and logs", async () => {

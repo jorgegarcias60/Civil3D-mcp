@@ -101,6 +101,12 @@ per-session token (`%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token`, private to the u
 at its next start (`npm install --no-save` when the package files changed, so the clone stays clean for
 `git pull`); run `npm run build` yourself if you start the server another way.
 
+To use client approval for `civil3d_run_code`, set `CIVIL3D_RUN_CODE_APPROVAL=client`
+in your own MCP registration, such as `~/.claude.json` under
+`mcpServers.civil3d-mcp.env`. Do not set it in the shared launcher. Keep
+`civil3d_request_approval` off the client's allow list so a nested run_code
+call still prompts for permission to request its token.
+
 The plugin project targets .NET 8 (Civil 3D 2026). For a quick compile check of a `fix/` branch
 against the 2027 references:
 `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore /p:Civil3DReferencesPath=<C_References> /p:TargetFramework=net10.0-windows`.

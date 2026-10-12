@@ -5,6 +5,16 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### run_code client approval mode (2026-10-12)
+
+`tests/run_code_approval_mode.test.ts` covers direct client authorization,
+token validation, registry and orchestrator isolation, and preview text.
+`tests/http_bridge_nesting.test.ts` covers client mode with and without a bridge
+token. `npm run build` passed. `npx vitest run --configLoader runner --cache=false`
+passed 571 tests in 48 files. `npm run docs:check` passed with 210 entries.
+The Vitest config loader needs `runner` here because the shared `node_modules`
+junction prevents writes to `.vite-temp`.
+
 | check | command | last result (2026-09-11, `civil3d-2027-support`) |
 |---|---|---|
 | Node unit tests | `npm test` | 425 passed / 33 files |

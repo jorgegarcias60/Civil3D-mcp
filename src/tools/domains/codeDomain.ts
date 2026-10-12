@@ -3,13 +3,14 @@ import { withApplicationConnection } from "../../utils/ConnectionManager.js";
 import { readPluginToken } from "../../utils/pluginAuth.js";
 import { Civil3DRpcError, COMMAND_TIMEOUT_MS } from "../../utils/SocketClient.js";
 import type { DomainToolDefinition } from "../domainRuntime.js";
+import { runCodeApprovalMode } from "../approvalPolicy.js";
 
 // civil3d_run_code: a C# snippet compiled with Roslyn inside the plugin and run
 // on Civil 3D's main thread. It exists for work the fixed tools and COM/LISP
 // make too slow (2026-10-11: 96,913 objects sampled into 547,441 points in
 // 1.2 s in-process against about 20 minutes in LISP). The code runs with the
-// user's full rights, so the action is always approval-gated, even with
-// CIVIL3D_APPROVAL_MODE=disabled (approvalPolicy.ts), and the plugin saves
+// user's full rights. A direct MCP client call may use its tool permission in
+// client mode; nested calls still need a token. The plugin saves
 // every script with a summary in its run-code log folder.
 
 export const RUN_CODE_MAX_CODE_CHARS = 200_000;
@@ -56,6 +57,7 @@ export const RunCodeResponseSchema = z.object({
   mode: z.enum(["read", "write"]),
   status: z.enum(["ok", "compile_error", "rejected", "runtime_error", "timeout", "cancelled", "failed"]),
   ok: z.boolean(),
+  approvedBy: z.enum(["token", "client"]).optional(),
   drawing: z.string().optional(),
   output: z.string().optional(),
   outputFile: z.string().optional(),
@@ -99,7 +101,7 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
       requiresActiveDrawing: true,
       safeForRetry: false,
       pluginMethods: ["runCode"],
-      execute: async (parsedArgs) => {
+      execute: async (parsedArgs, context) => {
         const args = parsedArgs as z.infer<typeof RunCodeArgsSchema>;
         const timeoutSeconds = args.timeoutSeconds ?? 30;
         // Added here, after approval and idempotency hashed the caller's
@@ -110,7 +112,7 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
           (timeoutSeconds + RUN_CODE_START_WINDOW_SECONDS + RUN_CODE_REPLY_MARGIN_SECONDS) * 1000,
         );
         try {
-          return await withApplicationConnection(
+          const response = await withApplicationConnection(
             async (appClient) => await appClient.sendCommand("runCode", {
               code: args.code,
               mode: args.mode ?? "read",
@@ -121,6 +123,9 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
               ...(authToken ? { authToken } : {}),
             }, { timeoutMs }),
           );
+          return context?.approval === "token" || context?.approval === "client"
+            ? { ...response as Record<string, unknown>, approvedBy: context.approval }
+            : response;
         } catch (error) {
           // No answer, so no runId: the agent must not retry blindly.
           if (error instanceof Civil3DRpcError && error.code === "CIVIL3D.TIMEOUT") {
@@ -140,9 +145,12 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_run_code",
       displayName: "Civil 3D Run Code",
-      description:
-        "Runs a C# snippet inside Civil 3D (compiled with Roslyn, run on the main thread with the drawing locked), for work that is too slow or impossible with the other tools or COM/LISP: bulk geometry over thousands of objects, reading other DWGs as side databases, anything the AutoCAD/Civil 3D .NET API reaches. " +
-        "Always needs approval: call civil3d_request_approval with toolName civil3d_run_code, action 'run' and the same parameters, then retry with approvalToken. The code runs with the user's full rights. " +
+      get description() {
+        return "Runs a C# snippet inside Civil 3D (compiled with Roslyn, run on the main thread with the drawing locked), for work that is too slow or impossible with the other tools or COM/LISP: bulk geometry over thousands of objects, reading other DWGs as side databases, anything the AutoCAD/Civil 3D .NET API reaches. " +
+        (runCodeApprovalMode() === "client"
+          ? "Call this tool directly: your MCP client's tool permission is the approval; calls through civil3d_orchestrate, civil3d_docs or the HTTP bridge still need a civil3d_request_approval token. "
+          : "Always needs approval: call civil3d_request_approval with toolName civil3d_run_code, action 'run' and the same parameters, then retry with approvalToken. ") +
+        "The code runs with the user's full rights. " +
         "The snippet is the body of `object Run()`: statements, local functions and leading `using` lines; `return` a value (JSON: points and vectors as [x,y,z], ObjectIds as handles, tuples as arrays, anonymous objects by property). " +
         "In scope: Doc, Db, Ed, Civil (CivilDocument), Tr (the run's transaction), Args (the 'args' object), Log(x), Check(), Open<T>(id, forWrite), ModelSpace<T>(db) (calls Check for each entity), OpenSide(path) (another DWG as a read-only side database; the run disposes it, so no using/Dispose), TransactionFor(db), WriteFile(name, text or lines) (into the run folder), Session (a dictionary kept across runs until Civil 3D closes; plain data only). " +
         "Namespaces: System, Linq, IO, Text, Text.Json, Autodesk.AutoCAD ApplicationServices/DatabaseServices/EditorInput/Geometry/Colors, Autodesk.Civil, Civil ApplicationServices/DatabaseServices/Styles; names both AutoCAD and Civil 3D define mean AutoCAD's (DBObject, Entity, Table, Shape...; Civil 3D's are CivilDBObject, CivilEntity...), except Surface and Section, which are Civil 3D's (AcSurface, AcSection); AcException is AutoCAD's exception. " +
@@ -150,7 +158,8 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
         "mode 'read' (default): an open-close transaction, never committed; the compiler refuses OpenMode.ForWrite, UpgradeOpen, Erase, AppendEntity, Civil 3D Create/Add/Update..., regular transactions and drawing-setting setters, including ++/-- and deconstruction (a guard against mistakes, not a sandbox). " +
         "mode 'write': runs inside a plugin command; committed as one undo step when the snippet returns, rolled back when it throws or runs out of time (only changes made through Tr are rolled back: write mode refuses open-close transactions; database or system variables, files and Session are not rolled back). Both modes refuse Editor prompts, modal windows and message loops (any ShowDialog/ShowModal, MessageBox, InputBox, Application.Run), event subscriptions, TransactionManager.TopTransaction and Tr.Commit()/Abort() (the run owns Tr: just return; `using` on Tr does nothing); a nested transaction only as `using var t = ...StartTransaction();` (write) or `...StartOpenCloseTransaction()` (read). " +
         "status is ok, compile_error or rejected (errors with snippet line numbers), runtime_error, timeout or cancelled (error with line); committed is true, false or 'unknown' (the transaction was ended some other way: check the drawing). Output or results larger than maxInlineBytes (default 64 KB) go to outputFile/resultFile with a preview. Every script and its summary are saved in logFolder. " +
-        "code plus args: about 1 MB of JSON at most; pass larger data as a file path in args. A run that cannot start within 30 s because Civil 3D is busy with other work fails with HOST_BUSY and changes nothing.",
+        "code plus args: about 1 MB of JSON at most; pass larger data as a file path in args. A run that cannot start within 30 s because Civil 3D is busy with other work fails with HOST_BUSY and changes nothing.";
+      },
       inputShape: {
         code: z.string().min(1).max(RUN_CODE_MAX_CODE_CHARS),
         mode: z.enum(["read", "write"]).optional(),

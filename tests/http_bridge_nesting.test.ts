@@ -62,6 +62,7 @@ describe("HTTP bridge gate with the real tool registry", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     pluginCalls.length = 0;
     const closing = server;
     server = undefined;
@@ -97,6 +98,22 @@ describe("HTTP bridge gate with the real tool registry", () => {
 
     expect(res.status).toBe(403);
     expect(pluginCalls).toEqual([]);
+  });
+
+  it("still refuses client-mode nested run_code without a bridge token", async () => {
+    vi.stubEnv("CIVIL3D_RUN_CODE_APPROVAL", "client");
+    const res = await post("", "civil3d_orchestrate", nestedRunCode());
+    expect(res.status).toBe(403);
+    expect(res.body.error?.code).toBe("CIVIL3D.FORBIDDEN");
+    expect(pluginCalls).not.toContain("runCode");
+  });
+
+  it("still requires an approval token with a bridge token in client mode", async () => {
+    vi.stubEnv("CIVIL3D_RUN_CODE_APPROVAL", "client");
+    const res = await post(TOKEN, "civil3d_orchestrate", nestedRunCode());
+    expect(res.status).toBe(409);
+    expect(res.body.error?.message).toMatch(/Approval required for 'civil3d_run_code'/);
+    expect(pluginCalls).not.toContain("runCode");
   });
 
   it("refuses the nested call without a token even when it carries a valid approval token", async () => {
