@@ -116,6 +116,16 @@
 
 ### Fixed
 
+- `civil3d_run_code` requires the effective startup host to be `127.0.0.1` before token reads or plugin calls. `localhost` and empty hosts map to it; refusals say "Nothing ran." Opt-in live checks cover refusal and recovery. Fixes #7.
+
+- Read mode refuses Database mutations and requires proven detached destinations for loading and copying. Alias checks allow null/default definitions alongside detached ones and refuse open-drawing targets or ref/out exposure. Queries and write-mode calls remain allowed. Opt-in live checks cover guards and detached reads. Fixes #11.
+
+- Run-code results stream to `result.json`, including nested tuples. Small values also return inline; large values return a file and bounded preview. `resultError` preserves the script outcome on serialization or file failures; partial files are never returned or copied. Opt-in live checks validate saved results. Fixes #12.
+
+- Run folders expire after 180 days by default; `CIVIL3D_RUN_CODE_RETENTION_DAYS` overrides this, with 0 or less keeping folders. Seven-day output pruning remains. Cleanup protects the current run, stays inside the log root, skips filesystem links and continues after deletion failures. Linked parents do not disable it. Fixes #25.
+
+- Drawing comparison retries opening once on a fresh database after disposing the failed attempt. Drawing-content errors are not retried; a second failure reports the first error. Opt-in live checks cover damaged-DWG errors and plugin recovery. Fixes #24.
+
 - `label_add` (`civil3d_standards` / `civil3d_label`):
   - Alignment `label_set` imports the named label set (it replaces the
     alignment's label groups) and returns `labelGroups`; `curves` labels every

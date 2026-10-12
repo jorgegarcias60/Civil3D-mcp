@@ -95,7 +95,10 @@ Civil 3D holds the bundle or a changed build: close Civil 3D completely and run 
 
 **Update the plugin and the Node server together.** `civil3d_run_code` sends the plugin's
 per-session token (`%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token`, private to the user, sent only to
-127.0.0.1), so a server older than the plugin gets
+127.0.0.1). `civil3d_run_code` checks the effective startup `CIVIL3D_HOST`
+before reading the token or calling the plugin. `localhost` and empty hosts
+map to `127.0.0.1`. Other hosts get `CIVIL3D.INVALID_INPUT`: "Nothing ran."
+A server older than the plugin gets
 `CIVIL3D.AUTH_REQUIRED` on that tool (other tools keep working). After a pull: install the plugin
 (Civil 3D closed), and the Claude launcher (`scripts\claude-bootstrap-and-run.ps1`) rebuilds the server
 at its next start (`npm install --no-save` when the package files changed, so the clone stays clean for
@@ -114,6 +117,12 @@ in your own MCP registration, such as `~/.claude.json` under
 `mcpServers.civil3d-mcp.env`. Do not set it in the shared launcher. Keep
 `civil3d_request_approval` off the client's allow list so a nested run_code
 call still prompts for permission to request its token.
+
+Run-code outputs expire after 7 days. Whole run folders, including `script.cs`
+and `run.json`, expire after 180 days by default. Set
+`CIVIL3D_RUN_CODE_RETENTION_DAYS` in Civil 3D's environment before starting it.
+An integer of 0 or less disables folder deletion; output pruning still runs.
+See the README's [retention settings](../README.md#plugin-run-code-retention).
 
 The plugin project targets .NET 8 (Civil 3D 2026). For a quick compile check of a `fix/` branch
 against the 2027 references:

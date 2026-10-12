@@ -5,6 +5,55 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Run-code hardening: issues #7, #11, #12, #24 and #25 (2026-10-12)
+
+Offline results for `jorgegarcias60/run-code-hardening`, measured outside any
+sandbox on Jorge's machine on 2026-10-12:
+
+| Check | Result |
+|---|---|
+| `npm run build` | Ok. |
+| `npx vitest run --configLoader runner --cache=false` | All passed: 622 tests in 50 files. |
+| `npm run docs:check` | Ok. |
+| Plugin Release net8.0-windows, refs-2026 | 0 warnings. |
+| Plugin Release net10.0-windows, C_References | 0 warnings. |
+| RunCodeHarness `-f net8.0` | Pass. |
+| RunCodeHarness `-f net10.0` | Pass. |
+| `tests/powershell/install-trusted.check.ps1` | 0 failures. |
+
+New tests and checks cover:
+
+- #7: startup host mapping and refusal before token reads or plugin calls.
+- #11: read-mode Database mutation guards, detached destinations, aliases, null/default definitions and ref/out exposure.
+- #12: streamed and nested-tuple results, inline limits, JSON previews, copies, confinement and serialization/file failures.
+- #24: fresh-database retries, disposal, drawing-content error filtering and preservation of the first error.
+- #25: retention settings and age boundaries, current-run and audit-file protection, confinement, filesystem links and deletion failures.
+
+#### Live results
+
+Follow-up live result for PR #18, Civil 3D 2026, 2026-10-12 (run by Claude Code on scratch drawings):
+with drawing A active and B open, a write with `document` = B added one tagged
+DBText (`status: "ok"`, `committed: true`, `activated: true`, `switchedBack: true`).
+A targeted read of B then counted 1, with A still active. After activating B,
+one `UNDO 1` sent over COM removed it. A was activated again, and a targeted
+read of B counted 0. This was run twice with the same result.
+
+#### Live hardening checks (not run live yet)
+
+With a running plugin from this build and a scratch active drawing, run:
+
+`node scripts/live-run-code-smoke.mjs --hardening --approval token --side "C:\Scratch\side.dwg" --damaged "C:\Scratch\damaged.dwg"`
+
+Repeat with `--approval client` for client approval mode. Keep the DWGs inside
+the plugin's allowed import roots; `--damaged` also accepts a directory.
+Missing paths skip their checks; `--no-drawing` skips active-drawing checks
+and comparison.
+
+- #7: IPv6 host refusal creates no run folder; the normal server still runs code afterwards.
+- #11: mutation refusals leave DIMSTYLE, dimension scale and DBMOD unchanged; handle lookup and both detached `ReadDwgFile` forms work.
+- #12: large saved JSON results have complete contents, matching byte counts and bounded previews; small results stay inline.
+- #24: damaged-DWG comparison reports an error within 60 seconds; plugin health responds afterwards.
+
 ### PR 4 writes to another open drawing (2026-10-12)
 
 Verified in `jorgegarcias60/run-code-activate-write`, in the

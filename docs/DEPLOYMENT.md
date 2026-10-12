@@ -252,6 +252,7 @@ All variables are optional; defaults work for a standard local setup.
 | `CIVIL3D_ENABLE_TOOL_ALIASES` | `false` | Expose specialized drawing aliases instead of the compact 34-tool surface |
 | `CIVIL3D_APPROVAL_MODE` | enforced | Set to `disabled` only for isolated disposable testing |
 | `CIVIL3D_RUN_CODE_APPROVAL` | `token` | Set to `client` for direct MCP-client `civil3d_run_code` calls without approval tokens; nested and HTTP calls still need tokens |
+| `CIVIL3D_RUN_CODE_RETENTION_DAYS` | `180` | Run-folder retention in days. Set in Civil 3D's environment before starting it. See [retention settings](../README.md#plugin-run-code-retention). |
 | `CIVIL3D_HELP_ROOT` | Auto-discovered | Optional path to an Autodesk Civil 3D Offline Help `Help` folder |
 | `CIVIL3D_HELP_VERSION` | `2026` | Preferred installed offline-help version |
 | `CIVIL3D_HELP_CACHE_ROOT` | Local AppData | Generated offline-help index directory |

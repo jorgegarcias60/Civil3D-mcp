@@ -5,7 +5,7 @@
 //
 //   npm run build
 //   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
-//     [--long <seconds>] [--damaged <directory>] [--other <open drawing path>] [--no-drawing]
+//     [--long <seconds>] [--damaged <directory>] [--other <open drawing path>] [--no-drawing] [--hardening]
 //
 // --expect-drawing: the write cases run only when the active drawing's name contains
 //   this text (guards against testing on a real job by accident); without it, or
@@ -13,7 +13,9 @@
 //   drawing too when writes are enabled: the PR 4 case commits and erases text there.
 // --side: a DWG read as a side database (never opened, never changed) for the
 //   OpenSide and bulk-sampling cases; skipped when not given.
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+// --hardening: opt-in checks for #7, #11, #12 and #24. With this option,
+//   --damaged also accepts one damaged .dwg file inside the plugin's import roots.
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -34,6 +36,7 @@ const { values: options } = parseArgs({
     damaged: { type: "string" },
     other: { type: "string" },
     "no-drawing": { type: "boolean", default: false },
+    hardening: { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -55,11 +58,12 @@ if (approvalMode !== "token" && approvalMode !== "client") {
   process.exit(2);
 }
 
+const serverEnv = { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0", CIVIL3D_RUN_CODE_APPROVAL: approvalMode };
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ["./build/index.js"],
   cwd: process.cwd(),
-  env: { ...process.env, MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: "0", CIVIL3D_RUN_CODE_APPROVAL: approvalMode },
+  env: serverEnv,
   stderr: "pipe",
 });
 const client = new Client({ name: "civil3d-run-code-smoke", version: "1.0.0" });
@@ -69,11 +73,11 @@ let failures = 0;
 function record(name, passed, detail) {
   results.push({ name, passed, ...(detail === undefined ? {} : { detail }) });
   if (!passed) failures++;
-  console.error(`${passed ? "ok  " : "FAIL"} ${name}${detail === undefined ? "" : ` :: ${JSON.stringify(detail).slice(0, 400)}`}`);
+  console.error(`${passed ? (options.hardening ? "PASS" : "ok  ") : "FAIL"} ${name}${detail === undefined ? "" : ` :: ${JSON.stringify(detail).slice(0, 400)}`}`);
 }
 
-async function call(name, args, requestOptions = {}) {
-  return await client.callTool({ name, arguments: args }, undefined,
+async function call(name, args, requestOptions = {}, targetClient = client) {
+  return await targetClient.callTool({ name, arguments: args }, undefined,
     { timeout: 180_000, maxTotalTimeout: 180_000, ...requestOptions });
 }
 
@@ -81,8 +85,8 @@ function text(result) {
   return (result.content ?? []).map((item) => item.text ?? "").join("\n");
 }
 
-async function approve(toolName, action, parameters) {
-  const approval = await call("civil3d_request_approval", { toolName, action, parameters });
+async function approve(toolName, action, parameters, targetClient = client) {
+  const approval = await call("civil3d_request_approval", { toolName, action, parameters }, {}, targetClient);
   if (approval.isError) throw new Error(`approval failed: ${text(approval)}`);
   return approval.structuredContent.approvalToken;
 }
@@ -98,13 +102,179 @@ async function run(parameters, requestOptions) {
   return response.structuredContent.result;
 }
 
-async function callGatedRun(parameters) {
-  let response = await call("civil3d_run_code", parameters);
+async function callGatedRun(parameters, targetClient = client, requestOptions = {}) {
+  let response = await call("civil3d_run_code", parameters, requestOptions, targetClient);
   if (response.isError && /approval required/i.test(text(response))) {
-    const approvalToken = await approve("civil3d_run_code", "run", parameters);
-    response = await call("civil3d_run_code", { ...parameters, approvalToken });
+    const approvalToken = await approve("civil3d_run_code", "run", parameters, targetClient);
+    response = await call("civil3d_run_code", { ...parameters, approvalToken }, requestOptions, targetClient);
   }
   return response;
+}
+
+function damagedPaths() {
+  // Keep the original directory-only behavior unless hardening was requested.
+  if (options.hardening && statSync(damagedDir).isFile()) {
+    if (!/\.dwg$/i.test(damagedDir)) throw new Error("--damaged must name a .dwg file or directory");
+    return [resolve(damagedDir)];
+  }
+  const paths = readdirSync(damagedDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.dwg$/i.test(entry.name))
+    .map((entry) => resolve(damagedDir, entry.name));
+  if (paths.length === 0) throw new Error(`No .dwg files in ${damagedDir}`);
+  return paths;
+}
+
+async function hardeningChecks(hasDrawing) {
+  if (!hasDrawing) {
+    record("hardening #11: active-drawing guards skipped (--no-drawing)", true);
+  } else {
+    await check("hardening #11: SetDimstyleData rejected; DIMSTYLE and DBMOD unchanged", async () => {
+      const snapshot = 'return new { dimstyle = Convert.ToString(Application.GetSystemVariable("DIMSTYLE")), id = Db.Dimstyle.Handle.ToString(), dimscale = Db.Dimscale, dbmod = Convert.ToInt32(Application.GetSystemVariable("DBMOD")) };';
+      const before = await run({ mode: "read", code: snapshot });
+      if (before.status !== "ok" || typeof before.result?.dimstyle !== "string") {
+        throw new Error(`Cannot read DIMSTYLE before the guard check: ${JSON.stringify(before)}`);
+      }
+      const refused = await run({ mode: "read", code: "using var style = new DimStyleTableRecord();\nDb.SetDimstyleData(style);\nreturn 0;" });
+      const after = await run({ mode: "read", code: snapshot });
+      record("hardening #11: SetDimstyleData rejected; DIMSTYLE and DBMOD unchanged",
+        refused.status === "rejected" && (refused.errors ?? []).some((error) => /Database\.SetDimstyleData/.test(error.message ?? ""))
+          && after.status === "ok" && JSON.stringify(before.result) === JSON.stringify(after.result),
+        { status: refused.status, errors: refused.errors, before: before.result, after: after.result });
+    });
+
+    await check("hardening #11: GetObjectId(true) rejected", async () => {
+      const response = await run({ mode: "read", code: "return Db.GetObjectId(true, Db.BlockTableId.Handle, 0);" });
+      record("hardening #11: GetObjectId(true) rejected", response.status === "rejected"
+        && (response.errors ?? []).some((error) => /Database\.GetObjectId/.test(error.message ?? "")),
+        { status: response.status, errors: response.errors });
+    });
+    await check("hardening #11: GetObjectId(false) resolves a real handle", async () => {
+      const response = await run({ mode: "read", code: "return Db.GetObjectId(false, Db.BlockTableId.Handle, 0) == Db.BlockTableId;" });
+      record("hardening #11: GetObjectId(false) resolves a real handle", response.status === "ok" && response.result === true,
+        { status: response.status, result: response.result, errors: response.errors, error: response.error });
+    });
+  }
+
+  if (!sidePath) {
+    record("hardening #11: detached ReadDwgFile checks skipped (no --side)", true);
+  } else {
+    const countSide = [
+      'side.ReadDwgFile((string)Args["path"]!, FileOpenMode.OpenForReadAndAllShare, true, "");',
+      "side.CloseInput(true);",
+      "using var tx = side.TransactionManager.StartOpenCloseTransaction();",
+      "var blocks = (BlockTable)tx.GetObject(side.BlockTableId, OpenMode.ForRead);",
+      "long count = 0;",
+      "foreach (ObjectId blockId in blocks)",
+      "{",
+      "  var block = (BlockTableRecord)tx.GetObject(blockId, OpenMode.ForRead);",
+      "  foreach (ObjectId id in block) { Check(); count++; }",
+      "}",
+      "return count;",
+    ];
+    for (const [name, code] of [
+      ["hardening #11: detached ReadDwgFile with using counts objects", ["using var side = new Database(false, true);", ...countSide].join("\n")],
+      ["hardening #11: null-init detached ReadDwgFile with finally counts objects", [
+        "Database side = null;", "try", "{", "side = new Database(false, true);", ...countSide,
+        "}", "finally { side?.Dispose(); }",
+      ].join("\n")],
+    ]) {
+      await check(name, async () => {
+        const response = await run({ mode: "read", code, args: { path: resolve(sidePath) }, timeoutSeconds: 90 });
+        record(name, response.status === "ok" && Number.isSafeInteger(response.result) && response.result >= 0,
+          { status: response.status, count: response.result, errors: response.errors, error: response.error });
+      });
+    }
+  }
+
+  const maxInlineBytes = 4096;
+  for (const [name, code, valid] of [
+    ["hardening #12: 20000 anonymous objects saved as complete JSON",
+      'return Enumerable.Range(0, 20000).Select(i => new { index = i, label = "item" }).ToList();',
+      (value) => Array.isArray(value) && value.length === 20000 && value.every((item, i) => item.index === i && item.label === "item")],
+    ["hardening #12: tuple with a large string saved as complete JSON",
+      "return (7, new string('x', 200000));",
+      (value) => Array.isArray(value) && value.length === 2 && value[0] === 7 && value[1] === "x".repeat(200000)],
+  ]) {
+    await check(name, async () => {
+      const response = await run({ mode: "read", code, maxInlineBytes });
+      if (response.status !== "ok" || typeof response.resultFile !== "string") {
+        throw new Error(`Expected a saved result: ${JSON.stringify(response).slice(0, 400)}`);
+      }
+      const file = statSync(response.resultFile);
+      const bytes = readFileSync(response.resultFile);
+      const json = bytes.toString("utf8");
+      const value = JSON.parse(json);
+      const preview = response.resultPreview;
+      record(name, !response.resultError && response.result == null && file.isFile()
+        && response.resultBytes > maxInlineBytes && response.resultBytes === file.size && bytes.length === file.size
+        && typeof preview === "string" && preview.length > 3 && preview.length <= 2003
+        && preview.endsWith("...") && json.startsWith(preview.slice(0, -3)) && valid(value),
+        { status: response.status, resultFile: response.resultFile, resultBytes: response.resultBytes,
+          fileBytes: file.size, previewChars: preview?.length, inlineAbsent: response.result == null, resultError: response.resultError });
+    });
+  }
+  await check("hardening #12: small result stays inline", async () => {
+    const response = await run({ mode: "read", code: 'return new { value = 7, label = "small" };', maxInlineBytes });
+    record("hardening #12: small result stays inline", response.status === "ok" && !response.resultError
+      && response.result?.value === 7 && response.result?.label === "small" && !response.resultFile
+      && response.resultBytes > 0 && response.resultBytes <= maxInlineBytes, response);
+  });
+
+  await check("hardening #7: ::1 host refused with nothing run and no new run folder", async () => {
+    if (!process.env.LOCALAPPDATA) throw new Error("LOCALAPPDATA is required to inspect plugin run folders");
+    const root = join(process.env.LOCALAPPDATA, "Civil3DMcpPlugin", "run-code");
+    const folders = () => existsSync(root)
+      ? readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+      : [];
+    const before = new Set(folders());
+    const badClient = new Client({ name: "civil3d-run-code-hardening-host", version: "1.0.0" });
+    const badTransport = new StdioClientTransport({
+      command: process.execPath, args: ["./build/index.js"], cwd: process.cwd(),
+      env: { ...serverEnv, CIVIL3D_HOST: "::1" }, stderr: "pipe",
+    });
+    try {
+      await badClient.connect(badTransport);
+      const response = await callGatedRun({ mode: "read", code: "return 7;" }, badClient,
+        { timeout: 30_000, maxTotalTimeout: 30_000 });
+      const added = folders().filter((folder) => !before.has(folder));
+      const message = text(response);
+      record("hardening #7: ::1 host refused with nothing run and no new run folder",
+        response.isError === true && response.errorCode === "CIVIL3D.INVALID_INPUT"
+          && /CIVIL3D_HOST/.test(message) && /nothing ran/i.test(message) && added.length === 0,
+        { error: message, added });
+    } finally {
+      // Use the same bounded close as the normal server, including failed startup.
+      await Promise.race([badClient.close().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 5000))]);
+    }
+  });
+  await check("hardening #7: normal server still runs code after host refusal", async () => {
+    const response = await run({ mode: "read", code: "return 7;" });
+    record("hardening #7: normal server still runs code after host refusal", response.status === "ok" && response.result === 7,
+      { status: response.status, result: response.result, error: response.error });
+  });
+
+  if (damagedDir === undefined || !hasDrawing) {
+    record(`hardening #24: damaged comparison skipped (${!hasDrawing ? "--no-drawing" : "no --damaged"})`, true);
+  } else {
+    await check("hardening #24: damaged DWG comparison errors within 60 seconds", async () => {
+      for (const otherPath of damagedPaths()) {
+        const started = performance.now();
+        const response = await call("civil3d_compare", { action: "drawing", otherPath, includeCivilSummaries: false, maxDetails: 0 },
+          { timeout: 60_000, maxTotalTimeout: 60_000 });
+        const elapsedMs = Math.round(performance.now() - started);
+        const message = text(response);
+        record(`hardening #24: damaged DWG comparison errors within 60 seconds (${otherPath})`,
+          response.isError === true && response.errorCode === "CIVIL3D.FILE_IO_ERROR" && elapsedMs < 60_000
+            && /Unable to read.*as a side database/i.test(message) && message.toLowerCase().includes(otherPath.toLowerCase()),
+          { elapsedMs, error: message });
+      }
+    });
+    await check("hardening #24: plugin health responds after damaged comparison", async () => {
+      const response = await call("civil3d_health", {}, { timeout: 30_000, maxTotalTimeout: 30_000 });
+      record("hardening #24: plugin health responds after damaged comparison",
+        response.isError !== true && response.structuredContent?.result?.connected === true, text(response).slice(0, 300));
+    });
+  }
 }
 
 // One JSON-RPC request straight to the plugin's port, bypassing the MCP server
@@ -313,11 +483,9 @@ try {
       record("PR 2: damaged drawings skipped (no --damaged)", true);
     } else {
       await check("PR 2: OpenSideOrNull reports every failed drawing", async () => {
-        const paths = readdirSync(damagedDir, { withFileTypes: true })
-          .filter((entry) => entry.isFile() && /\.dwg$/i.test(entry.name))
-          .map((entry) => resolve(damagedDir, entry.name));
-        if (paths.length === 0) throw new Error(`No .dwg files in ${damagedDir}`);
-        paths.push(join(resolve(damagedDir), `missing-pr2-${process.pid}.dwg`), drawingName);
+        const paths = damagedPaths();
+        const parent = options.hardening && statSync(damagedDir).isFile() ? resolve(damagedDir, "..") : resolve(damagedDir);
+        paths.push(join(parent, `missing-pr2-${process.pid}.dwg`), drawingName);
         const response = await run({
           args: { paths },
           code: [
@@ -818,6 +986,7 @@ try {
   }
 
   }
+  if (options.hardening) await hardeningChecks(!options["no-drawing"]);
   console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", failures, drawing: drawingName, results }, null, 2));
   process.exitCode = failures === 0 ? 0 : 1;
 } catch (error) {

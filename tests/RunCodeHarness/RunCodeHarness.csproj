@@ -23,6 +23,8 @@
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeHelpers.cs" Link="RunCodeHelpers.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\HostDispatchState.cs" Link="HostDispatchState.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeLog.cs" Link="RunCodeLog.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeResult.cs" Link="RunCodeResult.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeJson.cs" Link="RunCodeJson.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RpcAuth.cs" Link="RpcAuth.cs" />
   </ItemGroup>
 </Project>

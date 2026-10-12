@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace Civil3DMcpPlugin;
 
@@ -17,6 +19,8 @@ internal static class RunCodeLog
   internal const string SummaryFile = "run.json";
   internal const string ResultFile = "result.json";
   internal const string OutputFile = "output.txt";
+  internal const int DefaultFolderRetentionDays = 180;
+  internal const string FolderRetentionEnvironmentVariable = "CIVIL3D_RUN_CODE_RETENTION_DAYS";
 
   // Kept when old run outputs are pruned.
   private static readonly string[] KeptFiles = { ScriptFile, SummaryFile };
@@ -24,6 +28,8 @@ internal static class RunCodeLog
   private static readonly string[] ReservedFiles = { ScriptFile, SummaryFile, ResultFile, OutputFile };
   private static readonly UTF8Encoding Utf8NoBom = new(false);
   private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
+  private static readonly Regex RunIdPattern = new(@"\A[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{8}\z", RegexOptions.CultureInvariant);
+  private static int _warnedInvalidRetention;
 
   internal static string Root => Path.Combine(Path.GetDirectoryName(PluginLog.LogFilePath)!, "run-code");
 
@@ -41,11 +47,24 @@ internal static class RunCodeLog
     return path;
   }
 
-  internal static string WriteBytes(string runFolder, string fileName, byte[] bytes)
+  // CreateNew refuses an existing result (including a filesystem link). The
+  // caller publishes the path only after its stream has been fully closed.
+  internal static string ResultPath(string runFolder) => FilePath(runFolder, ResultFile);
+
+  internal static FileStream OpenResultStream(string runFolder) =>
+    new(ResultPath(runFolder), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+
+  internal static FileStream OpenResultReadStream(string path) =>
+    new(ConfinedResultPath(path), FileMode.Open, FileAccess.Read, FileShare.Read);
+
+  internal static void DeletePartialResult(string path) => File.Delete(ConfinedResultPath(path));
+
+  private static string ConfinedResultPath(string path)
   {
-    var path = FilePath(runFolder, fileName);
-    File.WriteAllBytes(path, bytes);
-    return path;
+    var full = Inside(path);
+    if (!Path.GetFileName(full).Equals(ResultFile, StringComparison.OrdinalIgnoreCase))
+      throw new ArgumentException("Expected the run-code result file.");
+    return full;
   }
 
   // A file a script writes with WriteFile(name, ...).
@@ -91,7 +110,7 @@ internal static class RunCodeLog
   internal sealed record CopyResult(List<string> Copied, List<string> Removed, List<string> Warnings);
 
   // Output destinations are caller-selected. Only sources are confined to Root.
-  internal static CopyResult CopyOutputs(string runFolder, string destination, bool removeCopied)
+  internal static CopyResult CopyOutputs(string runFolder, string destination, bool removeCopied, bool includeResult = true)
   {
     var result = new CopyResult(new(), new(), new());
     try
@@ -99,6 +118,7 @@ internal static class RunCodeLog
       var targetFolder = ValidateCopyDestination(destination);
       var sources = Directory.EnumerateFiles(Inside(runFolder))
         .Where(file => !KeptFiles.Contains(Path.GetFileName(file), StringComparer.OrdinalIgnoreCase))
+        .Where(file => includeResult || !Path.GetFileName(file).Equals(ResultFile, StringComparison.OrdinalIgnoreCase))
         .Select(Inside).ToArray();
       if (sources.Length == 0) return result;
 
@@ -183,26 +203,34 @@ internal static class RunCodeLog
     return full;
   }
 
-  // Results and files written by scripts older than the retention are
-  // deleted; every script.cs and run.json is kept.
+  // Output pruning keeps audit files. Whole-folder pruning expires them separately.
   internal static void PruneOldOutputs(TimeSpan retention)
   {
     try
     {
-      if (!Directory.Exists(Root))
-      {
-        return;
-      }
-
+      var root = PlainPrunePath(Root, allowRoot: true);
       var cutoff = DateTime.UtcNow - retention;
-      foreach (var directory in Directory.EnumerateDirectories(Root))
+      foreach (var directory in Directory.EnumerateDirectories(root))
       {
-        foreach (var file in Directory.EnumerateFiles(directory))
+        try
         {
-          if (!KeptFiles.Contains(Path.GetFileName(file), StringComparer.OrdinalIgnoreCase) && File.GetLastWriteTimeUtc(file) < cutoff)
+          foreach (var file in Directory.EnumerateFiles(PlainPrunePath(directory)))
           {
-            File.Delete(Inside(file));
+            try
+            {
+              var path = PlainPrunePath(file);
+              if (!KeptFiles.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase) && File.GetLastWriteTimeUtc(path) < cutoff)
+                File.Delete(PlainPrunePath(path));
+            }
+            catch (Exception exception)
+            {
+              PluginLog.Swallow("RunCode", "pruning an old run output", exception);
+            }
           }
+        }
+        catch (Exception exception)
+        {
+          PluginLog.Swallow("RunCode", "pruning outputs in a run folder", exception);
         }
       }
     }
@@ -210,6 +238,107 @@ internal static class RunCodeLog
     {
       PluginLog.Swallow("RunCode", "pruning old run outputs", exception);
     }
+  }
+
+  internal static int ReadFolderRetentionDays()
+  {
+    var value = Environment.GetEnvironmentVariable(FolderRetentionEnvironmentVariable);
+    if (value == null) return DefaultFolderRetentionDays;
+    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var days)) return days;
+    if (Interlocked.Exchange(ref _warnedInvalidRetention, 1) == 0)
+      PluginLog.Warn("RunCode", $"Invalid {FolderRetentionEnvironmentVariable}; using {DefaultFolderRetentionDays} days for run-folder retention.");
+    return DefaultFolderRetentionDays;
+  }
+
+  internal static void PruneOldRunFolders(string currentRunFolder) =>
+    PruneOldRunFolders(currentRunFolder, ReadFolderRetentionDays(), DateTime.Now);
+
+  // Run IDs use DateTime.Now, so age uses local time too. File timestamps do
+  // not extend a run's lifetime. A nonpositive retention keeps whole folders.
+  internal static void PruneOldRunFolders(string currentRunFolder, int retentionDays, DateTime now)
+  {
+    if (retentionDays <= 0) return;
+    try
+    {
+      if (!Path.IsPathFullyQualified(currentRunFolder)) return;
+      var root = PlainPrunePath(Root, allowRoot: true);
+      var current = PlainPrunePath(currentRunFolder);
+      if (!string.Equals(Path.GetDirectoryName(current), root, StringComparison.OrdinalIgnoreCase)
+        || !TryRunDate(Path.GetFileName(current), out _)
+        || (File.GetAttributes(current) & FileAttributes.Directory) == 0) return;
+      foreach (var directory in Directory.EnumerateDirectories(root))
+      {
+        try
+        {
+          var folder = Inside(directory);
+          if (folder.Equals(current, StringComparison.OrdinalIgnoreCase)) continue;
+          var name = Path.GetFileName(folder);
+          if (!TryRunDate(name, out var runDate)
+            || (now - runDate).TotalDays <= retentionDays) continue;
+          DeleteRunTree(folder);
+        }
+        catch (Exception exception)
+        {
+          // A locked file, link or inaccessible folder must not fail the run
+          // or prevent pruning the other candidates.
+          PluginLog.Swallow("RunCode", "pruning an old run folder", exception);
+        }
+      }
+    }
+    catch (Exception exception)
+    {
+      PluginLog.Swallow("RunCode", "pruning old run folders", exception);
+    }
+  }
+
+  private static bool TryRunDate(string name, out DateTime runDate)
+  {
+    runDate = default;
+    return RunIdPattern.IsMatch(name)
+      && DateTime.TryParseExact(name[..15], "yyyyMMdd-HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out runDate);
+  }
+
+  private static void DeleteRunTree(string folder)
+  {
+    var directories = new List<string> { PlainPrunePath(folder) };
+    var files = new List<string>();
+    // Inspect the whole tree before removing anything. Enumerate one level
+    // at a time and reject links instead of resolving or traversing them.
+    for (var index = 0; index < directories.Count; index++)
+    {
+      foreach (var entry in Directory.EnumerateFileSystemEntries(PlainPrunePath(directories[index])))
+      {
+        var path = PlainPrunePath(entry);
+        if ((File.GetAttributes(path) & FileAttributes.Directory) != 0) directories.Add(path);
+        else files.Add(path);
+      }
+    }
+    foreach (var file in files) File.Delete(PlainPrunePath(file));
+    // Recheck each path and delete directories nonrecursively.
+    for (var index = directories.Count - 1; index >= 0; index--)
+      Directory.Delete(PlainPrunePath(directories[index]), recursive: false);
+  }
+
+  private static string PlainPrunePath(string path, bool allowRoot = false)
+  {
+    var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    var root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    if (!(allowRoot && full.Equals(root, StringComparison.OrdinalIgnoreCase))) full = Inside(full);
+    // Check Root before its children. Links above Root (such as redirected
+    // AppData) do not disable pruning. File.GetAttributes inspects the link
+    // itself; never call ResolveLinkTarget during pruning.
+    var ancestors = new Stack<string>();
+    for (var entry = full; entry != null; entry = Path.GetDirectoryName(entry))
+    {
+      ancestors.Push(entry);
+      if (entry.Equals(root, StringComparison.OrdinalIgnoreCase)) break;
+    }
+    foreach (var entry in ancestors)
+    {
+      if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
+        throw new IOException("Run-code pruning must not traverse filesystem links or junctions.");
+    }
+    return full;
   }
 
   private static string FilePath(string runFolder, string fileName)

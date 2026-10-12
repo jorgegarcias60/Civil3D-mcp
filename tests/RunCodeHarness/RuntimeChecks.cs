@@ -18,6 +18,8 @@ internal static class RuntimeChecks
     CheckHelpers(expect);
     CheckDocuments(expect);
     CheckCopies(expect);
+    RetentionChecks.Run(expect);
+    ResultChecks.Run(expect);
     CheckDispatchGateAsync(expect).GetAwaiter().GetResult();
   }
 
