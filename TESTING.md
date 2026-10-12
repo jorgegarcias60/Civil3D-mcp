@@ -5,6 +5,40 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### PR 3 document reads and no-drawing runs (2026-10-12)
+
+Verified in `jorgegarcias60/run-code-document`; changes remain uncommitted. No plugin was installed and no Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `npm.cmd run build` | Pass. |
+| `npx.cmd vitest run --configLoader runner --cache=false` | 592 tests passed in 49 files. |
+| Focused domain and approval tests | 43 tests passed in 2 files. |
+| Focused tests against pre-PR `codeDomain.ts` | Expected failure: 6 failures, 37 passes; implementation restored afterwards. |
+| `npm.cmd run docs:check` | Pass; generated reference current (210 entries). |
+| Plugin Release net8.0-windows, refs-2026 | 0 warnings, 0 errors. |
+| Plugin Release net10.0-windows, C_References | 0 warnings, 0 errors. |
+| Final net8 rebuild with `--restore` | 0 warnings, 0 errors. |
+| RunCodeHarness `-f net8.0` | 180 checks passed; 230 references. |
+| RunCodeHarness `-f net10.0` | 180 checks passed; 238 references. |
+| `node --check scripts/live-run-code-smoke.mjs` | Pass. |
+| `git diff --check` | Pass. |
+
+The default NuGet restore failed with NU1301 (TLS/security-package failure). Builds and harness restores used the existing local cache with `-p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false`. The reference paths and framework overrides match the PR 2 commands below. PowerShell blocks `npm.ps1`, so the equivalent `.cmd` wrappers were used. No Node packages were installed or changed.
+
+The tests cover `document` bounds and forwarding, API 4 refusal before `runCode`, the catalog's `requiresActiveDrawing: false`, and token approval with no drawing. Harness checks cover path normalization, unique and ambiguous names, missing paths listing open drawings, unsaved `Drawing1.dwg`, omitted `.dwg`, the preserved untargeted `ExecuteAsync(write: false, inCommand: writeMode)` route, and `HasDrawing` compilation.
+
+Live checks are written but unrun. With API 4 or later, `--other <second open drawing path>` checks selection by path/name, the response's `drawing`, unchanged active drawing and DBMOD, refusal of a write to the other drawing, and a not-open path listing both drawings. `--no-drawing --side <scratch DWG>` checks a side-only read without `drawing`, the exact `Db` runtime-error message, and `CIVIL3D.NO_DRAWING` for writes; it skips drawing-dependent checks. These require Civil 3D and scratch drawings.
+
+Live, Civil 3D 2026, 2026-10-12, trusted install of this build:
+- Drawing A was active and scratch drawing B open. `live-run-code-smoke --other <B> --side <background> --damaged <fixtures> --expect-drawing RUNCODE-SMOKE` passed **50/50**:
+  - B was read by full path and by file name while A stayed active;
+  - a write with `document` = B was refused ("write mode runs on the active drawing");
+  - a not-open path listed the open drawings.
+- Then every drawing was closed. `--no-drawing` passed 4/4: an OpenSide-only read was ok with no `drawing` field; touching `Db` gave the clear runtime_error; a write gave NO_DRAWING.
+- After reopening A, a read was ok and the working database was A again.
+- Review (GPT 6.1 Sol, xhigh): one P2, fixed. A full-path request could match an unsaved `Drawing1.dwg` through the process folder.
+
 ### PR 2 run plumbing and script API (2026-10-12)
 
 Verified in the `jorgegarcias60/run-code-plumbing` worktree. Nothing was

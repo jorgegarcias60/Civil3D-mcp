@@ -4,7 +4,7 @@
 //
 //   npm run build
 //   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
-//     [--long <seconds>] [--damaged <directory>]
+//     [--long <seconds>] [--damaged <directory>] [--other <open drawing path>] [--no-drawing]
 //
 // --expect-drawing: the write cases run only when the active drawing's name contains
 //   this text (guards against testing on a real job by accident); without it, or
@@ -30,6 +30,8 @@ const { values: options } = parseArgs({
     approval: { type: "string", default: "token" },
     long: { type: "string" },
     damaged: { type: "string" },
+    other: { type: "string" },
+    "no-drawing": { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -42,6 +44,10 @@ if (longSeconds !== undefined && (!Number.isInteger(longSeconds) || longSeconds 
   process.exit(2);
 }
 const damagedDir = options.damaged;
+if (options["no-drawing"] && (options.other || expectDrawing || options["allow-writes"])) {
+  console.error("--no-drawing cannot be combined with --other, --expect-drawing, or --allow-writes");
+  process.exit(2);
+}
 if (approvalMode !== "token" && approvalMode !== "client") {
   console.error("--approval must be token or client");
   process.exit(2);
@@ -90,6 +96,15 @@ async function run(parameters, requestOptions) {
   return response.structuredContent.result;
 }
 
+async function callGatedRun(parameters) {
+  let response = await call("civil3d_run_code", parameters);
+  if (response.isError && /approval required/i.test(text(response))) {
+    const approvalToken = await approve("civil3d_run_code", "run", parameters);
+    response = await call("civil3d_run_code", { ...parameters, approvalToken });
+  }
+  return response;
+}
+
 // One JSON-RPC request straight to the plugin's port, bypassing the MCP server
 // (and its approval): for the token and start-window cases. The socket is not
 // half-closed before the answer, because the plugin cancels a request whose
@@ -135,11 +150,71 @@ try {
   const tool = tools.tools.find((item) => item.name === "civil3d_run_code");
   record("the server lists civil3d_run_code as destructive", Boolean(tool && tool.annotations?.destructiveHint === true));
 
+  let drawingName = "";
+  if (options["no-drawing"]) {
+    if (health.structuredContent?.result?.drawingLoaded !== false) {
+      throw new Error("--no-drawing requires every drawing to be closed before testing");
+    }
+    if (runCodeApi < 4) record("PR 3 no-drawing checks: skipped (plugin runCodeApi below 4)", true, { runCodeApi });
+    else {
+    await check("PR 3: OpenSide read with no drawing", async () => {
+      if (!sidePath) throw new Error("--no-drawing requires --side <scratch drawing path>");
+      const response = await run({ code: "return new { hasDrawing = HasDrawing, side = OpenSide((string)Args[\"path\"]!).Filename };", args: { path: sidePath } });
+      record("PR 3: OpenSide read with no drawing", response.status === "ok" && response.result?.hasDrawing === false
+        && typeof response.result?.side === "string" && !Object.hasOwn(response, "drawing"), response);
+    });
+    await check("PR 3: Db reports a clear runtime error with no drawing", async () => {
+      const response = await run({ code: "return Db.Filename;" });
+      record("PR 3: Db reports a clear runtime error with no drawing", response.status === "runtime_error"
+        && response.error?.message === "No drawing is open in Civil 3D, so Db is not available: read files with OpenSide(path) and TransactionFor(side).", response);
+    });
+    await check("PR 3: write with no drawing is refused", async () => {
+      const response = await callGatedRun({ code: "return 1;", mode: "write" });
+      record("PR 3: write with no drawing is refused", response.isError === true && response.errorCode === "CIVIL3D.NO_DRAWING", response);
+    });
+    }
+  } else {
   const info = await run({ code: "return new { name = Doc.Name, dbmod = Convert.ToInt32(Application.GetSystemVariable(\"DBMOD\")) };" });
-  const drawingName = info.result?.name ?? "";
+  drawingName = info.result?.name ?? "";
   record("read: basic run returns the active drawing", info.status === "ok" && drawingName.length > 0, { drawing: drawingName, timing: info.timing });
   if (expectDrawing && !drawingName.toLowerCase().includes(expectDrawing.toLowerCase())) {
     throw new Error(`Active drawing '${drawingName}' does not contain '${expectDrawing}'; stopping before any write.`);
+  }
+
+  if (options.other) {
+    if (runCodeApi < 4) {
+      record("PR 3 other-drawing checks: skipped (plugin runCodeApi below 4)", true, { runCodeApi });
+    }
+    else {
+    const otherPath = resolve(options.other);
+    const otherName = otherPath.split(/[\\/]/).at(-1);
+    if (drawingName.toLowerCase() === otherPath.toLowerCase()) throw new Error("--other must name a different, already open drawing");
+    const probe = "return new { name = Doc.Name, hasDrawing = HasDrawing };";
+    const before = await run({ code: "return new { name = Doc.Name, dbmod = Convert.ToInt32(Application.GetSystemVariable(\"DBMOD\")) };" });
+    for (const key of [otherPath, otherName]) {
+      await check(`PR 3: read other drawing by ${key === otherPath ? "path" : "name"}`, async () => {
+        const selected = await run({ code: probe, document: key });
+        const after = await run({ code: "return new { name = Doc.Name, dbmod = Convert.ToInt32(Application.GetSystemVariable(\"DBMOD\")) };" });
+        record(`PR 3: read other drawing by ${key === otherPath ? "path" : "name"}`,
+          selected.status === "ok" && selected.result?.name?.toLowerCase() === otherPath.toLowerCase()
+          && selected.result?.hasDrawing === true && selected.drawing?.toLowerCase() === otherPath.toLowerCase()
+          && JSON.stringify(after.result) === JSON.stringify(before.result),
+          { selected: selected.result, responseDrawing: selected.drawing, activeBefore: before.result, activeAfter: after.result });
+      });
+    }
+    await check("PR 3: write to other open drawing is refused", async () => {
+      const response = await callGatedRun({ code: "return 1;", mode: "write", document: otherPath });
+      record("PR 3: write to other open drawing is refused", response.isError === true && response.errorCode === "CIVIL3D.INVALID_INPUT"
+        && /active drawing|active document/i.test(text(response)), text(response));
+    });
+    await check("PR 3: missing drawing lists open drawings", async () => {
+      const response = await callGatedRun({ code: "return 1;", document: join(resolve(options.other, ".."), `missing-pr3-${process.pid}.dwg`) });
+      record("PR 3: missing drawing lists open drawings", response.isError === true
+        && /not open/i.test(text(response)) && /Open drawings:/i.test(text(response))
+        && text(response).toLowerCase().includes(otherName.toLowerCase())
+        && text(response).toLowerCase().includes(drawingName.toLowerCase()), text(response));
+    });
+    }
   }
 
   if (runCodeApi < 3) {
@@ -674,6 +749,7 @@ try {
 
   }
 
+  }
   console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", failures, drawing: drawingName, results }, null, 2));
   process.exitCode = failures === 0 ? 0 : 1;
 } catch (error) {

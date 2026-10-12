@@ -21,7 +21,7 @@ import { registerTools } from "../src/tools/register.js";
 const runTarget = {
   toolName: "civil3d_run_code", action: "run",
   capabilities: CODE_DOMAIN_DEFINITION.actions.run.capabilities,
-  safeForRetry: false, requiresActiveDrawing: true,
+  safeForRetry: false, requiresActiveDrawing: CODE_DOMAIN_DEFINITION.actions.run.requiresActiveDrawing,
 };
 const saveTarget = {
   toolName: "civil3d_drawing", action: "save",
@@ -102,6 +102,24 @@ describe("run_code client approval policy", () => {
 });
 
 describe("run_code handler routing", () => {
+  it("issues a token and reaches the plugin with no drawing open", async () => {
+    vi.stubEnv("CIVIL3D_RUN_CODE_APPROVAL", "token");
+    sendCommandMock.mockImplementation(async (method: string) => {
+      if (method === "getCivil3DHealth") return { drawingLoaded: false, runCodeApi: 4 };
+      if (method === "runCode") return { runId: "r", mode: "read", status: "ok", ok: true,
+        logFolder: "x", timing: { compileMs: 0, runMs: 0, totalMs: 0 } };
+      throw new Error(`unexpected ${method}`);
+    });
+    captureDomainToolHandlers(CODE_DOMAIN_DEFINITION);
+    const parameters = { code: "return OpenSide(\"C:/scratch/B.dwg\").Filename;" };
+    const receipt = await approvalPolicy.requestApproval(runTarget, parameters);
+    const result = await getToolHandler("civil3d_run_code")!({ ...parameters, approvalToken: receipt.approvalToken });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.result?.approvedBy).toBe("token");
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).not.toContain("getDrawingInfo");
+    expect(sendCommandMock.mock.calls.some(([method]) => method === "runCode")).toBe(true);
+  });
+
   it("lets only the direct MCP handler run without a token", async () => {
     const handlers = new Map<string, (args: Record<string, unknown>) => Promise<any>>();
     const fakeServer = { registerTool: (name: string, _config: unknown, handler: (args: Record<string, unknown>) => Promise<any>) => {

@@ -30,7 +30,7 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class RunCodeCommands
 {
-  internal const int ApiVersion = 3;
+  internal const int ApiVersion = 4;
   private const int MaxCodeChars = 200_000;
   private const int DefaultTimeoutSeconds = 30;
   // Reads may take ten minutes and keep Civil 3D's UI busy. Writes stay short.
@@ -93,6 +93,9 @@ public static class RunCodeCommands
     }
 
     var writeMode = mode == "write";
+    var document = OptionalAuditString(parameters, "document")?.Trim();
+    if (document != null && (document.Length < 1 || document.Length > 1024))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'document' must contain 1-1024 characters.");
     var timeoutSeconds = PluginRuntime.GetOptionalInt(parameters, "timeoutSeconds") ?? DefaultTimeoutSeconds;
     var maxTimeoutSeconds = writeMode ? MaxWriteTimeoutSeconds : MaxReadTimeoutSeconds;
     if (timeoutSeconds < 1 || timeoutSeconds > maxTimeoutSeconds)
@@ -164,6 +167,7 @@ public static class RunCodeCommands
       ["status"] = "started",
     };
     if (codePath != null) summary["codePath"] = codePath;
+    if (document != null) summary["document"] = document;
     if (argsPath != null) summary["argsPath"] = argsPath;
     if (approval != null) summary["approval"] = approval;
     if (copyOutputsTo != null) summary["copyOutputsTo"] = copyOutputsTo;
@@ -218,7 +222,7 @@ public static class RunCodeCommands
       var (scriptType, context) = RunCodeAssemblies.LoadScript(runId, compiled.Assembly!, compiled.Pdb!, compiled.TypeName);
       try
       {
-        status = await ExecuteScriptAsync(scriptType, writeMode, args, TimeSpan.FromSeconds(timeoutSeconds),
+        status = await ExecuteScriptAsync(scriptType, document, writeMode, args, TimeSpan.FromSeconds(timeoutSeconds),
           total, TimeSpan.FromSeconds(startWithinSeconds), runFolder, outcome, response);
         if (outcome.CancelledAfterCommit)
         {
@@ -397,14 +401,16 @@ public static class RunCodeCommands
   // its regular transaction), so the commit comes after the last checks and
   // outcome.Committed records what really happened. The script starts within
   // startWithin of the request (received) or not at all.
-  private static async Task<string> ExecuteScriptAsync(Type scriptType, bool writeMode, JsonObject args, TimeSpan budget,
+  private static async Task<string> ExecuteScriptAsync(Type scriptType, string? document, bool writeMode, JsonObject args, TimeSpan budget,
     Stopwatch received, TimeSpan startWithin, string runFolder, RunOutcome outcome, JsonObject response)
   {
     var token = PluginRuntime.GetCurrentRequestCancellationToken();
     try
     {
-      await CivilExecution.ExecuteAsync((doc, civilDoc, database, transaction) =>
+      await CivilExecution.ExecuteRunCodeAsync(document, writeMode, host =>
       {
+        var database = host.Database;
+        var transaction = host.Transaction;
         // Past the window the server may have stopped waiting, and an agent
         // told "timed out" could retry while this run still goes ahead. The
         // transaction ExecuteAsync opened is rolled back unused.
@@ -424,8 +430,8 @@ public static class RunCodeCommands
 
         var script = (RunCodeScript)Activator.CreateInstance(scriptType)!;
         outcome.Script = script;
-        outcome.Drawing = doc.Name;
-        script.Attach(doc, database, civilDoc, transaction, writeMode, args, token, budget, runFolder);
+        outcome.Drawing = host.Doc?.Name;
+        script.Attach(host.Doc, database, host.Civil, transaction, writeMode, args, token, budget, runFolder);
         var clock = Stopwatch.StartNew();
         try
         {
@@ -460,12 +466,12 @@ public static class RunCodeCommands
               throw new RunCodeCancelledException("The request was cancelled before the script finished; the transaction was rolled back.");
             }
 
-            if (!RestoreRunTransaction(database, transaction, outcome))
+            if (!RestoreRunTransaction(database!, transaction!, outcome))
             {
               throw new InvalidOperationException("The script committed, aborted or disposed the run's transaction itself (for example through Db.TransactionManager.TopTransaction); its changes may or may not be in the drawing. Return instead of ending it.");
             }
 
-            transaction.Commit();
+            transaction!.Commit();
             outcome.Committed = true;
           }
         }
@@ -478,7 +484,7 @@ public static class RunCodeCommands
             // back everything the script did through Tr.
             try
             {
-              RestoreRunTransaction(database, transaction, outcome);
+              RestoreRunTransaction(database!, transaction!, outcome);
             }
             catch (Exception cleanup)
             {
@@ -496,7 +502,7 @@ public static class RunCodeCommands
         }
 
         return true;
-      }, write: false, inCommand: writeMode);
+      });
       return "ok";
     }
     catch (Exception exception) when (outcome.Script != null)

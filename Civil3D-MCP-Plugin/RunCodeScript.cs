@@ -47,6 +47,10 @@ public abstract class RunCodeScript
   // A script may point HostApplicationServices.WorkingDatabase at a side
   // database; it is set back before side databases are disposed.
   private Database? _savedWorkingDatabase;
+  // A failed WorkingDatabase restore must not let an owning wrapper's
+  // finalizer free the database still used by AutoCAD.
+  private static readonly List<Database> RetainedWorkingDatabases = new();
+  private const string NoDrawingMessage = "No drawing is open in Civil 3D, so Db is not available: read files with OpenSide(path) and TransactionFor(side).";
 
   private readonly List<RunCodeSideError> _sideErrors = new();
   private readonly List<RunCodeTryError> _tryErrors = new();
@@ -68,10 +72,15 @@ public abstract class RunCodeScript
   /// </summary>
   public static ConcurrentDictionary<string, object?> Session { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-  public Document Doc { get; private set; } = null!;
-  public Database Db { get; private set; } = null!;
-  public Editor Ed { get; private set; } = null!;
-  public CivilDocument Civil { get; private set; } = null!;
+  private Document? _doc;
+  private Database? _db;
+  private CivilDocument? _civil;
+  private Transaction? _transaction;
+  public bool HasDrawing => _doc != null;
+  public Document Doc => _doc ?? throw new InvalidOperationException(NoDrawingMessage);
+  public Database Db => _db ?? throw new InvalidOperationException(NoDrawingMessage);
+  public Editor Ed => Doc.Editor;
+  public CivilDocument Civil => _civil ?? throw new InvalidOperationException(NoDrawingMessage);
 
   /// <summary>
   /// The run's transaction on <see cref="Db"/>. Read mode: an open-close
@@ -84,7 +93,7 @@ public abstract class RunCodeScript
   /// The run owns it: Commit() and Abort() throw, and Dispose() does nothing
   /// (RunTransaction).
   /// </summary>
-  public Transaction Tr { get; private set; } = null!;
+  public Transaction Tr => _transaction ?? throw new InvalidOperationException(NoDrawingMessage);
 
   public bool WriteMode { get; private set; }
 
@@ -122,20 +131,19 @@ public abstract class RunCodeScript
 
   public abstract object? Run();
 
-  internal void Attach(Document doc, Database db, CivilDocument civil, Transaction transaction, bool writeMode,
+  internal void Attach(Document? doc, Database? db, CivilDocument? civil, Transaction? transaction, bool writeMode,
     JsonObject args, CancellationToken token, TimeSpan budget, string runFolder)
   {
-    Doc = doc;
-    Db = db;
-    Ed = doc.Editor;
-    Civil = civil;
-    Tr = new RunTransaction(transaction);
+    _doc = doc;
+    _db = db;
+    _civil = civil;
+    _transaction = transaction == null ? null : new RunTransaction(transaction);
     WriteMode = writeMode;
     Args = args;
     Token = token;
     RunFolder = runFolder;
     _budget = budget;
-    _transactions[db] = Tr;
+    if (db != null && _transaction != null) _transactions[db] = _transaction;
     _savedWorkingDatabase = HostApplicationServices.WorkingDatabase;
     _clock = Stopwatch.StartNew();
   }
@@ -191,6 +199,7 @@ public abstract class RunCodeScript
     // in them) report the xref's database, which has no transaction of its own
     // in the run; the drawing's transaction opens them, for read only.
     var db = id.Database;
+    if (db == null && !HasDrawing) throw new InvalidOperationException(NoDrawingMessage);
     Transaction transaction;
     if (db is { IsDisposed: false } && !_transactions.ContainsKey(db))
     {
@@ -203,7 +212,7 @@ public abstract class RunCodeScript
     }
     else
     {
-      transaction = TransactionFor(db);
+      transaction = db == null ? Tr : TransactionFor(db);
     }
 
     var obj = transaction.GetObject(id, forWrite ? OpenMode.ForWrite : OpenMode.ForRead);
@@ -504,15 +513,21 @@ public abstract class RunCodeScript
   internal void ReleaseOwned()
   {
     // Never leave a disposed side database as the working database.
+    var restoreFailed = false;
+    Database? working = null;
+    var workingUnknown = false;
     try
     {
-      if (_savedWorkingDatabase != null && HostApplicationServices.WorkingDatabase != _savedWorkingDatabase)
+      if (HostApplicationServices.WorkingDatabase != _savedWorkingDatabase)
       {
         HostApplicationServices.WorkingDatabase = _savedWorkingDatabase;
       }
     }
     catch (Exception exception)
     {
+      restoreFailed = true;
+      try { working = HostApplicationServices.WorkingDatabase; }
+      catch { workingUnknown = true; }
       PluginLog.Swallow("RunCode", "restoring the working database", exception);
     }
 
@@ -535,6 +550,13 @@ public abstract class RunCodeScript
     {
       try
       {
+        if (restoreFailed && _owned[index] is Database side
+            && (workingUnknown || (working != null && side.UnmanagedObject == working.UnmanagedObject)))
+        {
+          RetainedWorkingDatabases.Add(side);
+          PluginLog.Warn("RunCode", "Kept a side database alive because the working database could not be restored; it must not be freed while AutoCAD uses it.");
+          continue;
+        }
         _owned[index].Dispose();
       }
       catch (Exception exception)
