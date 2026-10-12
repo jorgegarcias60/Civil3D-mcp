@@ -1,7 +1,10 @@
 import { z, type ZodRawShape, type ZodTypeAny } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { approvalPolicy, getActiveDrawingFingerprint, hasApprovalRisk } from "./approvalPolicy.js";
-import { captureToolHandler } from "./toolHandlerRegistry.js";
+import {
+  approvalPolicy, ApprovalRequiredError, ApprovalValidationError,
+  getActiveDrawingFingerprint, hasApprovalRisk,
+} from "./approvalPolicy.js";
+import { captureToolHandler, isLoggedApprovalRefusal, markLoggedApprovalRefusal } from "./toolHandlerRegistry.js";
 import { maybeStoreReportResource } from "./reportResourceStore.js";
 import { idempotencyStore } from "./idempotencyStore.js";
 import { createLogger } from "../utils/logger.js";
@@ -93,8 +96,6 @@ function buildToolErrorResult(toolName: string, actionName: string | undefined, 
   const rpcCode = typedRpcCode ?? inferRpcErrorCode(errorCode);
   const scopedName = actionName ? `${toolName} action '${actionName}'` : toolName;
 
-  console.error(`Error in ${scopedName}:`, error);
-
   return {
     content: [
       {
@@ -176,6 +177,8 @@ async function executeExposure(
       prepared.approvalParameters,
       options,
     );
+    // Approval refusals log only their outcome, before any execution starts.
+    log.info("Tool request started", { requestId: createRequestId(), tool: exposure.toolName });
     await emitProgress(
       progressExtra,
       50,
@@ -325,7 +328,6 @@ function createExposureHandler(
     const startedAt = performance.now();
     return runWithRequestId(requestId, async () => {
       try {
-        log.info("Tool request started", { requestId, tool: exposure.toolName });
         await emitProgress(progressExtra, 0, 100, `${exposure.displayName}: request received.`);
         const result = await executeExposure(definition, exposure, rawArgs, options, progressExtra);
         await emitProgress(progressExtra, 100, 100, `${exposure.displayName}: completed.`);
@@ -336,21 +338,33 @@ function createExposureHandler(
         });
         return { ...result, _meta: { requestId } };
       } catch (error) {
-      const actionName =
-        typeof rawArgs.action === "string"
-          ? String(rawArgs.action)
-          : exposure.supportedActions.length === 1
-            ? exposure.supportedActions[0]
-            : undefined;
+        const actionName =
+          typeof rawArgs.action === "string"
+            ? String(rawArgs.action)
+            : exposure.supportedActions.length === 1
+              ? exposure.supportedActions[0]
+              : undefined;
 
         await emitProgress(progressExtra, 100, 100, `${exposure.displayName}: failed.`);
-        log.error("Tool request failed", {
+        const details = {
           requestId,
           tool: exposure.toolName,
+          action: actionName,
           durationMs: Math.round(performance.now() - startedAt),
           error: error instanceof Error ? error.message : String(error),
-        });
-        return { ...buildToolErrorResult(exposure.toolName, actionName, error), _meta: { requestId } };
+        };
+        const approvalRefusal = error instanceof ApprovalRequiredError || error instanceof ApprovalValidationError;
+        const alreadyLogged = isLoggedApprovalRefusal(error);
+        if (approvalRefusal && !alreadyLogged) {
+          log.warn("Tool request refused by approval policy", details);
+        } else if (!alreadyLogged) {
+          log.error("Tool request failed", {
+            ...details,
+            stack: error instanceof Error ? error.stack : undefined,
+          });
+        }
+        const result = { ...buildToolErrorResult(exposure.toolName, actionName, error), _meta: { requestId } };
+        return approvalRefusal || alreadyLogged ? markLoggedApprovalRefusal(result) : result;
       }
     }, progressExtra?.signal);
   };

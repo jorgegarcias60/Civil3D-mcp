@@ -218,6 +218,12 @@ mutations use a three-step policy flow:
 3. Retry the target tool call with `approvalToken`. Changing the drawing,
    action, or parameters invalidates the token.
 
+Approval-required and invalid-token refusals produce one WARN log line with
+the tool, action, and request ID, without a stack trace. Nested calls through
+`civil3d_orchestrate` or `civil3d_docs` and authenticated HTTP calls keep the
+original refusal line without duplicate error logs. Unexpected errors keep
+their full stack traces. MCP and HTTP client error responses stay the same.
+
 Set `CIVIL3D_APPROVAL_MODE=disabled` only for isolated local development or
 test environments; production deployments should retain the default policy.
 

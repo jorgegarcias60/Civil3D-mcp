@@ -1,5 +1,18 @@
 import { Civil3DRpcError } from "../utils/SocketClient.js";
 
+const loggedApprovalRefusal = Symbol("loggedApprovalRefusal");
+type LoggedApprovalRefusal = { readonly [loggedApprovalRefusal]: true };
+
+/** Internal refusal identity; never part of the serialized client response. */
+export function markLoggedApprovalRefusal<T extends object>(value: T): T & LoggedApprovalRefusal {
+  return Object.defineProperty(value, loggedApprovalRefusal, { value: true }) as T & LoggedApprovalRefusal;
+}
+
+export function isLoggedApprovalRefusal(value: unknown): value is LoggedApprovalRefusal {
+  return value !== null && typeof value === "object"
+    && loggedApprovalRefusal in value && value[loggedApprovalRefusal] === true;
+}
+
 /**
  * Global registry that captures MCP tool handlers during registerTool() registration.
  * The HTTP bridge uses this registry to invoke any registered tool without going
@@ -88,16 +101,12 @@ export async function executeRegisteredTool(
   if (mcpResult?.isError) {
     const errorText =
       mcpResult.content?.[0]?.text ?? `Tool '${toolName}' returned an error`;
-    if (!mcpResult.errorCode) {
-      // Preserve connection/unavailability errors for the HTTP bridge's
-      // message-based classifier instead of relabeling them as internal 500s.
-      throw new Error(errorText);
-    }
-    throw new Civil3DRpcError(
-      errorText,
-      mcpResult.errorCode,
-      mcpResult.rpcCode ?? -32000,
-    );
+    // Preserve connection/unavailability errors for the HTTP bridge's
+    // message-based classifier instead of relabeling them as internal 500s.
+    const error = mcpResult.errorCode
+      ? new Civil3DRpcError(errorText, mcpResult.errorCode, mcpResult.rpcCode ?? -32000)
+      : new Error(errorText);
+    throw isLoggedApprovalRefusal(mcpResult) ? markLoggedApprovalRefusal(error) : error;
   }
 
   // Prefer the typed MCP result while preserving the plain HTTP payload shape.

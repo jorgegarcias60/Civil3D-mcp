@@ -116,6 +116,8 @@
 
 ### Fixed
 
+- Expected approval refusals (approval required; unknown, expired, used or mismatched token) log one WARN line with tool, action and request ID and no stack trace, also when nested through `civil3d_orchestrate`, `civil3d_docs` or the HTTP bridge. Unexpected errors keep their stacks; client responses are unchanged. Fixes #29.
+
 - The live IPv6 host check uses a direct call and normal-server approval in token mode, avoiding approval through the unreachable child. Fixes #7.
 
 - Live damaged-DWG comparisons report SKIP for import-root refusals and preserve the policy message. The summary counts skips separately. Fixes #24.

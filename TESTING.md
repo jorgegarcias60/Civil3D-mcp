@@ -5,6 +5,21 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Approval logging: issue #29 (2026-10-12)
+
+`tests/approval_logging.test.ts` covers direct MCP, registry, nested `civil3d_orchestrate` / `civil3d_docs` and authenticated HTTP calls in token and client modes. Each expected refusal logs one WARN line with no stack frames; unexpected errors keep their stacks; client error text, `isError`, codes and request IDs are unchanged. The tests fail on the previous code.
+
+| Check | Result |
+|---|---|
+| `npm run build` | ok |
+| vitest | 696 passed (53 files) |
+| `docs:check` | ok |
+| Plugin builds, net8 and net10 | 0 warnings |
+| RunCodeHarness, net8 and net10 | pass |
+| `install-trusted` check | 0 failures |
+
+Live, Civil 3D 2026, 2026-10-12: a token-mode server against the running plugin logged one `[WARN] Tool request refused by approval policy` line, with no `[ERROR]` line and no stack frames, for an approval-required call, an unknown token, and a call nested through `civil3d_orchestrate`.
+
 ### Run-code hardening: issues #7, #11, #12, #24 and #25 (2026-10-12)
 
 Offline results for `jorgegarcias60/run-code-hardening`, measured outside any
