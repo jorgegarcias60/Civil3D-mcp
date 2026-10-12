@@ -6,7 +6,7 @@ const pluginDirectory = fileURLToPath(new URL("../Civil3D-MCP-Plugin/", import.m
 
 describe("P2 security boundaries", () => {
   it("keeps generated artifact writes behind FileBoundary", () => {
-    const directWritePattern = /File\.(?:WriteAll(?:Text|Bytes|Lines)|AppendAll(?:Text|Lines))|new (?:System\.IO\.)?StreamWriter|new (?:System\.IO\.)?FileStream/;
+    const directWritePattern = /File\.(?:WriteAll(?:Text|Bytes|Lines)|AppendAll(?:Text|Lines)|Copy|Move|Replace)|new (?:System\.IO\.)?StreamWriter|new (?:System\.IO\.)?FileStream/;
     const violations: string[] = [];
 
     for (const fileName of readdirSync(pluginDirectory).filter((name) => name.endsWith(".cs"))) {

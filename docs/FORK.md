@@ -101,6 +101,14 @@ per-session token (`%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token`, private to the u
 at its next start (`npm install --no-save` when the package files changed, so the clone stays clean for
 `git pull`); run `npm run build` yourself if you start the server another way.
 
+Run-code API 3 adds output copying and read budgets up to 600 seconds. The
+server checks `getCivil3DHealth.runCodeApi` before using `copyOutputsTo`, an
+explicit `keepOutputs`, or a timeout above 90 seconds. A missing version
+counts as API 1. An older plugin gets the "older than this server" refusal
+with the parameter and loaded API version. Nothing ran. Install the plugin
+from the same build as the server, with Civil 3D closed. The server fills in
+the script hash for older plugins on calls that use supported parameters.
+
 To use client approval for `civil3d_run_code`, set `CIVIL3D_RUN_CODE_APPROVAL=client`
 in your own MCP registration, such as `~/.claude.json` under
 `mcpServers.civil3d-mcp.env`. Do not set it in the shared launcher. Keep

@@ -333,6 +333,49 @@ Expect(unaliased.Count == 0, $"every type name repeated across the default names
 var common = Compile("var o = Open<DBObject>(Db.BlockTableId);\nSection s = null; Table t = null; Group g = null; TransactionManager m = Db.TransactionManager;\nreturn o.Handle.ToString();");
 Expect(common.Succeeded, "DBObject, Section, Table, Group and TransactionManager resolve without qualification", common);
 
+var helpers = Compile("""
+  var side = OpenSideOrNull("other.dwg");
+  var id = ById("0x2A", side);
+  var all = ModelSpace().Count() + PaperSpace("Layout1").Count() + Tagged("APP").Count();
+  var curves = PaperSpace<Curve>("Layout1").Count() + Tagged<Curve>("APP", "v").Count();
+  var value = TagValue(Open<Entity>(id), "APP");
+  var result = Try("lookup", () => value);
+  Try("log", () => Log(all + curves));
+  return new { result, sideErrors = SideErrors.Count, tryErrors = TryErrors.Count };
+  """);
+Expect(helpers.Succeeded, "read helpers compile together", helpers);
+var writeHelpers = Compile("var layer = EnsureLayer(\"MCP\", 7, \"Continuous\");\nTag(Open<Entity>(ById(\"2A\"), forWrite: true), \"APP\", \"v\");\nreturn layer;", write: true);
+Expect(writeHelpers.Succeeded, "write helpers compile", writeHelpers);
+foreach (var snippet in new[] { "EnsureLayer(\"MCP\");", "Tag(Open<Entity>(ObjectId.Null), \"APP\");" })
+{
+  var result = Compile(snippet);
+  Expect(HasError(result, ScriptCompiler.GuardDiagnosticId, 1), $"read mode refuses {snippet.Split('(')[0]}", result);
+}
+Expect(Compile("void Tag() { }\nTag();").Succeeded, "a local Tag function is allowed");
+foreach (var write in new[] { false, true })
+{
+  foreach (var snippet in new[] {
+    "using var side = OpenSideOrNull(\"other.dwg\");",
+    "var side = OpenSideOrNull(\"other.dwg\"); side.Dispose();" })
+  {
+    var result = Compile(snippet, write);
+    Expect(HasError(result, ScriptCompiler.GuardDiagnosticId, 1), "OpenSideOrNull cannot be disposed by the script", result);
+  }
+  var command = Compile("return typeof(Civil3DMcpPlugin.DrawingCommands).Name;", write);
+  Expect(HasError(command, ScriptCompiler.GuardDiagnosticId, 1)
+    && command.Errors.Any(error => error.Message.Contains("plugin code, not the script API")), "plugin internals are refused", command);
+  foreach (var (label, snippet) in new[] {
+    ("CivilExecution.ReadAsync", "return Civil3DMcpPlugin.CivilExecution.ReadAsync((doc, civil, db, tx) => 1).Result;"),
+    ("PluginRuntime", "return Civil3DMcpPlugin.PluginRuntime.GetStatus();"),
+    ("LookupUtils.GetLayerId", "return Civil3DMcpPlugin.LookupUtils.GetLayerId(Db, Tr, \"MCP\");") })
+  {
+    var result = Compile(snippet, write);
+    Expect(HasError(result, ScriptCompiler.GuardDiagnosticId, 1)
+      && result.Errors.All(error => error.Code == ScriptCompiler.GuardDiagnosticId),
+      $"{(write ? "write" : "read")} mode refuses {label} through the plugin guard", result);
+  }
+}
+
 Expect(ScriptCompiler.FindScriptLine("   at Script_X.Run() in script:line 17\n   at Other() in other.cs:line 3") == 17, "stack traces map back to the snippet line");
 
 var unique = Compile("return 1;");

@@ -39,6 +39,8 @@ const log = createLogger("DomainRuntime");
 export interface DomainActionDefinition<TArgs = JsonObject> {
   action: string;
   inputSchema: z.ZodType<TArgs>;
+  prepare?: (args: TArgs, rawArgs: JsonObject) => Promise<{ args: TArgs; approvalParameters: JsonObject }>;
+  progressHeartbeat?: boolean;
   execute: (args: TArgs, context?: { approval?: "not_required" | "token" | "client" }) => Promise<unknown>;
   responseSchema?: ZodTypeAny;
   capabilities: ToolCapability[];
@@ -150,6 +152,9 @@ async function executeExposure(
   }
 
   const parsedArgs = actionDefinition.inputSchema.parse(resolved.args);
+  const prepared = actionDefinition.prepare
+    ? await actionDefinition.prepare(parsedArgs, rawArgs)
+    : { args: parsedArgs, approvalParameters: rawArgs };
   const idempotencyKey = typeof rawArgs.idempotencyKey === "string"
     ? rawArgs.idempotencyKey
     : undefined;
@@ -168,7 +173,7 @@ async function executeExposure(
         safeForRetry: actionDefinition.safeForRetry,
         requiresActiveDrawing: actionDefinition.requiresActiveDrawing,
       },
-      rawArgs,
+      prepared.approvalParameters,
       options,
     );
     await emitProgress(
@@ -177,7 +182,28 @@ async function executeExposure(
       100,
       `${exposure.displayName}: validated and executing '${actionName}'.`,
     );
-    const response = await actionDefinition.execute(parsedArgs, { approval });
+    let heartbeatSeconds = 0;
+    let heartbeatPending: Promise<void> = Promise.resolve();
+    const heartbeat = actionDefinition.progressHeartbeat === true
+      && progressExtra?._meta?.progressToken !== undefined
+      && typeof progressExtra.sendNotification === "function"
+      ? setInterval(() => {
+        heartbeatSeconds += 15;
+        const progress = 50 + 50 * heartbeatSeconds / (heartbeatSeconds + 60);
+        heartbeatPending = heartbeatPending.then(() => emitProgress(
+          progressExtra, progress, 100,
+          `${exposure.displayName}: Civil 3D is still running the script.`,
+        ));
+      }, 15_000)
+      : undefined;
+    heartbeat?.unref();
+    let response: unknown;
+    try {
+      response = await actionDefinition.execute(prepared.args, { approval });
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      await heartbeatPending;
+    }
     const validatedResponse = actionDefinition.responseSchema
       ? actionDefinition.responseSchema.parse(response)
       : response;

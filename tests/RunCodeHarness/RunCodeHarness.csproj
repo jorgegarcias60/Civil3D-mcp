@@ -20,6 +20,8 @@
   <ItemGroup>
     <Compile Include="..\..\Civil3D-MCP-Plugin\ScriptCompiler.cs" Link="ScriptCompiler.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeOutput.cs" Link="RunCodeOutput.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeHelpers.cs" Link="RunCodeHelpers.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeLog.cs" Link="RunCodeLog.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RpcAuth.cs" Link="RpcAuth.cs" />
   </ItemGroup>
 </Project>

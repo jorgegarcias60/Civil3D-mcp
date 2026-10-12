@@ -15,6 +15,140 @@ internal static class RuntimeChecks
   {
     CheckOutput(expect);
     CheckAuth(expect);
+    CheckHelpers(expect);
+    CheckCopies(expect);
+  }
+
+  private static void CheckHelpers(Action<bool, string> expect)
+  {
+    expect(RunCodeHelpers.Sha256Hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "Sha256Hex uses UTF-8 and returns lowercase SHA-256");
+    expect(RunCodeHelpers.ParseHandle(" 0xAbC ") == 0xabc && RunCodeHelpers.ParseHandle("10") == 16,
+      "ParseHandle trims and accepts plain hex or a 0x prefix");
+    foreach (var text in new[] { "", " ", "0x", "0", "-1", "xyz", "1 2", "0x0", "10000000000000000" })
+    {
+      var refused = false;
+      try { RunCodeHelpers.ParseHandle(text); }
+      catch (ArgumentException) { refused = true; }
+      expect(refused, $"ParseHandle refuses '{text}'");
+    }
+    foreach (var name in new[] { "DwgNeedsRecovery", "DwgNotRecoverable", "InvalidDwgVersion", "DwgObjectImproperlyRead" })
+      expect(RunCodeHelpers.IsDrawingContentError(name), $"{name} is a drawing-content error");
+    expect(!RunCodeHelpers.IsDrawingContentError("FileSharingViolation") && !RunCodeHelpers.IsDrawingContentError(""),
+      "sharing and unknown errors are not drawing-content errors");
+  }
+
+  private static void CheckCopies(Action<bool, string> expect)
+  {
+    var folder = Path.Combine(AppContext.BaseDirectory, "copy-check-" + Guid.NewGuid().ToString("N"));
+    var oldLogPath = PluginLog.LogFilePath;
+    try
+    {
+      PluginLog.LogFilePath = Path.Combine(folder, "plugin.log");
+      var runFolder = RunCodeLog.CreateRunFolder("run");
+      RunCodeLog.WriteText(runFolder, RunCodeLog.ScriptFile, "return 1;");
+      RunCodeLog.WriteSummary(runFolder, new JsonObject { ["status"] = "ok" });
+      var destination = Path.Combine(folder, "copied");
+      var none = RunCodeLog.CopyOutputs(runFolder, destination, removeCopied: true);
+      expect(none.Copied.Count == 0 && none.Warnings.Count == 0 && !Directory.Exists(destination),
+        "no outputs means no destination folder is created");
+
+      var source = RunCodeLog.WriteText(runFolder, "data.txt", "first");
+      RunCodeLog.WriteText(runFolder, RunCodeLog.OutputFile, "output");
+      RunCodeLog.WriteText(runFolder, RunCodeLog.ResultFile, "{}");
+      var copied = RunCodeLog.CopyOutputs(runFolder, destination, removeCopied: false);
+      expect(copied.Copied.Count == 3 && copied.Removed.Count == 0 && copied.Warnings.Count == 0
+        && File.ReadAllText(Path.Combine(destination, "data.txt")) == "first" && File.Exists(source),
+        "CopyOutputs creates the destination and copies script output, output.txt and result.json");
+      expect(!File.Exists(Path.Combine(destination, RunCodeLog.ScriptFile))
+        && !File.Exists(Path.Combine(destination, RunCodeLog.SummaryFile)), "CopyOutputs never copies script.cs or run.json");
+      RunCodeLog.WriteText(runFolder, "data.txt", "replacement");
+      var replaced = RunCodeLog.CopyOutputs(runFolder, destination, removeCopied: false);
+      expect(replaced.Warnings.Count == 0 && File.ReadAllText(Path.Combine(destination, "data.txt")) == "replacement",
+        "CopyOutputs atomically replaces existing outputs");
+
+      foreach (var prefix in new[] { @"\\?\", @"\\.\" })
+      {
+        var device = RunCodeLog.CopyOutputs(runFolder, prefix + destination, removeCopied: true);
+        expect(device.Warnings.Count == 1 && device.Copied.Count == 0 && device.Removed.Count == 0
+          && File.ReadAllText(source) == "replacement" && Directory.GetFiles(runFolder).Length == 5,
+          $"CopyOutputs refuses a {prefix} destination and keeps all source files");
+      }
+      CheckCopyLink(runFolder, source, Path.Combine(folder, "linked"), expect);
+
+      using (var locked = new FileStream(Path.Combine(destination, "data.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+      {
+        var partial = RunCodeLog.CopyOutputs(runFolder, destination, removeCopied: true);
+        expect(partial.Warnings.Count > 0 && File.Exists(source)
+          && !partial.Copied.Contains(Path.Combine(destination, "data.txt"))
+          && !partial.Removed.Contains(source), "a locked destination warns and keeps its source");
+        expect(partial.Copied.Count == 2 && partial.Removed.Count == 2,
+          "other outputs are copied and removed after their own successful copy");
+      }
+      var removed = RunCodeLog.CopyOutputs(runFolder, destination, removeCopied: true);
+      expect(removed.Copied.Count == 1 && removed.Removed.SequenceEqual(new[] { source }) && !File.Exists(source),
+        "removeCopied removes an output only after it was copied");
+      expect(File.Exists(Path.Combine(runFolder, RunCodeLog.ScriptFile))
+        && File.Exists(Path.Combine(runFolder, RunCodeLog.SummaryFile)), "audit files are kept when outputs are removed");
+      expect(!Directory.GetFiles(destination).Any(path => path.EndsWith(".tmp")), "CopyOutputs cleans up temporary files");
+
+      var inside = RunCodeLog.CopyOutputs(runFolder, Path.Combine(RunCodeLog.Root, "copy"), false);
+      expect(inside.Warnings.Count == 1, "CopyOutputs refuses a destination inside the log root");
+      var relative = RunCodeLog.CopyOutputs(runFolder, "relative", false);
+      expect(relative.Warnings.Count == 1, "CopyOutputs refuses a relative destination");
+      var outside = RunCodeLog.CopyOutputs(folder, destination, false);
+      expect(outside.Warnings.Count == 1, "CopyOutputs refuses sources outside the log root");
+    }
+    finally
+    {
+      PluginLog.LogFilePath = oldLogPath;
+      if (Directory.Exists(folder)) Directory.Delete(folder, true);
+    }
+  }
+
+  private static void CheckCopyLink(string runFolder, string source, string link, Action<bool, string> expect)
+  {
+    try
+    {
+      Directory.CreateSymbolicLink(link, RunCodeLog.Root);
+    }
+    catch (Exception)
+    {
+      try
+      {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe")
+        {
+          ArgumentList = { "/c", "mklink", "/J", link, RunCodeLog.Root },
+          UseShellExecute = false,
+          CreateNoWindow = true,
+          RedirectStandardOutput = true,
+          RedirectStandardError = true,
+        })!;
+        process.WaitForExit();
+        if (process.ExitCode != 0) throw new IOException("mklink /J failed.");
+      }
+      catch (Exception exception)
+      {
+        Console.WriteLine($"SKIPPED: cannot create a directory link for CopyOutputs: {exception.Message}");
+        return;
+      }
+    }
+
+    try
+    {
+      foreach (var destination in new[] { link, Path.Combine(link, "run"), Path.Combine(link, "new", "nested") })
+      {
+        var refused = RunCodeLog.CopyOutputs(runFolder, destination, removeCopied: true);
+        expect(refused.Warnings.Count == 1 && refused.Copied.Count == 0 && refused.Removed.Count == 0
+          && File.ReadAllText(source) == "replacement" && Directory.GetFiles(runFolder).Length == 5
+          && !Directory.Exists(Path.Combine(RunCodeLog.Root, "new")),
+          "CopyOutputs refuses a junction or symbolic link into the log root and keeps all source files");
+      }
+    }
+    finally
+    {
+      Directory.Delete(link, recursive: false);
+    }
   }
 
   private static void CheckOutput(Action<bool, string> expect)
@@ -159,6 +293,7 @@ namespace Civil3DMcpPlugin
 
   internal static class PluginLog
   {
+    public static string LogFilePath { get; set; } = Path.Combine(AppContext.BaseDirectory, "plugin.log");
     internal static readonly List<string> Warnings = new();
 
     public static void Info(string component, string message, Exception? exception = null)

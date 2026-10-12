@@ -4,6 +4,16 @@
 
 ### Added
 
+- Run-code API 3: `codePath` and `argsPath` with content-bound approvals,
+  `copyOutputsTo`, and `keepOutputs`. Reads allow 600 seconds; writes stay at 90.
+  Long runs send progress heartbeats when the client supplies a progress token.
+- Script helpers: `OpenSideOrNull`, `Try`, `ById`, `EnsureLayer`, `Tag`,
+  `TagValue`, `Tagged`, and `PaperSpace`. Responses and audit logs include
+  script hashes, copied files and bounded error reports.
+- The server refuses API 3 options when an older plugin is loaded. Both
+  script modes refuse plugin internals outside the script API. Side drawing
+  retries use a fresh database and skip drawing-content errors.
+
 - Optional `CIVIL3D_RUN_CODE_APPROVAL=client` for direct MCP client calls to
   `civil3d_run_code`. Nested and HTTP calls still require a token.
 

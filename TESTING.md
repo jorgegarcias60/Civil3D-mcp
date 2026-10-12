@@ -5,6 +5,70 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### PR 2 run plumbing and script API (2026-10-12)
+
+Verified in the `jorgegarcias60/run-code-plumbing` worktree. Nothing was
+installed into Civil 3D. Changes stay uncommitted for review.
+
+| Check | Result |
+|---|---|
+| TypeScript `npm.cmd run build` | Pass. |
+| `npx.cmd vitest run --configLoader runner --cache=false` | 49 files, 588 tests passed. |
+| `npm.cmd run docs:check` | Pass. Generated reference current: 210 entries. |
+| Plugin Release, net8.0-windows, refs-2026 | Pass. 0 warnings, 0 errors. |
+| Plugin Release, net10.0-windows, C_References | Pass. 0 warnings, 0 errors. |
+| Rebuild net8.0-windows with `--restore` after net10 | Pass. 0 warnings, 0 errors. |
+| RunCodeHarness net8.0 | 164 checks passed. 230 managed references. |
+| RunCodeHarness net10.0 | 164 checks passed. 238 managed references. |
+| Harness with the pre-PR `ScriptCompiler.cs` and current API | Expected failure: 14 new guard checks fail. |
+
+New checks cover file inputs, BOM removal, size limits, approval after file
+edits, execution of the prepared content, read/write budgets, API skew,
+hash fallback, and heartbeat timing and suppression. The harness checks
+hashes, handles, drawing-content errors and atomic output copies, including
+a locked destination. It compiles the new helpers and checks both modes'
+plugin-internal guard. The source test checks fresh-database side retries.
+The old-compiler check used an isolated project under the harness's ignored
+`bin` folder. It proves the new read-helper, plugin-internal and side-database
+ownership checks catch regressions in the old guard.
+
+PowerShell blocked the `npm.ps1` wrapper. The `.cmd` wrappers ran the same
+commands. No packages were installed and the shared `node_modules` junction
+was not changed. Vitest used the requested runner loader and disabled cache.
+
+The first default plugin restore failed with NU1301 (NuGet TLS) and one
+NU1900 warning. Local restore succeeded with existing cached packages. For
+the offline builds and harness runs, these extra MSBuild properties were used:
+
+```powershell
+-p:RestoreSources=C:\Users\jorge\.nuget\packages
+-p:RestorePackagesPath=C:\Users\jorge\.nuget\packages
+-p:NuGetAudit=false
+```
+
+The net8 build used
+`-p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026`.
+The net10 build used
+`-p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References`
+and `-p:TargetFramework=net10.0-windows`. Both used `-c Release`.
+Each harness run received its matching references folder and built plugin DLL
+as positional arguments. This avoids the harness's net8 default on net10.
+
+Live Civil 3D checks remain pending. This task did not authorize touching
+Civil 3D or the installed plugin.
+
+Live, Civil 3D 2026, 2026-10-12, scratch drawing, trusted install of this build:
+- Before the install (old plugin, runCode API 1), `copyOutputsTo` was refused with "older than this server" and nothing ran.
+- `node scripts/live-run-code-smoke.mjs --approval client --expect-drawing RUNCODE-SMOKE --side <background> --damaged <fixtures> --long 590` passed **46/46**:
+  - the 590 s read finished (585 s, 41 progress heartbeats);
+  - codePath/argsPath hash matched;
+  - copyOutputsTo and keepOutputs:false left only script.cs and run.json;
+  - Try, ById, PaperSpace and EnsureLayer twice behaved as described;
+  - a Tag/Tagged rerun stayed at 3;
+  - plugin-internal calls were refused.
+- `OpenSideOrNull` over 11 paths: the real file that broke the original run reported `DwgNeedsRecovery`, a truncated copy `EndOfFile`, a text file `BadDwgHeader` and a missing path an error, while the other real files, a zero-filled copy and the open drawing were read. The run finished ok.
+- `live-label-smoke` passed 9/9.
+
 ### run_code client approval mode (2026-10-12)
 
 `tests/run_code_approval_mode.test.ts` covers direct client authorization,

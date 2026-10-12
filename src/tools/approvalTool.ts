@@ -45,8 +45,8 @@ function resolveApprovalTarget(args: { toolName: string; action: string; paramet
       "Include the tool action in parameters when calling a multi-action tool.",
     );
   }
-  target.actionDefinition.inputSchema.parse(resolved.args);
-  return target;
+  const parsed = target.actionDefinition.inputSchema.parse(resolved.args);
+  return { target, parsed };
 }
 
 function successResult(structuredContent: JsonObject) {
@@ -71,7 +71,8 @@ export function registerApprovalTool(server: McpServer) {
   const previewHandler = async (rawArgs: JsonObject) => {
     try {
       const args = rawArgs as { toolName: string; action: string; parameters: JsonObject };
-      const target = resolveApprovalTarget(args);
+      const { target, parsed } = resolveApprovalTarget(args);
+      if (target.actionDefinition.prepare) await target.actionDefinition.prepare(parsed, args.parameters);
       const requiresApproval = isApprovalRequired({
         toolName: args.toolName,
         action: args.action,
@@ -104,7 +105,10 @@ export function registerApprovalTool(server: McpServer) {
         parameters: JsonObject;
         ttlSeconds?: number;
       };
-      const target = resolveApprovalTarget(args);
+      const { target, parsed } = resolveApprovalTarget(args);
+      const prepared = target.actionDefinition.prepare
+        ? await target.actionDefinition.prepare(parsed, args.parameters)
+        : undefined;
       const receipt = await approvalPolicy.requestApproval(
         {
           toolName: args.toolName,
@@ -113,7 +117,7 @@ export function registerApprovalTool(server: McpServer) {
           safeForRetry: target.actionDefinition.safeForRetry,
           requiresActiveDrawing: target.actionDefinition.requiresActiveDrawing,
         },
-        args.parameters,
+        prepared?.approvalParameters ?? args.parameters,
         (args.ttlSeconds ?? 300) * 1000,
       );
 
