@@ -7,6 +7,29 @@ namespace Civil3DMcpPlugin;
 /// <summary>Small, AutoCAD-free helpers shared with the offline harness.</summary>
 internal static class RunCodeHelpers
 {
+  // Activation is needed even for populated non-current layouts. Keep the
+  // edit's transaction inside this callback so it closes before restoration.
+  internal static T WithCurrentLayout<T>(string layoutName, bool viewportsEmpty,
+    Func<string> getCurrentLayout, Action<string> setCurrentLayout, Action activated, Func<T> edit)
+  {
+    var previous = getCurrentLayout();
+    var activate = viewportsEmpty || !string.Equals(previous, layoutName, StringComparison.OrdinalIgnoreCase);
+    try
+    {
+      if (activate)
+      {
+        setCurrentLayout(layoutName);
+        activated();
+      }
+      return edit();
+    }
+    finally
+    {
+      // Do not check the request budget here: cancellation still restores.
+      if (activate) setCurrentLayout(previous);
+    }
+  }
+
   internal static (int Index, string? Error) MatchDocument(string key, IReadOnlyList<string> openNames)
   {
     key = key.Trim().Replace('/', Path.DirectorySeparatorChar);

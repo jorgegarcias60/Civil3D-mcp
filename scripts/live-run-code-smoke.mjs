@@ -360,6 +360,35 @@ function rawRpc(method, params, timeoutMs = 120_000) {
 
 // Static snippets also compile in the offline RunCodeHarness. No host code executes there.
 const helperScripts = {
+  dormantViewport: String.raw`
+var path = Doc.Name;
+if (!Path.IsPathFullyQualified(path) || !File.Exists(path) || !Path.IsPathFullyQualified(Db.Filename)
+    || !string.Equals(Path.GetFullPath(path), Path.GetFullPath(Db.Filename), StringComparison.OrdinalIgnoreCase))
+  return new { skip = "The open drawing has no saved DWG to read with OpenSide." };
+var original = LayoutManager.Current.CurrentLayout;
+var layouts = Open<DBDictionary>(Db.LayoutDictionaryId);
+var side = OpenSide(path);
+var savedLayouts = Open<DBDictionary>(side.LayoutDictionaryId);
+foreach (DBDictionaryEntry entry in layouts) {
+  var layout = Open<Layout>(entry.Value);
+  if (layout.ModelType || layout.LayoutName == original || !savedLayouts.Contains(layout.LayoutName)) continue;
+  var openViewports = layout.GetViewports();
+  if (openViewports.Count != 0) continue;
+  var paper = Open<BlockTableRecord>(layout.BlockTableRecordId);
+  var entities = paper.Cast<ObjectId>().Select(id => Open<DBObject>(id)).OfType<Viewport>().ToList();
+  if (entities.Count == 0) continue;
+  var saved = Open<Layout>(savedLayouts.GetAt(layout.LayoutName));
+  var savedViewports = saved.GetViewports();
+  if (savedViewports.Count == 0) continue;
+  var overall = Open<Viewport>(savedViewports[0]);
+  var matching = entities.FirstOrDefault(v => string.Equals(v.Handle.ToString(), overall.Handle.ToString(), StringComparison.OrdinalIgnoreCase));
+  if (matching == null) continue;
+  return new { layout = layout.LayoutName, handle = matching.Handle.ToString(),
+    savedHandle = overall.Handle.ToString(), openCount = openViewports.Count,
+    savedCount = savedViewports.Count, entityCount = entities.Count, original };
+}
+return new { skip = "No dormant saved paper layout has zero open GetViewports(), VIEWPORT entities, and a matching saved overall viewport." };
+`,
   textSetup: String.raw`
 var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), true);
 var text = new DBText { TextString = "Rotated helper", Position = new Point3d(-1e6, -1e6, 0), Height = 2, Rotation = Math.PI / 6 };
@@ -550,6 +579,29 @@ async function helperChecks(runCodeApi) {
   const close = (a, b) => typeof a === "number" && Math.abs(a - b) < 1e-6;
   const vector = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => close(v, b[i]));
 
+  await check("helpers: dormant layout overall viewport refuses without mutation", async () => {
+    const probe = await execute("dormantViewport", {}, "read");
+    if (probe.status === "runtime_error" && /CIVIL3D_(?:IMPORT|FILE)_ROOTS|outside.*roots|PATH_NOT_ALLOWED/i.test(probe.error?.message ?? "")) {
+      skip("helpers: dormant layout overall viewport (saved DWG outside import roots)", probe.error.message);
+      return;
+    }
+    const fixture = requireOk(probe);
+    if (fixture.skip) { skip("helpers: dormant layout overall viewport", fixture.skip); return; }
+    const args = { layout: fixture.layout, handle: fixture.handle };
+    const before = requireOk(await execute("viewportRead", args, "read"));
+    const refused = await execute("viewportOverall", args);
+    const after = requireOk(await execute("viewportRead", args, "read"));
+    record("helpers: dormant layout overall viewport refuses without mutation",
+      fixture.openCount === 0 && fixture.savedCount > 0 && fixture.entityCount > 0
+        && fixture.handle === fixture.savedHandle && before.id === fixture.handle
+        && refused.status === "runtime_error" && refused.committed === false && refused.activatedLayout === true
+        && /overall.*paper space.*revert/i.test(refused.error?.message ?? "")
+        && before.current === fixture.original && after.current === fixture.original
+        && JSON.stringify(before) === JSON.stringify(after),
+      { fixture, status: refused.status, committed: refused.committed, activatedLayout: refused.activatedLayout,
+        error: refused.error?.message, before, after });
+  });
+
   let textHandles = [];
   try {
     await check("helpers: TextBox rotated DBText and MText match extents", async () => {
@@ -642,14 +694,16 @@ async function helperChecks(runCodeApi) {
       const fixture = requireOk(await execute("viewportSetup", { layout: layoutName }));
       original = fixture.original;
       const args = { layout: layoutName, handle: fixture.handle };
-      const changed = requireOk(await execute("viewportWrite", args));
+      const changedResponse = await execute("viewportWrite", args);
+      const changed = requireOk(changedResponse);
       const before = requireOk(await execute("viewportRead", args, "read"));
       requireOk(await execute("viewportActivate", { layout: layoutName }));
       const after = requireOk(await execute("viewportRead", args, "read"));
       const valid = value => value.id === fixture.handle && vector(value.center, [18,12,0]) && close(value.width, 26)
         && close(value.height, 10) && vector(value.target, [1000,2000,0]) && vector(value.viewCenter, [0,0])
         && close(value.viewHeight, 400) && close(value.scale, 0.025) && close(value.twist, 0.15) && value.locked;
-      record("helpers: SetViewport persists after non-current layout activation", changed === fixture.handle && valid(before) && valid(after)
+      record("helpers: SetViewport persists after non-current layout activation", changed === fixture.handle
+        && changedResponse.activatedLayout === true && valid(before) && valid(after)
         && before.current === original && after.current === layoutName, { before, after });
       const overallArgs = { layout: layoutName, handle: fixture.overall };
       const overallBefore = requireOk(await execute("viewportRead", overallArgs, "read"));
@@ -791,6 +845,7 @@ try {
   if (expectDrawing && !drawingName.toLowerCase().includes(expectDrawing.toLowerCase())) {
     throw new Error(`Active drawing '${drawingName}' does not contain '${expectDrawing}'; stopping before any write.`);
   }
+  if (options.helpers) await helperChecks(runCodeApi);
 
   if (options.other) {
     if (runCodeApi < 4) {
@@ -1426,7 +1481,6 @@ try {
 
   }
   if (options.hardening) await hardeningChecks(!options["no-drawing"]);
-  if (options.helpers) await helperChecks(runCodeApi);
   if (options.preview) await previewChecks(runCodeApi, drawingName);
   console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", passes: results.filter((result) => result.passed === true).length,
     failures, skips, drawing: drawingName, results }, null, 2));

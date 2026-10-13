@@ -56,6 +56,7 @@ public abstract partial class RunCodeScript
 
   private readonly List<RunCodeSideError> _sideErrors = new();
   private readonly List<RunCodeTryError> _tryErrors = new();
+  internal bool ActivatedLayout { get; private set; }
   // A cancelled request can collect reports while the main thread still runs.
   public IReadOnlyList<RunCodeSideError> SideErrors
   {

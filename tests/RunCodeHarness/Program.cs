@@ -359,7 +359,7 @@ var drawingWrite = Compile("""
   var block = Open<BlockReference>(ObjectId.Null);
   var clip = XClip(block, new[] { new Point3d(0,0,0), new Point3d(1,0,0), new Point3d(0,1,0) });
   var xref = AttachXref("C:/source.dwg", Point3d.Origin, scale: 1, layer: "XREF", relativePath: false, blockName: "SOURCE");
-  var viewport = SetViewport("Sheet", ObjectId.Null, paperCenter: Point3d.Origin, paperWidth: 10,
+  ObjectId viewport = SetViewport("Sheet", ObjectId.Null, paperCenter: Point3d.Origin, paperWidth: 10,
     paperHeight: 5, modelCenter: Point3d.Origin, customScale: 0.1, twistAngle: 0, locked: true);
   return new { clip, xref.DefinitionId, xref.ReferenceId, xref.Scale,
     xref.SourceUnits, xref.HostUnits, xref.PathName, viewport };
@@ -436,7 +436,8 @@ Expect(targetDbmod.Succeeded, "preview snapshot reads DBMOD from the target docu
 var smokeMatches = System.Text.RegularExpressions.Regex.Matches(smokeSource,
   @"(?ms)^  (?<name>\w+): String\.raw`(?<code>.*?)`,?");
 var smokeModes = new Dictionary<string, bool>(StringComparer.Ordinal) {
-  ["textRead"] = false, ["clipRead"] = false, ["xrefCount"] = false, ["viewportRead"] = false };
+  ["textRead"] = false, ["clipRead"] = false, ["xrefCount"] = false, ["viewportRead"] = false,
+  ["dormantViewport"] = false };
 foreach (System.Text.RegularExpressions.Match match in smokeMatches)
 {
   var name = match.Groups["name"].Value;

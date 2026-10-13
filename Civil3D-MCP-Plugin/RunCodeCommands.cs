@@ -343,6 +343,11 @@ public static class RunCodeCommands
         summary["switchedBack"] = outcome.Activation.SwitchedBack;
       }
       if (outcome.Activation.Warning != null) warnings.Add(outcome.Activation.Warning);
+      if (outcome.Script?.ActivatedLayout == true)
+      {
+        response["activatedLayout"] = true;
+        summary["activatedLayout"] = true;
+      }
       response["status"] = status;
       response["ok"] = status == "ok";
       if (outcome.Drawing != null)

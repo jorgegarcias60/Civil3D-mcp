@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `SetViewport` activates non-current layouts and layouts with empty `GetViewports()` before refusing the overall viewport. It edits floating viewports in place, updates the display and restores the previous layout even on failure. Responses and run logs report `activatedLayout`. The helper smoke check reads the saved DWG to identify a dormant layout's overall viewport. Fixes #22
 - Preview counts use the target database's starting `Handseed` to identify new objects when `IsNewObject` is false. New-then-erased objects and new handles stay out of existing-object lists. Fixes #20
 - The XClip live smoke check accepts AutoCAD's no-back-plane sentinel as well as zero. All other assertions and the helper stay unchanged. Fixes #22
 

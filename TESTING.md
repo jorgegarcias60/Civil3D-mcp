@@ -5,6 +5,34 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Dormant layout viewport fix: issue #22 (2026-10-12)
+
+The supplied Civil 3D 2026 finding measured empty `GetViewports()` collections on four reopened, unactivated layouts. Each block held three viewport entities. The activated layout returned three IDs. `SetViewport` now activates before identifying the overall viewport, edits floating viewports in place and restores the previous layout in `finally`. It refuses the edit if the refreshed collection is still empty. Responses and `run.json` report `activatedLayout: true` when activation was needed.
+
+The harness checks activation order, populated non-current layouts, empty current layouts, case-insensitive current names, unchanged ObjectIds and restoration after refusal, edit failure, timeout, cancellation and partial activation failure. Source tests check the overall guard before write access, display update before commit and activation reporting. The harness compiles the new dormant-layout smoke snippet in read mode against both reference sets. The live script probes before any helper writes or layout switches. It identifies the overall handle with `OpenSide` on the saved drawing and retains the edit-and-persist check.
+
+All commands ran from this worktree. The .NET commands set `$env:UseSharedCompilation = 'false'` and `$env:NUGET_PACKAGES = 'C:\Users\jorge\.nuget\packages'`. The initial net10 build exited 0 with two NU1900 audit warnings because the NuGet endpoint was unreachable. The final builds and harness runs used the local cache with auditing disabled. Net8 was rebuilt after net10.
+
+| Check | Result |
+|---|---|
+| `npx vitest run tests/run_code_script_source.test.ts --configLoader runner --cache=false` before implementation | Exit 1; 3 new regressions failed and 14 tests passed. |
+| The same focused command after implementation | Exit 0; 17 tests passed. |
+| `npx vitest run tests/live_run_code_smoke_source.test.ts --configLoader runner --cache=false` | Exit 0; 3 tests passed. |
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 710 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. No regeneration needed. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 0 warnings and 0 errors. Initial build. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 2 NU1900 warnings and 0 errors. Replaced by the cache build below. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. Final rebuild after net10. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; PASS (238 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; PASS (230 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Fake roots only. |
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-run-code-features diff --check` | Exit 0; no whitespace errors. |
+
+The net8 harness skipped two existing file-symlink retention/pruning checks because Windows denied the required privilege. No Civil 3D/AutoCAD or live smoke checks were run. No plugin was installed. Changes remain unstaged and uncommitted. Shared-memory recall was denied by the tool approval policy; no memory save was attempted.
+
 ### Live-run follow-up: preview counts and XClip, issues #20 and #22 (2026-10-12)
 
 The supplied Civil 3D 2026 live run reported 64 passed and 3 failed before these changes. Preview counted new texts as modified in both the active drawing and document B. The XClip check rejected AutoCAD's `BackClip = 1e300` sentinel despite the expected visible geometry.

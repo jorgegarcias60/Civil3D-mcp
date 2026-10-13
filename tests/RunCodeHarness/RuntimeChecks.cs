@@ -17,12 +17,76 @@ internal static class RuntimeChecks
     CheckAuth(expect);
     CheckHelpers(expect);
     CheckDrawingHelpers(expect);
+    CheckViewportLayouts(expect);
     CheckPreview(expect);
     CheckDocuments(expect);
     CheckCopies(expect);
     RetentionChecks.Run(expect);
     ResultChecks.Run(expect);
     CheckDispatchGateAsync(expect).GetAwaiter().GetResult();
+  }
+
+  private static void CheckViewportLayouts(Action<bool, string> expect)
+  {
+    foreach (var (original, empty, shouldActivate) in new[] {
+      ("Model", true, true), ("Other sheet", false, true),
+      ("sHeEt", false, false), ("Sheet", true, true) })
+    {
+      var current = original;
+      var events = new List<string>();
+      var activated = false;
+      var result = RunCodeHelpers.WithCurrentLayout("Sheet", empty, () => current,
+        name => { current = name; events.Add("layout:" + name); },
+        () => { activated = true; events.Add("activated"); },
+        () =>
+        {
+          expect(string.Equals(current, "Sheet", StringComparison.OrdinalIgnoreCase),
+            "viewport guard and edit run with their layout current");
+          events.Add("edit");
+          return "2A";
+        });
+      var expected = shouldActivate
+        ? new[] { "layout:Sheet", "activated", "edit", "layout:" + original }
+        : new[] { "edit" };
+      expect(result == "2A" && current == original && activated == shouldActivate && events.SequenceEqual(expected),
+        $"viewport activation and restoration: previous={original}, empty={empty}");
+    }
+
+    foreach (var failure in new Exception[] {
+      new ArgumentException("The overall viewport shows paper space; edits to it revert."),
+      new InvalidOperationException("Viewport setter failed"),
+      new TimeoutException("Run budget expired"), new OperationCanceledException() })
+    {
+      var current = "Model";
+      var activated = false;
+      try
+      {
+        RunCodeHelpers.WithCurrentLayout<int>("Sheet", true, () => current, name => current = name,
+          () => activated = true, () => throw failure);
+        expect(false, "viewport edit failure must propagate");
+      }
+      catch (Exception caught)
+      {
+        expect(ReferenceEquals(caught, failure) && current == "Model" && activated,
+          $"viewport restoration preserves {failure.GetType().Name} and activation report");
+      }
+    }
+
+    var partiallyChanged = "Model";
+    var activationFailure = new InvalidOperationException("Activation failed after changing layout");
+    var editRan = false;
+    try
+    {
+      RunCodeHelpers.WithCurrentLayout("Sheet", true, () => partiallyChanged,
+        name => { partiallyChanged = name; if (name == "Sheet") throw activationFailure; },
+        () => { }, () => { editRan = true; return 0; });
+      expect(false, "partial viewport activation must fail");
+    }
+    catch (Exception caught)
+    {
+      expect(ReferenceEquals(caught, activationFailure) && partiallyChanged == "Model" && !editRan,
+        "partially failed layout activation restores the original and never edits");
+    }
   }
 
   private static void CheckPreview(Action<bool, string> expect)

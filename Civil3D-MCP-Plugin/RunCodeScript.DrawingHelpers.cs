@@ -170,39 +170,58 @@ public abstract partial class RunCodeScript
     if (string.IsNullOrWhiteSpace(layoutName)) throw new ArgumentException("Layout name is required.", nameof(layoutName));
     if (viewportId.IsNull || viewportId.IsErased || viewportId.Database != Db)
       throw new ArgumentException("A live viewport in this drawing is required.", nameof(viewportId));
-    using var tx = TransactionFor(Db).TransactionManager.StartTransaction();
-    var layouts = (DBDictionary)tx.GetObject(Db.LayoutDictionaryId, OpenMode.ForRead);
-    if (!layouts.Contains(layoutName)) throw new KeyNotFoundException($"Layout '{layoutName}' was not found.");
-    var layout = (Layout)tx.GetObject(layouts.GetAt(layoutName), OpenMode.ForRead);
-    if (layout.ModelType) throw new ArgumentException("SetViewport requires a paper layout.", nameof(layoutName));
-    var viewports = layout.GetViewports();
-    if (viewports.Count > 0 && viewportId == viewports[0])
-      throw new ArgumentException("The overall viewport shows paper space; edits to it revert.", nameof(viewportId));
-    var viewport = (Viewport)tx.GetObject(viewportId, OpenMode.ForWrite);
-    if (viewport.OwnerId != layout.BlockTableRecordId ||
-        (string.Equals(Autodesk.AutoCAD.DatabaseServices.LayoutManager.Current.CurrentLayout, layoutName, StringComparison.OrdinalIgnoreCase) && viewport.Number == 1))
-      throw new ArgumentException("Viewport must be floating and owned by the requested layout; the overall viewport shows paper space and its edits revert.", nameof(viewportId));
     if (paperCenter.HasValue && !Finite(paperCenter.Value)) throw new ArgumentException("Paper center must be finite.", nameof(paperCenter));
     if (modelCenter.HasValue && !Finite(modelCenter.Value)) throw new ArgumentException("Model center must be finite.", nameof(modelCenter));
     if (paperWidth.HasValue) Positive(paperWidth.Value, nameof(paperWidth));
     if (paperHeight.HasValue) Positive(paperHeight.Value, nameof(paperHeight));
     if (customScale.HasValue) Positive(customScale.Value, nameof(customScale));
     if (twistAngle.HasValue && !double.IsFinite(twistAngle.Value)) throw new ArgumentException("Twist angle must be finite.", nameof(twistAngle));
-    var wasLocked = viewport.Locked;
-    viewport.Locked = false;
-    if (paperCenter.HasValue) viewport.CenterPoint = paperCenter.Value;
-    if (paperWidth.HasValue) viewport.Width = paperWidth.Value;
-    if (paperHeight.HasValue) viewport.Height = paperHeight.Value;
-    if (modelCenter.HasValue) { viewport.ViewTarget = modelCenter.Value; viewport.ViewCenter = new Point2d(0, 0); }
-    if (twistAngle.HasValue) viewport.TwistAngle = twistAngle.Value;
-    if (customScale.HasValue)
+    ObjectId layoutId;
+    bool viewportsEmpty;
+    using (var inspect = TransactionFor(Db).TransactionManager.StartTransaction())
     {
-      viewport.CustomScale = customScale.Value;
-      viewport.ViewHeight = (paperHeight ?? viewport.Height) / customScale.Value;
+      var layouts = (DBDictionary)inspect.GetObject(Db.LayoutDictionaryId, OpenMode.ForRead);
+      if (!layouts.Contains(layoutName)) throw new KeyNotFoundException($"Layout '{layoutName}' was not found.");
+      layoutId = layouts.GetAt(layoutName);
+      var layout = (Layout)inspect.GetObject(layoutId, OpenMode.ForRead);
+      if (layout.ModelType) throw new ArgumentException("SetViewport requires a paper layout.", nameof(layoutName));
+      layoutName = layout.LayoutName;
+      // Reopened drawings leave this empty until the layout is activated.
+      viewportsEmpty = layout.GetViewports().Count == 0;
     }
-    viewport.Locked = locked ?? wasLocked;
-    viewport.UpdateDisplay();
-    Check(); tx.Commit(); return viewportId;
+
+    var manager = LayoutManager.Current;
+    return RunCodeHelpers.WithCurrentLayout(layoutName, viewportsEmpty,
+      () => manager.CurrentLayout, name => manager.CurrentLayout = name, () => ActivatedLayout = true, () =>
+      {
+        Check();
+        using var tx = TransactionFor(Db).TransactionManager.StartTransaction();
+        var layout = (Layout)tx.GetObject(layoutId, OpenMode.ForRead);
+        var viewports = layout.GetViewports();
+        if (viewports.Count == 0)
+          throw new InvalidOperationException("Cannot identify the overall viewport after activating the layout; nothing was edited.");
+        if (viewportId == viewports[0])
+          throw new ArgumentException("The overall viewport shows paper space; edits to it revert.", nameof(viewportId));
+        var viewport = (Viewport)tx.GetObject(viewportId, OpenMode.ForRead);
+        if (viewport.OwnerId != layout.BlockTableRecordId || viewport.Number == 1)
+          throw new ArgumentException("Viewport must be floating and owned by the requested layout; the overall viewport shows paper space and its edits revert.", nameof(viewportId));
+        viewport.UpgradeOpen();
+        var wasLocked = viewport.Locked;
+        viewport.Locked = false;
+        if (paperCenter.HasValue) viewport.CenterPoint = paperCenter.Value;
+        if (paperWidth.HasValue) viewport.Width = paperWidth.Value;
+        if (paperHeight.HasValue) viewport.Height = paperHeight.Value;
+        if (modelCenter.HasValue) { viewport.ViewTarget = modelCenter.Value; viewport.ViewCenter = new Point2d(0, 0); }
+        if (twistAngle.HasValue) viewport.TwistAngle = twistAngle.Value;
+        if (customScale.HasValue)
+        {
+          viewport.CustomScale = customScale.Value;
+          viewport.ViewHeight = (paperHeight ?? viewport.Height) / customScale.Value;
+        }
+        viewport.Locked = locked ?? wasLocked;
+        viewport.UpdateDisplay();
+        Check(); tx.Commit(); return viewportId;
+      });
   }
 
   private void RequireDrawingWrite(string name)

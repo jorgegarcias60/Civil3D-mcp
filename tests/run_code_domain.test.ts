@@ -187,6 +187,8 @@ describe("civil3d_run_code domain", () => {
     expect(RunCodeResponseSchema.safeParse({ ...base, committed: "maybe" }).success).toBe(false);
     expect(RunCodeResponseSchema.safeParse({ ...base, activated: true, switchedBack: true }).success).toBe(true);
     expect(RunCodeResponseSchema.safeParse({ ...base, activated: "yes" }).success).toBe(false);
+    expect(RunCodeResponseSchema.parse({ ...base, activatedLayout: true }).activatedLayout).toBe(true);
+    expect(RunCodeResponseSchema.safeParse({ ...base, activatedLayout: "yes" }).success).toBe(false);
   });
 
   it("describes temporary activation for a targeted write", () => {
@@ -262,6 +264,9 @@ describe("civil3d_run_code domain", () => {
     expect(description).toContain("Feet and US survey feet use scale 1");
     expect(description).toContain("same viewport ObjectId");
     expect(description).toContain("overall paper-space viewport");
+    expect(description).toContain("empty GetViewports");
+    expect(description).toContain("restores the previous layout even on failure");
+    expect(description).toContain("activatedLayout=true");
   });
 });
 
