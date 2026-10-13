@@ -5,6 +5,52 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Plot publishing hardening: issue #21 (2026-10-12)
+
+Offline results for `jorgegarcias60/plot-hardening`, measured outside any
+sandbox on Jorge's machine on 2026-10-12. The integration build combined
+`civil3d-2027`, this branch and `jorgegarcias60/run-code-helpers-preview`:
+
+| Check | Result |
+|---|---|
+| `npm run build` | Ok. |
+| `npx vitest run --configLoader runner --cache=false` | All passed: 739 tests in 55 files. |
+| `npm run docs:check` | Ok. |
+| Plugin Release net8.0-windows, refs-2026 | 0 warnings. |
+| Plugin Release net10.0-windows, C_References | 0 warnings. |
+| RunCodeHarness `-f net8.0` | Pass. |
+| RunCodeHarness `-f net10.0` | Pass. |
+| `tests/powershell/install-trusted.check.ps1` | 0 failures. |
+
+New tests and checks cover:
+
+- #21: document selection and API skew, reopened layout initialization, saved-revision selection and settings, CTB/STB and media preflight before writes, PDF page count and size verification, object-stream detection, cancellation drain, job snapshots and smoke-fixture cleanup after failures.
+
+#### Live results
+
+Live, Civil 3D 2026, 2026-10-12, run by Claude Code on a scratch drawing with
+that integration build installed through `install-trusted.ps1`: **20/20 passed**.
+The run followed a Civil 3D restart; layout tabs had not been activated in that
+session. To repeat it on a saved scratch drawing with two configured layouts:
+
+`node scripts/live-plot-smoke.mjs --expect-drawing RUNCODE-SMOKE --out <temporary folder in the export root> --ctb-fixture`
+
+The output folder must exist inside both import and export roots. Disable the
+PC3's viewer option first. The live check groups passed:
+
+- Discovery: plot API 2 and targeted `list_layouts` flags.
+- Publishing: a two-sheet job completed and verified two pages, both page sizes within 1 pt, with resolved settings echoed.
+- Missing table: a saved DWG was refused with the table and layout names before any output was written.
+- Saved revision: unsaved changes were refused; `requireSaved: false` used the saved plot style.
+- Cancellation and cleanup: native publishing drained before the job reported, health answered afterwards, and the temporary plot style copy and all outputs were removed.
+
+Found live and fixed in this branch: `Layout.GetViewports()` is empty after
+reopening a drawing when layout tabs have not been activated. Initialization
+now also checks the layout block for a viewport. `SetCurrentStyleSheet` refuses
+a missing table name, so `--ctb-fixture` copies an installed CTB/STB, saves the
+side DWG with it, then removes only the copy before testing refusal.
+No live checks were rerun during this documentation edit.
+
 ### Approval logging: issue #29 (2026-10-12)
 
 `tests/approval_logging.test.ts` covers direct MCP, registry, nested `civil3d_orchestrate` / `civil3d_docs` and authenticated HTTP calls in token and client modes. Each expected refusal logs one WARN line with no stack frames; unexpected errors keep their stacks; client error text, `isError`, codes and request IDs are unchanged. The tests fail on the previous code.

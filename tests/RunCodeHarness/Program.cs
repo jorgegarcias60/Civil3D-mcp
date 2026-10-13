@@ -6,7 +6,19 @@
 // build. Prints SKIPPED (exit 0) when either is missing; exit 1 on a failure.
 using Civil3DMcpPlugin;
 
+try
+{
 var repoRoot = FindRepoRoot();
+if (args.Contains("--layout-initialization-only"))
+{
+  var layoutFailures = 0;
+  LayoutInitializationChecks.Run(repoRoot, (condition, name) =>
+  {
+    Console.WriteLine($"{(condition ? "ok  " : "FAIL")} {name}");
+    if (!condition) layoutFailures++;
+  });
+  return layoutFailures == 0 ? 0 : 1;
+}
 var refsFolder = args.Length > 0
   ? args[0]
   : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Civil3D-mcp", "refs-2026");
@@ -383,14 +395,57 @@ var again = Compile("return 1;");
 Expect(unique.Succeeded && again.Succeeded && unique.TypeName != again.TypeName, "each run gets its own class and assembly name");
 
 RuntimeChecks.Run((condition, name) => Expect(condition, name));
+PdfChecks.Run((condition, name) => Expect(condition, name));
+PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
+LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 DatabaseGuardChecks.Run((code, write) => Compile(code, write),
   (condition, name, result) => Expect(condition, name, result));
 var executionSource = File.ReadAllText(Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "CivilExecution.cs"));
 Expect(executionSource.Contains("return await ExecuteAsync((doc, civil, db, tr) => action(new(doc, civil, db, tr)), write: false, inCommand: writeMode);"),
   "untargeted runCode keeps ExecuteAsync(write: false, inCommand: writeMode)");
 Expect(Compile("return HasDrawing;").Succeeded, "HasDrawing is available to read scripts");
+var missingStyle = Compile("""
+  var dictionary = Open<DBDictionary>(Db.LayoutDictionaryId);
+  var layout = Open<Layout>(dictionary.GetAt((string)Args["layout"]!), forWrite: true);
+  PlotSettingsValidator.Current.SetCurrentStyleSheet(layout, (string)Args["style"]!);
+  return layout.CurrentStyleSheet;
+  """, write: true);
+Expect(missingStyle.Succeeded, "live plot smoke's scratch layout style edit and restore compile", missingStyle);
+var plotSmokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-plot-smoke.mjs"));
+var profileCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
+  @"const readPlotStyleProfile = `([\s\S]*?)`;");
+Expect(profileCode.Success, "live plot smoke declares its profile path query");
+if (profileCode.Success)
+{
+  var profileQuery = Compile(profileCode.Groups[1].Value);
+  Expect(profileQuery.Succeeded, "live plot smoke's profile path and CTB/STB mode query compile", profileQuery);
+}
+var scratchCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
+  @"const setStyle = \[([\s\S]*?)\]\.join");
+Expect(scratchCode.Success, "live plot smoke declares its reversible scratch edit");
+if (scratchCode.Success)
+{
+  var lines = System.Text.RegularExpressions.Regex.Matches(scratchCode.Groups[1].Value, "'([^']*)'")
+    .Select(match => match.Groups[1].Value);
+  var scratchEdit = Compile(string.Join("\n", lines), write: true);
+  Expect(scratchEdit.Succeeded, "live plot smoke's installed style and PlotPlotStyles edit compile", scratchEdit);
+}
+var fixtureCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
+  @"const saveMissingTableFixture = `([\s\S]*?)`;");
+Expect(fixtureCode.Success, "live plot smoke declares its saved missing-table fixture code");
+if (fixtureCode.Success)
+{
+  var savedFixture = Compile(fixtureCode.Groups[1].Value, write: true);
+  Expect(savedFixture.Succeeded, "live plot smoke's side database edit, commit and SaveAs compile", savedFixture);
+}
 Console.WriteLine(failures == 0 ? $"PASS ({references.Count} references)" : $"{failures} FAILED");
 return failures == 0 ? 0 : 1;
+}
+catch (Exception error)
+{
+  Console.Error.WriteLine(error);
+  return 1;
+}
 
 static bool IsManagedAssembly(string path)
 {

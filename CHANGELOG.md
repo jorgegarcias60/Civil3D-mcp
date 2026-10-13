@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Harden sheet-set publishing with document selection, plot API checks, reopened layout initialization and saved-revision settings. Check CTB/STB and media before writing; verify PDF page count, size and object streams. Drain cancellations and lock job snapshots. Add a guarded live smoke check with an opt-in missing-table fixture and cleanup after failures. Fixes #21.
+
 ### Added
 
 - Run-code API 5: `mode: "write"` with `document` can target another open drawing. The plugin briefly activates that drawing for the command, then attempts to switch back even when the script fails. Responses report `activated` and `switchedBack`; the server refuses these writes against older plugins before running them.

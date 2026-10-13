@@ -128,6 +128,7 @@ public static class JobCommands
   private static Dictionary<string, object?> ToResponse(JobRecord job)
   {
     var stats = JobRegistry.GetStats();
+    lock (job.SyncRoot)
     return new Dictionary<string, object?>
     {
       ["jobId"] = job.JobId,
