@@ -756,33 +756,29 @@ back to `CIVIL3D_FILE_ROOTS`, then the user's Documents folder), and existing
 files are only replaced with `overwrite: true`. Pass `asJob: true` to run
 either as a `civil3d_job` and poll `civil3d_job action=status`. Results list
 every file written with its size, page count (when detectable), and
-per-layout status. Publishing refuses any selected layout that has never been
-initialized. Open its layout tab once and save the drawing before publishing.
-A layout is initialized when `GetViewports()` has entries or its paper-space
-block contains a viewport entity. Saved layouts remain initialized after a
-restart, even before their tabs are activated in the new session.
+per-layout status. Publishing refuses uninitialized layouts: open their tabs
+once and save the drawing. Saved viewport entities keep reopened layouts
+initialized before their tabs are activated in the new session.
 
-`list_layouts` and `publish_sheet_set` accept `document`: an open drawing's full
-path or unique file name, or a saved `.dwg` path inside the import roots.
-Settings are read under that drawing's own lock, or from a side database for
-a closed drawing. The plugin does not activate the target drawing. Publishing
-runs from the current drawing and names the target's saved path in the DSD.
-Without `document`, the active drawing is used. This option requires plot API 2;
-both job routes refuse older plugins before starting work. Install the plugin
-from the same build as the server.
+`list_layouts` and `publish_sheet_set` accept `document`: an open drawing's
+full path or unique file name, or a saved `.dwg` path inside the import roots.
+Without it, the active drawing is used. Reads lock the target drawing or use a
+side database; the target is not activated. Publishing runs from the current
+drawing using the target's saved path in the DSD. This requires plot API 2;
+both job routes refuse older plugins before work starts. Install matching
+server and plugin builds.
 
-Before writing a PDF or DSD, publishing checks every sheet's CTB/STB and the
-media available on `DWG To PDF.pc3`. A missing table or media fails with the
-layout name. Results echo each sheet's page setup, device, media, plot style
-table and paper size in millimeters. PDF verification requires the exact page
-count and each page's `MediaBox` size within 1 point of the sheet paper size.
-A mismatch fails the job and restores an overwritten PDF. PDFs with object
-streams report `verification: "unverified"` and a warning. A hyperlink or stream
-payload containing `/ObjStm` does not disable verification.
+Before writing a PDF or DSD, publishing checks every sheet's CTB/STB and media
+on `DWG To PDF.pc3`. Missing settings name the table or media and layout.
+Results echo each sheet's page setup, device, media, plot style and paper size
+in millimeters. Verification requires the exact page count and each page's
+`MediaBox` within 1 point of the sheet size; a mismatch fails the job and
+restores an overwritten PDF. Object-stream PDFs return
+`verification: "unverified"` with a warning; `/ObjStm` in hyperlinks or stream
+payloads does not disable verification.
 
-Cancellation waits for in-flight native publishing to return. A publish that
-finishes successfully after cancellation reports `completed` with a warning.
-Plot and publish still require approval tokens when run-code uses client approval.
+Cancellation drains native publishing before the job reports. A publish that
+succeeds after cancellation reports `completed` with a warning.
 
 Why commands rather than the PlotEngine API: live testing on Civil 3D 2027
 found `PlotFactory`/`PlotEngine` crash-prone when driven from a command
@@ -795,29 +791,24 @@ viewer when done" opens the real file) while the output folder chain is
 locked. A link at the requested name is refused; with `overwrite` an existing
 PDF is moved to a backup beside it and restored if the plot fails; the result
 must be a regular file (not a link) before it is verified.
-`publish_sheet_set` reads drawings from disk, so `requireSaved` (default true)
-refuses unsaved changes in an open source drawing. `requireSaved: false`
-publishes its last saved revision. The result warns that unsaved changes were
-not included. Layout selection, initialization checks, preflight, returned sheet
-settings and expected PDF sizes all come from the saved DWG, including its
-CTB/STB and paper size. Unsaved layout renames and deletions do not hide saved
-tabs. New unsaved tabs are excluded from the default sheet list.
+`publish_sheet_set` reads saved DWGs. `requireSaved` (default true) refuses
+unsaved changes in an open source drawing. `requireSaved: false` publishes
+its last saved revision and warns that unsaved changes were excluded. Layout
+selection, initialization, preflight, returned settings and expected PDF sizes
+use that revision. Unsaved renames or deletions do not hide saved tabs; new
+unsaved tabs are excluded from the default sheet list.
 
 Live check on a saved scratch drawing with two configured layouts:
 `node scripts/live-plot-smoke.mjs --expect-drawing Scratch --out C:\path\inside\export-roots`.
-The output folder must be inside both import and export roots. It selects two
-initialized layouts and checks publishing, unsaved changes, saved-revision plot
-styles and cancellation. Add `--ctb-fixture` to test missing CTB/STB refusal.
-This flag copies an existing table into the active profile's printer style sheet
-path under a unique name. It prints the full path, refreshes the validator lists,
-assigns the copy in a disposable side DWG and saves that DWG. It deletes the copy
-in a `finally` block and checks that it is gone before publishing. Refusal must
-name the table and layout, with no PDF or DSD written. Existing tables are kept.
-Without the flag, this fixture reports one SKIP and touches no files outside `--out`.
-Each failed check reports FAIL and the script continues to cancellation, health
-and cleanup. Any failure makes the final exit code 1. It restores the scratch
-layout's settings and removes its fixture DWG, PDFs and DSDs after jobs drain.
-Disable the PC3's viewer option first.
+The output folder must exist inside both import and export roots. Disable the
+PC3's viewer option first. The script checks discovery, publishing, saved-state
+handling, cancellation and health. Add `--ctb-fixture` for missing-table refusal:
+it copies an installed CTB/STB under a unique name into the profile's plot style
+folder, prints the path, assigns it in a disposable saved DWG, then removes only
+the copy before publishing. Refusal must name the table and layout with no PDF
+or DSD written. Without the flag, that check reports SKIP and touches no files
+outside `--out`. Failures still reach cancellation, health and cleanup, then
+exit 1. After jobs drain, scratch settings are restored and fixture files removed.
 
 </details>
 

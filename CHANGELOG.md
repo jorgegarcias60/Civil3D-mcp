@@ -2,19 +2,7 @@
 
 ## Unreleased
 
-- Recognize saved paper-space viewport entities when the session viewport list is empty. Keep reopened layouts initialized for `list_layouts` and sheet-set publishing. Fixes #21.
-
-- Gate the live missing-table fixture behind `--ctb-fixture`. Copy an installed CTB/STB into the profile path, save the side DWG, then remove only the copy before publishing. Fixes #21.
-- Record live plot smoke failures and continue to cancellation, health and cleanup. Exit 1 after any failure. Fixes #21.
-
-- Test missing CTB/STB refusal using a disposable saved DWG in the live plot smoke check. Require the table and layout names and no PDF or DSD output. Fixes #21
-
-- Select layouts and check their initialization from the saved DWG with `requireSaved: false`. Report that unsaved changes were not included. Fixes #21
-- Detect PDF object streams in object dictionaries so hyperlinks and stream payloads keep page verification enabled. Fixes #21
-- Use saved DWG settings for publish preflight and PDF verification with `requireSaved: false`. Fixes #21
-- Return layout initialization flags and use them to select usable live smoke layouts. Update the smoke check for saved-revision publishing. Fixes #21
-
-- Harden sheet-set publishing with drawing selection, all-sheet CTB/STB and PDF media preflight, strict page count and paper-size checks, drained cancellation, locked job snapshots and plot API skew checks. Add a guarded live smoke script. Fixes #21
+- Harden sheet-set publishing with document selection, plot API checks, reopened layout initialization and saved-revision settings. Check CTB/STB and media before writing; verify PDF page count, size and object streams. Drain cancellations and lock job snapshots. Add a guarded live smoke check with an opt-in missing-table fixture and cleanup after failures. Fixes #21.
 
 ### Added
 
