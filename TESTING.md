@@ -5,6 +5,115 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Plot publishing hardening: issue #21 (2026-10-12)
+
+Regressions cover document forwarding and API skew on both job routes, health
+version reporting, preflight before writes, open-close reads, cancellation drain,
+job snapshots, and PDF page count and paper-size checks. The live smoke script's
+style edit compiles offline. Civil 3D live checks were not run.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | 704 passed in 53 files. Earlier runs hit random-port `fetch failed: bad port`; the bridge fixture now retries only that port error. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| Plugin Release net8, net10, then net8 rebuilt with `--restore -p:UseSharedCompilation=false` | Each exit 0; 0 warnings and 0 errors. Final net10/net8 used cached packages with `--ignore-failed-sources -p:NuGetAudit=false` after NU1900 audit warnings. |
+| RunCodeHarness net8 with `-p:UseSharedCompilation=false` | Exit 0; PASS (230 references). |
+| RunCodeHarness net10 with `-p:UseSharedCompilation=false` | Exit 0; PASS (238 references); two file-symlink checks skipped for missing privilege. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+| `node --check scripts/live-plot-smoke.mjs` | Exit 0. |
+
+Default shared-compiler builds failed with CS2012. Disabling shared compilation fixed the output-file access error.
+
+#### Review fixes (2026-10-12)
+
+Offline regressions cover `/ObjStm` in hyperlinks, strings, comments and stream
+payloads. They still reject the wrong page count. Real object streams remain
+unverified. The harness executes the publish preflight method with managed
+database fixtures: unsaved A3 and missing CTB settings must not replace saved
+A4 settings. Vitest checks initialization flags and selects two usable tabs
+after a configured uninitialized tab. No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 706 tests passed in 53 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 2 NU1900 warnings and 0 errors. The NuGet audit service was unreachable. |
+| Same net8 build with `--ignore-failed-sources -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows --ignore-failed-sources -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| Net8 build repeated after net10, with `--restore --ignore-failed-sources -p:NuGetAudit=false` and the 2026 references above | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -- C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References C:\Users\jorge\PycharmProjects\c3d-plot-hardening\Civil3D-MCP-Plugin\bin\Release\net10.0-windows\Civil3DMcpPlugin.dll` | Exit 0; PASS (238 references), using the 2027 references and plugin. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. All installer roots were temporary fixtures. |
+| `node --check scripts/live-plot-smoke.mjs` | Exit 0. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-plot-hardening diff --check` | Exit 0. |
+
+Both default harness runs used the 2026 references. Each harness run skipped
+two file-symlink checks because the sandbox lacks the required privilege. Plugin rebuilds used
+cached NuGet packages. Everything remains uncommitted.
+
+#### Saved layout selection fix (2026-10-12)
+
+The harness runs the production request parsing and layout-selection code with
+managed host fixtures. New checks failed on the previous code: 6 expected
+failures, exit 1. The final 11 selection checks cover saved layout renames and
+deletions, new unsaved tabs, both initialization states, same-source sheets,
+named open documents, default saved-state refusal, never-saved sources and
+external-only sheets. The fixture also uses the production warning text.
+No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 706 tests passed in 53 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Ran before net10 and again after it. Both exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). Two NU1900 warnings: NuGet audit was unreachable. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). Two NU1900 warnings. Two file-symlink checks skipped for missing privilege. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:NuGetAudit=false -- C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References C:\Users\jorge\PycharmProjects\c3d-plot-hardening\Civil3D-MCP-Plugin\bin\Release\net10.0-windows\Civil3DMcpPlugin.dll` | Exit 0; PASS (238 references) with 2027 references and plugin. No warnings. Two file-symlink checks skipped for missing privilege. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Only temporary installer roots were used. |
+| `node --check scripts/live-plot-smoke.mjs` | Exit 0; no output. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-plot-hardening diff --check` | Exit 0; no whitespace errors. |
+
+Both diagnostic root folders, `.build-plugin-obj` and `.build-plugin-bin`, were
+removed. The `node_modules` junction was kept. All changes remain uncommitted.
+
+#### Saved missing-table smoke fixture (2026-10-12)
+
+The smoke check saves a separate side database with a missing CTB/STB. It
+publishes that closed DWG with default `requireSaved` and `keepDsd: true`.
+It requires the table and layout names in the refusal and no PDF or DSD.
+Vitest rejects the unsaved-changes guard, unrelated errors, completed publishes
+and either output artifact. The managed harness executes the production
+preflight and layout validator for saved missing CTB and STB sources, both
+closed and clean open drawings. It compiles the exact fixture snippet from
+the smoke script against Autodesk references. No Civil 3D live checks were run.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run tests/live_plot_smoke.test.ts --configLoader runner --cache=false` | Exit 0; 8 tests passed. |
+| `npx vitest run --configLoader runner --cache=false` | Both runs exit 0; 714 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 2 NU1900 warnings and 0 errors. NuGet audit was unreachable. |
+| Same net10 build with `--ignore-failed-sources -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. Used cached packages. |
+| Net8 rebuild after net10, with the 2026 references above and `--restore --ignore-failed-sources -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | First run exit 1: the managed fixture's device-list parameter had the wrong type. Fixed to `IReadOnlyList<string>`; rerun exit 0, PASS (230 references). Each run reported 2 NU1900 warnings. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). 2 NU1900 warnings. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:NuGetAudit=false -- C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References C:\Users\jorge\PycharmProjects\c3d-plot-hardening\Civil3D-MCP-Plugin\bin\Release\net10.0-windows\Civil3DMcpPlugin.dll` | Exit 0; PASS (238 references), with 2027 references and plugin. No warnings. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Only temporary installer roots were used. |
+| `node --check scripts/live-plot-smoke.mjs` | Exit 0; no output. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-plot-hardening diff --check` | Exit 0; no whitespace errors. |
+
+Each harness run skipped two file-symlink checks because the sandbox lacks
+the required privilege. The default harness runs used the 2026 references.
+The main clone and `node_modules` junction were kept unchanged. Nothing was
+staged, committed or installed into real AutoCAD folders.
+
 ### Approval logging: issue #29 (2026-10-12)
 
 `tests/approval_logging.test.ts` covers direct MCP, registry, nested `civil3d_orchestrate` / `civil3d_docs` and authenticated HTTP calls in token and client modes. Each expected refusal logs one WARN line with no stack frames; unexpected errors keep their stacks; client error text, `isError`, codes and request IDs are unchanged. The tests fail on the previous code.

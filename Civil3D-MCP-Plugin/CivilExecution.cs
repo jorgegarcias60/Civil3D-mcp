@@ -337,7 +337,8 @@ public static class CivilExecution
   // holding an open transaction across it is what makes the .NET-only paths
   // unsafe (see PlotCommands.cs). Callers open short, disposed read
   // transactions of their own before issuing commands.
-  public static async Task<T> ExecuteCommandSequenceAsync<T>(Func<Document, CancellationToken, Task<T>> action)
+  public static async Task<T> ExecuteCommandSequenceAsync<T>(Func<Document, CancellationToken, Task<T>> action,
+    bool drainOnCancellation = false)
   {
     return await ExecuteSerializedAsync(async cancellationToken =>
     {
@@ -350,6 +351,7 @@ public static class CivilExecution
 
       T? result = default;
       Exception? capturedException = null;
+      var actionCompleted = false;
       var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
 
       var hostTask = RunOnHostAsync(async _ =>
@@ -359,14 +361,32 @@ public static class CivilExecution
           cancellationToken.ThrowIfCancellationRequested();
           var doc = RequireExpectedDocument(expectedDrawingIdentity, "No commands were run.");
           result = await action(doc, cancellationToken);
+          actionCompleted = true;
         }
         catch (Exception ex)
         {
           capturedException = ex;
         }
-      }, needsCommand: true, needsQuietEditor: false, cancellationToken);
+      }, needsCommand: true, needsQuietEditor: false, cancellationToken,
+        drainOnCancellation: drainOnCancellation);
 
-      await AwaitHostContextAsync(hostTask, cancellationToken);
+      // A started foreground publish owns the host until the native writer
+      // has returned, even if its client requests cancellation meanwhile.
+      if (drainOnCancellation)
+      {
+        try { await hostTask; }
+        catch (OperationCanceledException) when (actionCompleted)
+        {
+          // Cancellation arrived after the native writer and verification
+          // completed. The accepted output remains a completed job with a warning.
+        }
+        catch (OperationCanceledException) when (capturedException != null)
+        {
+          // Preserve the host failure after draining, including PDF verification
+          // failures. The original exception is rethrown below.
+        }
+      }
+      else await AwaitHostContextAsync(hostTask, cancellationToken);
 
       if (capturedException != null)
       {

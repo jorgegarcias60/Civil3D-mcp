@@ -8,6 +8,7 @@ describe("plugin runtime domain", () => {
       connected: true,
       civil3dVersion: "24.3s",
       pluginVersion: "1.2.1.0",
+      plotApi: 2,
       drawingLoaded: true,
       operationInProgress: false,
       currentOperation: null,
@@ -34,6 +35,7 @@ describe("plugin runtime domain", () => {
     expect(response.fileLoggingHealthy).toBe(true);
     expect(response.logFilePath).toContain("plugin.log");
     expect(response.queueCapacity).toBe(64);
+    expect(response.plotApi).toBe(2);
     expect(response.jobs.capacity).toBe(256);
   });
 });

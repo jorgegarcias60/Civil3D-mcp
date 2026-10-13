@@ -26,5 +26,6 @@
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeResult.cs" Link="RunCodeResult.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeJson.cs" Link="RunCodeJson.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RpcAuth.cs" Link="RpcAuth.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\PdfOutputInspector.cs" Link="PdfOutputInspector.cs" />
   </ItemGroup>
 </Project>

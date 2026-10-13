@@ -24,6 +24,7 @@ public static class DrawingCommands
       ["civil3dVersion"] = App.GetSystemVariable("ACADVER")?.ToString(),
       ["pluginVersion"] = typeof(PluginEntry).Assembly.GetName().Version?.ToString(),
       ["runCodeApi"] = RunCodeCommands.ApiVersion,
+      ["plotApi"] = 2,
       ["drawingLoaded"] = doc != null,
       ["operationInProgress"] = status.OperationInProgress,
       ["currentOperation"] = status.CurrentOperation,

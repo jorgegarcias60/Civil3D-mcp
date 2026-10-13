@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Test missing CTB/STB refusal using a disposable saved DWG in the live plot smoke check. Require the table and layout names and no PDF or DSD output. Fixes #21
+
+- Select layouts and check their initialization from the saved DWG with `requireSaved: false`. Report that unsaved changes were not included. Fixes #21
+- Detect PDF object streams in object dictionaries so hyperlinks and stream payloads keep page verification enabled. Fixes #21
+- Use saved DWG settings for publish preflight and PDF verification with `requireSaved: false`. Fixes #21
+- Return layout initialization flags and use them to select usable live smoke layouts. Update the smoke check for saved-revision publishing. Fixes #21
+
+- Harden sheet-set publishing with drawing selection, all-sheet CTB/STB and PDF media preflight, strict page count and paper-size checks, drained cancellation, locked job snapshots and plot API skew checks. Add a guarded live smoke script. Fixes #21
+
 ### Added
 
 - Run-code API 5: `mode: "write"` with `document` can target another open drawing. The plugin briefly activates that drawing for the command, then attempts to switch back even when the script fails. Responses report `activated` and `switchedBack`; the server refuses these writes against older plugins before running them.

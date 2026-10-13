@@ -6,6 +6,8 @@
 // build. Prints SKIPPED (exit 0) when either is missing; exit 1 on a failure.
 using Civil3DMcpPlugin;
 
+try
+{
 var repoRoot = FindRepoRoot();
 var refsFolder = args.Length > 0
   ? args[0]
@@ -383,14 +385,38 @@ var again = Compile("return 1;");
 Expect(unique.Succeeded && again.Succeeded && unique.TypeName != again.TypeName, "each run gets its own class and assembly name");
 
 RuntimeChecks.Run((condition, name) => Expect(condition, name));
+PdfChecks.Run((condition, name) => Expect(condition, name));
+PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 DatabaseGuardChecks.Run((code, write) => Compile(code, write),
   (condition, name, result) => Expect(condition, name, result));
 var executionSource = File.ReadAllText(Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "CivilExecution.cs"));
 Expect(executionSource.Contains("return await ExecuteAsync((doc, civil, db, tr) => action(new(doc, civil, db, tr)), write: false, inCommand: writeMode);"),
   "untargeted runCode keeps ExecuteAsync(write: false, inCommand: writeMode)");
 Expect(Compile("return HasDrawing;").Succeeded, "HasDrawing is available to read scripts");
+var missingStyle = Compile("""
+  var dictionary = Open<DBDictionary>(Db.LayoutDictionaryId);
+  var layout = Open<Layout>(dictionary.GetAt((string)Args["layout"]!), forWrite: true);
+  PlotSettingsValidator.Current.SetCurrentStyleSheet(layout, (string)Args["style"]!);
+  return layout.CurrentStyleSheet;
+  """, write: true);
+Expect(missingStyle.Succeeded, "live plot smoke's scratch layout style edit and restore compile", missingStyle);
+var smokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-plot-smoke.mjs"));
+var fixtureCode = System.Text.RegularExpressions.Regex.Match(smokeSource,
+  @"const saveMissingTableFixture = `([\s\S]*?)`;");
+Expect(fixtureCode.Success, "live plot smoke declares its saved missing-table fixture code");
+if (fixtureCode.Success)
+{
+  var savedFixture = Compile(fixtureCode.Groups[1].Value, write: true);
+  Expect(savedFixture.Succeeded, "live plot smoke's side database edit, commit and SaveAs compile", savedFixture);
+}
 Console.WriteLine(failures == 0 ? $"PASS ({references.Count} references)" : $"{failures} FAILED");
 return failures == 0 ? 0 : 1;
+}
+catch (Exception error)
+{
+  Console.Error.WriteLine(error);
+  return 1;
+}
 
 static bool IsManagedAssembly(string path)
 {
