@@ -758,6 +758,9 @@ either as a `civil3d_job` and poll `civil3d_job action=status`. Results list
 every file written with its size, page count (when detectable), and
 per-layout status. Publishing refuses any selected layout that has never been
 initialized. Open its layout tab once and save the drawing before publishing.
+A layout is initialized when `GetViewports()` has entries or its paper-space
+block contains a viewport entity. Saved layouts remain initialized after a
+restart, even before their tabs are activated in the new session.
 
 `list_layouts` and `publish_sheet_set` accept `document`: an open drawing's full
 path or unique file name, or a saved `.dwg` path inside the import roots.

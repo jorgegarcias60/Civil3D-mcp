@@ -91,7 +91,7 @@ internal static class PublishPreflightChecks
           if (!source.Saved) warnings.Add("saved revision");
         }
         private static IEnumerable<Layout> ReadLayouts(Database database, Transaction transaction) => [new(database.Settings)];
-        private static bool IsInitialized(Layout layout) => true;
+        private static bool IsInitialized(Layout layout, Transaction transaction) => true;
         private static void RequireInitialized(LayoutSnapshot layout) { }
         private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
         __VALIDATE_METHOD__

@@ -101,7 +101,7 @@ public static class PlotCommands
         .Where(layout => includeModel || !layout.ModelType)
         .Select(layout =>
         {
-          var summary = ToLayoutSummary(layout, currentLayout);
+          var summary = ToLayoutSummary(layout, transaction, currentLayout);
           summary["ctbFound"] = !string.IsNullOrWhiteSpace(layout.CurrentStyleSheet)
             && styles.Contains(layout.CurrentStyleSheet, StringComparer.OrdinalIgnoreCase);
           summary["mediaAvailable"] = pdfMedia.Any(media =>
@@ -654,7 +654,7 @@ public static class PlotCommands
       string.Equals(item.LayoutName, sheet.LayoutName, StringComparison.OrdinalIgnoreCase));
     if (layout == null || layout.ModelType)
       throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", $"Paper-space layout '{sheet.LayoutName}' was not found in '{sourcePath}'.");
-    RequireInitialized(new LayoutSnapshot(layout.LayoutName, layout.TabOrder, false, IsInitialized(layout)));
+    RequireInitialized(new LayoutSnapshot(layout.LayoutName, layout.TabOrder, false, IsInitialized(layout, transaction)));
 
     var device = layout.PlotConfigurationName;
     if (string.IsNullOrWhiteSpace(device))
@@ -688,9 +688,9 @@ public static class PlotCommands
     }
   }
 
-  // A paper-space layout gets its overall paper-space viewport (and a page
-  // size) when it is first opened; until then it has no viewports.
-  private static bool IsInitialized(Layout layout)
+  // The cached viewport IDs can be empty after reopening a saved drawing.
+  // The paper-space record still contains its saved viewport entities.
+  private static bool IsInitialized(Layout layout, Transaction transaction)
   {
     if (layout.ModelType)
     {
@@ -699,14 +699,28 @@ public static class PlotCommands
 
     try
     {
-      return layout.GetViewports().Count > 0;
+      if (layout.GetViewports().Count > 0)
+        return true;
     }
     catch
     {
-      // An unreadable viewport collection cannot establish that PUBLISH will
-      // accept the sheet. Fail preflight rather than silently omit it.
-      return false;
+      // Continue with the saved paper-space record when the cache is unreadable.
     }
+
+    try
+    {
+      var paperSpace = (BlockTableRecord)transaction.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+      foreach (ObjectId entityId in paperSpace)
+      {
+        if (transaction.GetObject(entityId, OpenMode.ForRead) is Viewport)
+          return true;
+      }
+    }
+    catch
+    {
+      // Neither source established a viewport; keep the preflight fail-closed.
+    }
+    return false;
   }
 
   private sealed record MediaName(string Canonical, string Locale);
@@ -1256,7 +1270,7 @@ public static class PlotCommands
     using var documentLock = doc.LockDocument();
     using var transaction = doc.Database.TransactionManager.StartOpenCloseTransaction();
     var snapshots = ReadLayouts(doc.Database, transaction)
-      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout)))
+      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout, transaction)))
       .ToList();
     return snapshots;
   }
@@ -1268,17 +1282,17 @@ public static class PlotCommands
     database.CloseInput(true);
     using var transaction = database.TransactionManager.StartOpenCloseTransaction();
     return ReadLayouts(database, transaction)
-      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout)))
+      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout, transaction)))
       .ToList();
   }
 
-  private static Dictionary<string, object?> ToLayoutSummary(Layout layout, string? currentLayout)
+  private static Dictionary<string, object?> ToLayoutSummary(Layout layout, Transaction transaction, string? currentLayout)
   {
     var summary = ToPlotSettingsSummary(layout);
     summary["name"] = layout.LayoutName;
     summary["tabOrder"] = layout.TabOrder;
     summary["isModel"] = layout.ModelType;
-    summary["initialized"] = IsInitialized(layout);
+    summary["initialized"] = IsInitialized(layout, transaction);
     summary["isCurrent"] = string.Equals(layout.LayoutName, currentLayout, StringComparison.OrdinalIgnoreCase);
     summary["pageSetup"] = NullIfEmpty(layout.PlotSettingsName);
     summary["handle"] = layout.Handle.ToString();

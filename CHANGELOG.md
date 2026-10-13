@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Recognize saved paper-space viewport entities when the session viewport list is empty. Keep reopened layouts initialized for `list_layouts` and sheet-set publishing. Fixes #21.
+
 - Gate the live missing-table fixture behind `--ctb-fixture`. Copy an installed CTB/STB into the profile path, save the side DWG, then remove only the copy before publishing. Fixes #21.
 - Record live plot smoke failures and continue to cancellation, health and cleanup. Exit 1 after any failure. Fixes #21.
 

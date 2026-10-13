@@ -177,7 +177,7 @@ describe("civil3d_plot schemas", () => {
     ] } });
     expect(selected.map((layout: { name: string }) => layout.name)).toEqual(["C-101", "C-102"]);
     const summary = pluginSource("PlotCommands.cs").split("ToLayoutSummary(Layout layout")[1].split("return summary;")[0];
-    expect(summary).toContain('summary["initialized"] = IsInitialized(layout)');
+    expect(summary).toContain('summary["initialized"] = IsInitialized(layout, transaction)');
   });
 
   it("accepts a layout list or allLayouts with exactly one output target", () => {

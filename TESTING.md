@@ -5,6 +5,41 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Reopened layout initialization: issue #21 (2026-10-12)
+
+Jorge reported that four saved layouts in an open Civil 3D 2026 drawing each
+had three paper-space viewport entities but an empty `GetViewports()` cache.
+Only the layout activated in that session had a populated cache. The helper
+now checks the paper-space record through the caller's read transaction.
+
+The AutoCAD-free harness executes the production helper with managed fixtures.
+Nine checks cover saved viewports with an empty or unreadable cache, empty
+paper space, other entities, a warm cache, unreadable records, Model and all
+four caller routes. Replacing only the helper body with the old count-only
+rule produced three expected failures and exit 1. The source was restored in
+`finally`; the fixed helper passed all nine checks. No Civil 3D live checks
+were run in this session.
+
+| Check | Result |
+|---|---|
+| `npm.cmd run build` | Exit 0. |
+| `npx.cmd vitest run --configLoader runner --cache=false` | Exit 0; 725 tests passed in 54 files. |
+| `npm.cmd run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 2 NU1900 warnings and 0 errors. NuGet audit was unreachable. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows --ignore-failed-sources -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. Used cached packages. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 --ignore-failed-sources -p:NuGetAudit=false` | Net8 rebuilt after net10. Exit 0; 0 warnings and 0 errors. |
+| `dotnet build tests/RunCodeHarness/RunCodeHarness.csproj -f net10.0 --no-restore` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). Two file-symlink checks skipped for missing privilege. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -- C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References C:\Users\jorge\PycharmProjects\c3d-plot-hardening\Civil3D-MCP-Plugin\bin\Release\net10.0-windows\Civil3DMcpPlugin.dll` | Exit 0; PASS (238 references), using the 2027 references and plugin. Two file-symlink checks skipped for missing privilege. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 --no-restore -- --layout-initialization-only` | Fixed rule: exit 0; 9 passed. Temporary old-rule body: exit 1; 3 expected failures. Fixed source restored and rerun: exit 0; 9 passed. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Only temporary fake installer roots were used. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-plot-hardening -c core.excludesFile= diff --check` | Exit 0; no whitespace errors. |
+
+All changes remain uncommitted. No packages were installed. The main clone,
+`node_modules` junction and real AutoCAD folders were kept unchanged.
+
 ### Plot publishing hardening: issue #21 (2026-10-12)
 
 Regressions cover document forwarding and API skew on both job routes, health

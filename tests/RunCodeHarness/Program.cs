@@ -9,6 +9,16 @@ using Civil3DMcpPlugin;
 try
 {
 var repoRoot = FindRepoRoot();
+if (args.Contains("--layout-initialization-only"))
+{
+  var layoutFailures = 0;
+  LayoutInitializationChecks.Run(repoRoot, (condition, name) =>
+  {
+    Console.WriteLine($"{(condition ? "ok  " : "FAIL")} {name}");
+    if (!condition) layoutFailures++;
+  });
+  return layoutFailures == 0 ? 0 : 1;
+}
 var refsFolder = args.Length > 0
   ? args[0]
   : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Civil3D-mcp", "refs-2026");
@@ -387,6 +397,7 @@ Expect(unique.Succeeded && again.Succeeded && unique.TypeName != again.TypeName,
 RuntimeChecks.Run((condition, name) => Expect(condition, name));
 PdfChecks.Run((condition, name) => Expect(condition, name));
 PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
+LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 DatabaseGuardChecks.Run((code, write) => Compile(code, write),
   (condition, name, result) => Expect(condition, name, result));
 var executionSource = File.ReadAllText(Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "CivilExecution.cs"));
