@@ -400,8 +400,8 @@ var missingStyle = Compile("""
   return layout.CurrentStyleSheet;
   """, write: true);
 Expect(missingStyle.Succeeded, "live plot smoke's scratch layout style edit and restore compile", missingStyle);
-var smokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-plot-smoke.mjs"));
-var fixtureCode = System.Text.RegularExpressions.Regex.Match(smokeSource,
+var plotSmokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-plot-smoke.mjs"));
+var fixtureCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
   @"const saveMissingTableFixture = `([\s\S]*?)`;");
 Expect(fixtureCode.Success, "live plot smoke declares its saved missing-table fixture code");
 if (fixtureCode.Success)
