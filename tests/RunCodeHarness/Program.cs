@@ -401,6 +401,24 @@ var missingStyle = Compile("""
   """, write: true);
 Expect(missingStyle.Succeeded, "live plot smoke's scratch layout style edit and restore compile", missingStyle);
 var plotSmokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-plot-smoke.mjs"));
+var profileCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
+  @"const readPlotStyleProfile = `([\s\S]*?)`;");
+Expect(profileCode.Success, "live plot smoke declares its profile path query");
+if (profileCode.Success)
+{
+  var profileQuery = Compile(profileCode.Groups[1].Value);
+  Expect(profileQuery.Succeeded, "live plot smoke's profile path and CTB/STB mode query compile", profileQuery);
+}
+var scratchCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
+  @"const setStyle = \[([\s\S]*?)\]\.join");
+Expect(scratchCode.Success, "live plot smoke declares its reversible scratch edit");
+if (scratchCode.Success)
+{
+  var lines = System.Text.RegularExpressions.Regex.Matches(scratchCode.Groups[1].Value, "'([^']*)'")
+    .Select(match => match.Groups[1].Value);
+  var scratchEdit = Compile(string.Join("\n", lines), write: true);
+  Expect(scratchEdit.Succeeded, "live plot smoke's installed style and PlotPlotStyles edit compile", scratchEdit);
+}
 var fixtureCode = System.Text.RegularExpressions.Regex.Match(plotSmokeSource,
   @"const saveMissingTableFixture = `([\s\S]*?)`;");
 Expect(fixtureCode.Success, "live plot smoke declares its saved missing-table fixture code");

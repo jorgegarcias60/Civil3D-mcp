@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Gate the live missing-table fixture behind `--ctb-fixture`. Copy an installed CTB/STB into the profile path, save the side DWG, then remove only the copy before publishing. Fixes #21.
+- Record live plot smoke failures and continue to cancellation, health and cleanup. Exit 1 after any failure. Fixes #21.
+
 - Test missing CTB/STB refusal using a disposable saved DWG in the live plot smoke check. Require the table and layout names and no PDF or DSD output. Fixes #21
 
 - Select layouts and check their initialization from the saved DWG with `requireSaved: false`. Report that unsaved changes were not included. Fixes #21

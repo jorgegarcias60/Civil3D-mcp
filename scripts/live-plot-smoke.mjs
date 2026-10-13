@@ -4,7 +4,8 @@
 //   node scripts/live-plot-smoke.mjs --expect-drawing <scratch-name> --out <export-folder>
 // --out must be inside both import and export roots for the disposable DWG.
 // No open drawing is saved; only the disposable side database is saved.
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+// --ctb-fixture temporarily copies a table into the profile's plot style folder.
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -13,7 +14,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { drainServerStderr } from "./server-stderr.mjs";
 
 const { values: options } = parseArgs({
-  options: { "expect-drawing": { type: "string" }, out: { type: "string" } },
+  options: { "expect-drawing": { type: "string" }, out: { type: "string" }, "ctb-fixture": { type: "boolean", default: false } },
   strict: true,
 });
 if (!options["expect-drawing"]?.trim() || !options.out || !isAbsolute(options.out)
@@ -68,11 +69,37 @@ async function run(code, args = {}, mode = "read") {
   return response.result;
 }
 function check(name, condition, detail) {
-  if (!condition) throw new Error(`${name}: ${JSON.stringify(detail)}`);
+  if (!condition) {
+    const error = new Error(`${name}: ${JSON.stringify(detail)}`);
+    fail(name, error);
+    error.recorded = true;
+    throw error;
+  }
   results.push({ name, passed: true });
   console.error(`PASS ${name}`);
 }
+function fail(name, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  results.push({ name, passed: false, error: message });
+  console.error(`FAIL ${name}: ${message}`);
+  process.exitCode = 1;
+}
+async function attempt(name, action) {
+  try { return await action(); }
+  catch (error) {
+    printServerStderr();
+    if (!error?.recorded) fail(name, error);
+    return undefined;
+  }
+}
+function skip(name, reason) {
+  results.push({ name, skipped: true, reason });
+  console.error(`SKIP ${name}: ${reason}`);
+}
 async function startPublish(outputPath, layoutNames, extra = {}) {
+  if ([...jobs.values()].some((job) => job.state === "running")) {
+    throw new Error("A previous publish is still running; wait for cleanup before another native publish.");
+  }
   const parameters = { action: "publish_sheet_set", document, layoutNames, outputPath, asJob: true, ...extra };
   const handle = result(await gated("civil3d_plot", "publish_sheet_set", parameters));
   if (!handle.jobId) throw new Error(`Missing publish job: ${JSON.stringify(handle)}`);
@@ -126,14 +153,18 @@ function pdfPages(path) {
   walk(root);
   return ordered;
 }
-function verifyPdf(path, expectedSheets) {
+async function verifyPdf(path, expectedSheets) {
   const pages = pdfPages(path);
-  check("published PDF has exactly two pages", pages.length === 2 && expectedSheets.length === 2, { pages: pages.length });
-  pages.forEach((box, index) => {
-    const actual = [Math.abs(box[2] - box[0]), Math.abs(box[3] - box[1])].sort((a, b) => a - b);
-    const expected = expectedSheets[index].paperSizeMm.map((mm) => mm * 72 / 25.4).sort((a, b) => a - b);
-    check(`page ${index + 1} matches the sheet paper size within 1 pt`, actual.every((pt, axis) => Number.isFinite(pt) && Math.abs(pt - expected[axis]) <= 1), { actual, expected });
-  });
+  await attempt("published PDF page count", () =>
+    check("published PDF has exactly two pages", pages.length === 2 && expectedSheets.length === 2, { pages: pages.length }));
+  for (const [index, sheet] of expectedSheets.entries()) {
+    await attempt(`page ${index + 1} paper size`, () => {
+      const box = pages[index] ?? [];
+      const actual = [Math.abs(box[2] - box[0]), Math.abs(box[3] - box[1])].sort((a, b) => a - b);
+      const expected = sheet.paperSizeMm.map((mm) => mm * 72 / 25.4).sort((a, b) => a - b);
+      check(`page ${index + 1} matches the sheet paper size within 1 pt`, actual.every((pt, axis) => Number.isFinite(pt) && Math.abs(pt - expected[axis]) <= 1), { actual, expected });
+    });
+  }
 }
 
 // CurrentStyleSheet is get-only; the validator is the documented managed setter.
@@ -141,6 +172,7 @@ const setStyle = [
   'var dictionary = Open<DBDictionary>(Db.LayoutDictionaryId);',
   'var layout = Open<Layout>(dictionary.GetAt((string)Args["layout"]!), forWrite: true);',
   'PlotSettingsValidator.Current.SetCurrentStyleSheet(layout, (string)Args["style"]!);',
+  'layout.PlotPlotStyles = (bool)Args["plotStyles"]!;',
   'return layout.CurrentStyleSheet;',
 ].join("\n");
 
@@ -153,6 +185,7 @@ using (var transaction = database.TransactionManager.StartTransaction())
 {
   var dictionary = (DBDictionary)transaction.GetObject(database.LayoutDictionaryId, OpenMode.ForRead);
   var layout = (Layout)transaction.GetObject(dictionary.GetAt((string)Args["layout"]!), OpenMode.ForWrite);
+  PlotSettingsValidator.Current.RefreshLists(layout);
   PlotSettingsValidator.Current.SetCurrentStyleSheet(layout, (string)Args["style"]!);
   transaction.Commit();
 }
@@ -160,9 +193,48 @@ database.SaveAs((string)Args["output"]!, DwgVersion.Current);
 return (string)Args["output"]!;
 `;
 
-async function checkMissingTableFixture(source, layout, missingTable) {
-  const savedPath = await run(saveMissingTableFixture,
-    { source, layout, style: missingTable, output: missingDrawing }, "write");
+// Read the active profile, rather than guessing a version-specific folder.
+const readPlotStyleProfile = `
+dynamic preferences = Application.Preferences;
+return new { path = (string)preferences.Files.PrinterStyleSheetPath, colorDependent = Db.PlotStyleMode };
+`;
+
+async function createMissingTableFixture(source, layout) {
+  const profile = await run(readPlotStyleProfile);
+  const extension = profile.colorDependent ? ".ctb" : ".stb";
+  const folders = profile.path.split(";").map((folder) => folder.trim()).filter(Boolean);
+  let existingTable;
+  for (const folder of folders) {
+    if (!isAbsolute(folder) || !existsSync(folder) || !statSync(folder).isDirectory()) continue;
+    const table = readdirSync(folder).find((name) => name.toLowerCase().endsWith(extension)
+      && !name.startsWith("_c3dmcp-smoke-") && statSync(join(folder, name)).isFile());
+    if (table) { existingTable = join(folder, table); break; }
+  }
+  if (!existingTable) throw new Error(`No existing ${extension} table in profile PrinterStyleSheetPath: ${profile.path}`);
+  const missingTable = `_c3dmcp-smoke-${randomUUID()}${extension}`;
+  const copiedTable = join(resolve(existingTable, ".."), missingTable);
+  console.error(`Temporary plot style table: ${copiedTable}`);
+  let owned = false;
+  let savedPath;
+  try {
+    // Exclusive creation means a collision can never overwrite or remove a table.
+    const descriptor = openSync(copiedTable, "wx");
+    owned = true;
+    try { writeFileSync(descriptor, readFileSync(existingTable)); }
+    finally { closeSync(descriptor); }
+    savedPath = await run(saveMissingTableFixture,
+      { source, layout, style: missingTable, output: missingDrawing }, "write");
+  } finally {
+    if (owned) {
+      try { rmSync(copiedTable); }
+      finally { check("temporary plot style copy is gone", !existsSync(copiedTable), copiedTable); }
+    }
+  }
+  return { savedPath, missingTable };
+}
+
+async function checkMissingTableFixture(source, layout) {
+  const { savedPath, missingTable } = await createMissingTableFixture(source, layout);
   check("disposable missing-table DWG is saved", savedPath === missingDrawing && existsSync(missingDrawing), savedPath);
   const discovery = result(await call("civil3d_plot", { action: "list_layouts", document: missingDrawing }));
   const savedLayout = discovery.layouts.find((item) => item.name === layout);
@@ -179,59 +251,7 @@ async function checkMissingTableFixture(source, layout, missingTable) {
     && !readdirSync(outputFolder).some((name) => name.includes(`${prefix}-missing-table`)), refused);
 }
 
-try {
-  await client.connect(transport);
-  const health = result(await call("civil3d_health", {}, 30_000));
-  check("loaded plugin supports plot API 2", health.plotApi >= 2, { plotApi: health.plotApi });
-  const info = await run('return new { name = Doc.Name, filename = Db.Filename, dbmod = Convert.ToInt32(Application.GetSystemVariable("DBMOD")) };');
-  if (typeof info.name !== "string" || !info.name.toLowerCase().includes(options["expect-drawing"].trim().toLowerCase())) {
-    throw new Error(`Active drawing '${info.name}' does not match --expect-drawing; stopped before writes.`);
-  }
-  if (!isAbsolute(info.filename ?? "") || !existsSync(info.filename) || info.dbmod !== 0) throw new Error("Save the scratch drawing with its finished page setups before this check.");
-  document = info.name;
-  const discovery = result(await call("civil3d_plot", { action: "list_layouts", document }));
-  check("targeted list_layouts returns per-layout preflight flags", discovery.layouts.length >= 2
-    && discovery.layouts.every((layout) => typeof layout.initialized === "boolean"
-      && typeof layout.ctbFound === "boolean" && typeof layout.mediaAvailable === "boolean"), discovery);
-  const selected = discovery.layouts.filter((layout) => !layout.isModel && layout.initialized === true
-    && layout.ctbFound && layout.mediaAvailable && layout.plotStyleTable && layout.paperWidth > 0 && layout.paperHeight > 0).slice(0, 2);
-  if (selected.length !== 2) throw new Error("Scratch drawing needs two initialized paper-space layouts with installed CTB/STB and PDF media.");
-  const layoutNames = selected.map((layout) => layout.name);
-
-  const published = await terminal(await startPublish(paths.set, layoutNames));
-  check("two-sheet publish job completes and verifies", published.state === "completed" && published.result?.verified === true
-    && published.result?.sheetCount === 2 && published.result?.pageCount === 2, published);
-  check("publish echoes resolved settings for both sheets", published.result.sheets.every((sheet, index) => sheet.layoutName === layoutNames[index]
-    && sheet.drawingPath.toLowerCase() === info.filename.toLowerCase() && typeof sheet.device === "string"
-    && typeof sheet.media === "string" && typeof sheet.plotStyleTable === "string" && Object.hasOwn(sheet, "pageSetup")
-    && sheet.paperSizeMm?.length === 2), published.result.sheets);
-  verifyPdf(paths.set, selected.map((layout) => ({ paperSizeMm: [layout.paperWidth, layout.paperHeight] })));
-
-  const missingTable = `${prefix}-missing.${selected[0].plotStyleTable.toLowerCase().endsWith(".stb") ? "stb" : "ctb"}`;
-  await checkMissingTableFixture(info.filename, selected[0].name, missingTable);
-  styleRestore = { layout: selected[0].name, style: selected[0].plotStyleTable };
-  try {
-    const assigned = await run(setStyle, { layout: styleRestore.layout, style: missingTable }, "write");
-    check("scratch layout names the missing plot style table", assigned === missingTable, { assigned, missingTable });
-    const missing = result(await call("civil3d_plot", { action: "list_layouts", document }));
-    check("list_layouts detects missing plot style", missing.layouts.find((layout) => layout.name === styleRestore.layout)?.ctbFound === false);
-    const refused = await terminal(await startPublish(paths.unsaved, layoutNames));
-    const refusal = JSON.stringify(refused.result);
-    check("unsaved changes refuse the job before writing anything", refused.state === "failed"
-      && /unsaved changes/i.test(refusal)
-      && !readdirSync(outputFolder).some((name) => name.includes(`${prefix}-unsaved`)), refused);
-    const saved = await terminal(await startPublish(paths["saved-revision"], layoutNames, { requireSaved: false }));
-    check("saved-revision publish ignores the unsaved missing CTB/STB", saved.state === "completed"
-      && saved.result?.verified === true
-      && saved.result.sheets[0].plotStyleTable === styleRestore.style
-      && saved.result.warnings.some((warning) => /unsaved changes.*saved revision/i.test(warning)), saved);
-    verifyPdf(paths["saved-revision"], selected.map((layout) => ({ paperSizeMm: [layout.paperWidth, layout.paperHeight] })));
-  } finally {
-    const restored = await run(setStyle, styleRestore, "write");
-    if (restored !== styleRestore.style) throw new Error("Scratch plot style did not restore");
-    styleRestore = undefined;
-  }
-
+async function checkCancellation(layoutNames) {
   const cancelId = await startPublish(paths.cancel, layoutNames, { requireSaved: false });
   // Observe native setup before cancellation, instead of cancelling the queued delay.
   const startDeadline = Date.now() + 30_000;
@@ -246,34 +266,134 @@ try {
   const finished = await terminal(cancelId);
   check("cancelled native publish drains before reporting terminal status", finished.state === "cancelled"
     || (finished.state === "completed" && (finished.warnings ?? []).some((warning) => /cancellation.*completed/i.test(warning))), finished);
-  const after = result(await call("civil3d_health", {}, 30_000));
-  check("Civil 3D still answers health after cancellation", after.connected === true, after);
+}
+
+async function checkUnsavedRevision(info, selected) {
+  const layoutNames = selected.map((layout) => layout.name);
+  const plotStyles = await run([
+    'var dictionary = Open<DBDictionary>(Db.LayoutDictionaryId);',
+    'var layout = Open<Layout>(dictionary.GetAt((string)Args["layout"]!));',
+    'return layout.PlotPlotStyles;',
+  ].join("\n"), { layout: selected[0].name });
+  styleRestore = { layout: selected[0].name, style: selected[0].plotStyleTable, plotStyles };
+  try {
+    // Use an installed style and a reversible flag change; never assign a missing table.
+    await run(setStyle, { ...styleRestore, plotStyles: !plotStyles }, "write");
+    await attempt("unsaved changes refusal", async () => {
+      const refused = await terminal(await startPublish(paths.unsaved, layoutNames));
+      const refusal = JSON.stringify(refused.result);
+      check("unsaved changes refuse the job before writing anything", refused.state === "failed"
+        && /unsaved changes/i.test(refusal)
+        && !readdirSync(outputFolder).some((name) => name.includes(`${prefix}-unsaved`)), refused);
+    });
+    await attempt("saved-revision publish", async () => {
+      const saved = await terminal(await startPublish(paths["saved-revision"], layoutNames, { requireSaved: false }));
+      check("saved-revision publish uses the saved plot style", saved.state === "completed"
+        && saved.result?.verified === true
+        && saved.result.sheets?.[0]?.plotStyleTable === styleRestore.style
+        && saved.result.warnings?.some((warning) => /unsaved changes.*saved revision/i.test(warning)), saved);
+    });
+    await attempt("saved-revision PDF verification", () => verifyPdf(paths["saved-revision"],
+      selected.map((layout) => ({ paperSizeMm: [layout.paperWidth, layout.paperHeight] }))));
+  } finally {
+    await attempt("restore scratch layout", async () => {
+      const restored = await run(setStyle, styleRestore, "write");
+      check("scratch layout settings are restored", restored === styleRestore.style, restored);
+      styleRestore = undefined;
+    });
+  }
+}
+
+if (!options["ctb-fixture"]) {
+  skip("missing CTB/STB fixture", "requires --ctb-fixture to temporarily copy a table into the profile plot style folder; no files outside --out are touched");
+}
+try {
+  await client.connect(transport);
+  await attempt("plot API health", async () => {
+    const health = result(await call("civil3d_health", {}, 30_000));
+    check("loaded plugin supports plot API 2", health.plotApi >= 2, { plotApi: health.plotApi });
+  });
+  const info = await attempt("scratch drawing safety guard", async () => {
+    const info = await run('return new { name = Doc.Name, filename = Db.Filename, dbmod = Convert.ToInt32(Application.GetSystemVariable("DBMOD")) };');
+    if (typeof info.name !== "string" || !info.name.toLowerCase().includes(options["expect-drawing"].trim().toLowerCase())) {
+      throw new Error(`Active drawing '${info.name}' does not match --expect-drawing; stopped before writes.`);
+    }
+    if (!isAbsolute(info.filename ?? "") || !existsSync(info.filename) || info.dbmod !== 0) throw new Error("Save the scratch drawing with its finished page setups before this check.");
+    document = info.name;
+    return info;
+  });
+  // A failed safety guard prevents drawing writes, but health and cleanup still run.
+  if (info) {
+    const selected = await attempt("select scratch layouts", async () => {
+      const discovery = result(await call("civil3d_plot", { action: "list_layouts", document }));
+      await attempt("layout preflight flags", () => check("targeted list_layouts returns per-layout preflight flags", discovery.layouts.length >= 2
+        && discovery.layouts.every((layout) => typeof layout.initialized === "boolean"
+          && typeof layout.ctbFound === "boolean" && typeof layout.mediaAvailable === "boolean"), discovery));
+      const selected = discovery.layouts.filter((layout) => !layout.isModel && layout.initialized === true
+        && layout.ctbFound && layout.mediaAvailable && layout.plotStyleTable && layout.paperWidth > 0 && layout.paperHeight > 0).slice(0, 2);
+      if (selected.length !== 2) throw new Error("Scratch drawing needs two initialized paper-space layouts with installed CTB/STB and PDF media.");
+      return selected;
+    });
+    if (selected) {
+      const layoutNames = selected.map((layout) => layout.name);
+      const published = await attempt("two-sheet publish", async () => {
+        const published = await terminal(await startPublish(paths.set, layoutNames));
+        // Return the snapshot even on assertion failure so independent checks can inspect it.
+        await attempt("publish result", () => check("two-sheet publish job completes and verifies", published.state === "completed" && published.result?.verified === true
+          && published.result?.sheetCount === 2 && published.result?.pageCount === 2, published));
+        return published;
+      });
+      await attempt("resolved publish settings", () => check("publish echoes resolved settings for both sheets", published?.result?.sheets?.length === 2
+        && published.result.sheets.every((sheet, index) => sheet.layoutName === layoutNames[index]
+          && sheet.drawingPath.toLowerCase() === info.filename.toLowerCase() && typeof sheet.device === "string"
+          && typeof sheet.media === "string" && typeof sheet.plotStyleTable === "string" && Object.hasOwn(sheet, "pageSetup")
+          && sheet.paperSizeMm?.length === 2), published?.result));
+      await attempt("published PDF verification", () => verifyPdf(paths.set,
+        selected.map((layout) => ({ paperSizeMm: [layout.paperWidth, layout.paperHeight] }))));
+      if (options["ctb-fixture"]) {
+        await attempt("saved missing-table fixture", () => checkMissingTableFixture(info.filename, selected[0].name));
+      }
+      await attempt("unsaved and saved-revision checks", () => checkUnsavedRevision(info, selected));
+      await attempt("in-flight cancellation", () => checkCancellation(layoutNames));
+    }
+  }
 } catch (error) {
   printServerStderr();
-  console.error(`Live plot smoke failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+  fail("live plot smoke setup", error);
 } finally {
+  await attempt("health after cancellation", async () => {
+    const after = result(await call("civil3d_health", {}, 30_000));
+    check("Civil 3D still answers health after cancellation", after.connected === true, after);
+  });
   // Never delete outputs while a native publisher may still be writing them.
   for (const [jobId, snapshot] of jobs) {
     if (snapshot.state === "running") {
       try {
         result(await call("civil3d_job", { action: "cancel", jobId }, 30_000));
         await terminal(jobId);
-      } catch (error) { cleanupFailed = true; console.error(`Job cleanup failed: ${error.message}`); }
+      } catch (error) { cleanupFailed = true; fail(`job cleanup ${jobId}`, error); }
     }
   }
   if (styleRestore) {
-    try { await run(setStyle, styleRestore, "write"); }
-    catch (error) { cleanupFailed = true; console.error(`Restore scratch layout '${styleRestore.layout}' to '${styleRestore.style}': ${error.message}`); }
+    try {
+      const restored = await run(setStyle, styleRestore, "write");
+      check("scratch layout settings are restored during cleanup", restored === styleRestore.style, restored);
+      styleRestore = undefined;
+    }
+    catch (error) { cleanupFailed = true; if (!error?.recorded) fail("restore scratch layout during cleanup", error); }
   }
   if (![...jobs.values()].some((job) => job.state === "running")) {
     for (const path of createdPaths) {
       try { if (existsSync(path)) rmSync(path); }
-      catch (error) { cleanupFailed = true; console.error(`Could not remove '${path}': ${error.message}`); }
+      catch (error) { cleanupFailed = true; fail(`remove '${path}'`, error); }
     }
-  } else { cleanupFailed = true; console.error(`Native work remains active; preserved smoke files with prefix '${prefix}'.`); }
+    await attempt("output cleanup", () => check("smoke output files are gone", !createdPaths.some(existsSync), createdPaths.filter(existsSync)));
+  } else { cleanupFailed = true; fail("output cleanup", new Error(`Native work remains active; preserved smoke files with prefix '${prefix}'.`)); }
   await Promise.race([client.close().catch(() => undefined), delay(5000)]);
 }
 if (cleanupFailed) process.exitCode = 1;
-console.log(JSON.stringify({ status: process.exitCode ? "failed" : "passed", passed: results.length, cleanupFailed, results }, null, 2));
+console.log(JSON.stringify({ status: process.exitCode ? "failed" : "passed",
+  passed: results.filter((item) => item.passed === true).length,
+  failed: results.filter((item) => item.passed === false).length,
+  skipped: results.filter((item) => item.skipped).length, cleanupFailed, results }, null, 2));
 process.exit(process.exitCode ?? 0);

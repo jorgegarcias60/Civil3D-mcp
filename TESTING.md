@@ -114,6 +114,45 @@ the required privilege. The default harness runs used the 2026 references.
 The main clone and `node_modules` junction were kept unchanged. Nothing was
 staged, committed or installed into real AutoCAD folders.
 
+#### Opt-in missing-table fixture and failure continuation (2026-10-12)
+
+Jorge reported a Civil 3D 2026 live run with seven checks passed. Fixture
+creation then failed with `eInvalidInput` because the validator rejected a
+nonexistent table. Cancellation and health checks did not run.
+
+The fixture now requires `--ctb-fixture`. It copies an installed CTB/STB into
+the profile's printer style sheet path with exclusive creation. It refreshes
+the validator lists, assigns the copy in the disposable side DWG and saves it.
+The copy is deleted in `finally` and checked before publishing. The default
+run reports one SKIP and does not access the profile table folder.
+
+Vitest covers CTB/STB selection, save and deletion failures, collisions,
+existing-table preservation, exact refusal text and absent PDF/DSD output.
+It executes the main runner with mocked tools to verify that fixture failure
+still reaches cancellation, health, cleanup and close. The unsaved check uses
+an installed style and a reversible `PlotPlotStyles` change. The harness
+compiles the exact profile query, scratch edit and side-DWG fixture snippets.
+No new Civil 3D live checks were run. Plugin behavior was not changed.
+
+| Check | Result |
+|---|---|
+| `node --check scripts/live-plot-smoke.mjs` | Exit 0; no output. |
+| `npm.cmd run build` | Exit 0. |
+| `npx.cmd vitest run tests/live_plot_smoke.test.ts --configLoader runner --cache=false` | Final run exit 0; 19 tests passed. |
+| `npx.cmd vitest run --configLoader runner --cache=false` | Exit 0; 725 tests passed in 54 files. |
+| `npm.cmd run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Ran before net10 and again after it. Both exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Only temporary installer roots were used. |
+
+Each harness run skipped two file-symlink checks for missing privilege. Both
+default harness runs used the 2026 references. The `.cmd` wrappers avoid the
+PowerShell execution-policy restriction. No packages were installed. The main
+clone and `node_modules` junction were kept unchanged. Nothing was staged,
+committed, pushed or installed into real AutoCAD folders.
+
 ### Approval logging: issue #29 (2026-10-12)
 
 `tests/approval_logging.test.ts` covers direct MCP, registry, nested `civil3d_orchestrate` / `civil3d_docs` and authenticated HTTP calls in token and client modes. Each expected refusal logs one WARN line with no stack frames; unexpected errors keep their stacks; client error text, `isError`, codes and request IDs are unchanged. The tests fail on the previous code.

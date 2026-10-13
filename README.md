@@ -804,9 +804,17 @@ Live check on a saved scratch drawing with two configured layouts:
 `node scripts/live-plot-smoke.mjs --expect-drawing Scratch --out C:\path\inside\export-roots`.
 The output folder must be inside both import and export roots. It selects two
 initialized layouts and checks publishing, unsaved changes, saved-revision plot
-styles and cancellation. It saves a disposable DWG with a missing CTB/STB and
-checks refusal before any PDF or DSD is written. It restores the scratch layout's
-plot style and removes its fixture DWG, PDFs and DSDs. Disable the PC3's viewer option first.
+styles and cancellation. Add `--ctb-fixture` to test missing CTB/STB refusal.
+This flag copies an existing table into the active profile's printer style sheet
+path under a unique name. It prints the full path, refreshes the validator lists,
+assigns the copy in a disposable side DWG and saves that DWG. It deletes the copy
+in a `finally` block and checks that it is gone before publishing. Refusal must
+name the table and layout, with no PDF or DSD written. Existing tables are kept.
+Without the flag, this fixture reports one SKIP and touches no files outside `--out`.
+Each failed check reports FAIL and the script continues to cancellation, health
+and cleanup. Any failure makes the final exit code 1. It restores the scratch
+layout's settings and removes its fixture DWG, PDFs and DSDs after jobs drain.
+Disable the PC3's viewer option first.
 
 </details>
 
