@@ -21,6 +21,8 @@
     <Compile Include="..\..\Civil3D-MCP-Plugin\ScriptCompiler.cs" Link="ScriptCompiler.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeOutput.cs" Link="RunCodeOutput.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeHelpers.cs" Link="RunCodeHelpers.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeChanges.cs" Link="RunCodeChanges.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeArguments.cs" Link="RunCodeArguments.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\HostDispatchState.cs" Link="HostDispatchState.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeLog.cs" Link="RunCodeLog.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeResult.cs" Link="RunCodeResult.cs" />

@@ -6,6 +6,10 @@
 
 ### Added
 
+- Run-code API 6 adds `mode: "preview"`: aborts the transaction, reports final counts and bounded existing handles using the starting Handseed, and returns script/args hashes. Guards refuse changes outside the run's drawing or transaction, Session mutations and file writes while allowing read-only operations and detached copies. Rollback uncertainty produces a warning. Preview needs separate approval from a later write, leaves an empty undo step and clears redo. Opt-in smoke checks cover rollback, counts and document targeting. Fixes #20.
+
+- Run-code API 6 adds `TextBox`, `XClip`, scaled `AttachXref` and in-place `SetViewport`. Text bounds support attributes and nested transforms. XClip validates small polygons at large coordinates; its smoke check accepts AutoCAD's no-back-plane sentinel. Unitless xrefs require explicit scale; feet and US survey feet use scale 1. Write helpers use nested transactions. SetViewport activates dormant layouts, refuses the overall viewport, restores the previous layout and reports `activatedLayout`. Opt-in smoke checks cover geometry, scaling, undo and viewport persistence. `ImportBlock` remains deferred. Fixes #22.
+
 - Run-code API 5: `mode: "write"` with `document` can target another open drawing. The plugin briefly activates that drawing for the command, then attempts to switch back even when the script fails. Responses report `activated` and `switchedBack`; the server refuses these writes against older plugins before running them.
 
 - Run-code API 4: optional `document` selects another open drawing for read scripts by full path or unique file name, without changing the active drawing. With no drawing open, read scripts can use `OpenSide(path)`; `HasDrawing` reports whether drawing-backed accessors are available. API 4 plugins limit writes to the active drawing. The server checks API 4 before sending `document` on reads.

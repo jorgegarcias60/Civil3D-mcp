@@ -2,8 +2,9 @@
 // Build the plugin first, then run on the framework of that Civil 3D release:
 //   2026 (net8):  dotnet run --project tests/RunCodeHarness -f net8.0 -- [<refs>] [<Civil3DMcpPlugin.dll>]
 //   2027 (net10): dotnet run --project tests/RunCodeHarness -f net10.0 -- <refs> <net10 Civil3DMcpPlugin.dll>
-// Defaults: %LOCALAPPDATA%\Civil3D-mcp\refs-2026 and the net8.0-windows Release
-// build. Prints SKIPPED (exit 0) when either is missing; exit 1 on a failure.
+// Defaults follow the selected framework: 2026 refs/net8 plugin for net8,
+// and the sibling main clone's C_References/net10 plugin for net10.
+// Prints SKIPPED (exit 0) when either is missing; exit 1 on a failure.
 using Civil3DMcpPlugin;
 
 try
@@ -21,10 +22,12 @@ if (args.Contains("--layout-initialization-only"))
 }
 var refsFolder = args.Length > 0
   ? args[0]
-  : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Civil3D-mcp", "refs-2026");
+  : Environment.Version.Major >= 10
+    ? Path.GetFullPath(Path.Combine(repoRoot, "..", "Civil3D-mcp", "C_References"))
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Civil3D-mcp", "refs-2026");
 var pluginDll = args.Length > 1
   ? args[1]
-  : Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "bin", "Release", "net8.0-windows", "Civil3DMcpPlugin.dll");
+  : Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "bin", "Release", Environment.Version.Major >= 10 ? "net10.0-windows" : "net8.0-windows", "Civil3DMcpPlugin.dll");
 
 if (!File.Exists(Path.Combine(refsFolder, "AcDbMgd.dll")) || !File.Exists(pluginDll))
 {
@@ -47,8 +50,8 @@ var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Sp
 var failures = 0;
 var run = 0;
 
-ScriptCompileResult Compile(string code, bool write = false) =>
-  ScriptCompiler.Compile(code, $"HarnessRun_{++run}", references, write);
+ScriptCompileResult Compile(string code, bool write = false, bool preview = false) =>
+  ScriptCompiler.Compile(code, $"HarnessRun_{++run}", references, write || preview, preview);
 
 void Expect(bool condition, string name, ScriptCompileResult? result = null)
 {
@@ -358,6 +361,101 @@ var helpers = Compile("""
 Expect(helpers.Succeeded, "read helpers compile together", helpers);
 var writeHelpers = Compile("var layer = EnsureLayer(\"MCP\", 7, \"Continuous\");\nTag(Open<Entity>(ById(\"2A\"), forWrite: true), \"APP\", \"v\");\nreturn layer;", write: true);
 Expect(writeHelpers.Succeeded, "write helpers compile", writeHelpers);
+var drawingRead = Compile("return TextBox(Open<DBText>(ObjectId.Null), Matrix3d.Identity);");
+Expect(drawingRead.Succeeded, "TextBox supports optional WCS transform in read mode", drawingRead);
+Expect(Compile("return TextBox(Open<DBText>(ObjectId.Null));", write: true).Succeeded,
+  "TextBox is also available in write mode");
+var drawingWrite = Compile("""
+  var block = Open<BlockReference>(ObjectId.Null);
+  var clip = XClip(block, new[] { new Point3d(0,0,0), new Point3d(1,0,0), new Point3d(0,1,0) });
+  var xref = AttachXref("C:/source.dwg", Point3d.Origin, scale: 1, layer: "XREF", relativePath: false, blockName: "SOURCE");
+  ObjectId viewport = SetViewport("Sheet", ObjectId.Null, paperCenter: Point3d.Origin, paperWidth: 10,
+    paperHeight: 5, modelCenter: Point3d.Origin, customScale: 0.1, twistAngle: 0, locked: true);
+  return new { clip, xref.DefinitionId, xref.ReferenceId, xref.Scale,
+    xref.SourceUnits, xref.HostUnits, xref.PathName, viewport };
+  """, write: true);
+Expect(drawingWrite.Succeeded, "XClip, AttachXref and SetViewport exact signatures compile in write mode", drawingWrite);
+var namedXrefResult = Compile("XrefResult result = AttachXref(\"C:/source.dwg\", Point3d.Origin); return result.ReferenceId;", write: true);
+Expect(namedXrefResult.Succeeded, "nested XrefResult record is available by name in snippets", namedXrefResult);
+foreach (var snippet in new[] {
+  "XClip(Open<BlockReference>(ObjectId.Null), new[] { Point3d.Origin, Point3d.Origin, Point3d.Origin });",
+  "AttachXref(\"C:/source.dwg\", Point3d.Origin);",
+  "SetViewport(\"Sheet\", ObjectId.Null);" })
+{
+  var result = Compile(snippet);
+  Expect(HasError(result, ScriptCompiler.GuardDiagnosticId, 1), $"read mode refuses {snippet.Split('(')[0]}", result);
+}
+Expect(Compile("ObjectId XClip() => ObjectId.Null; return XClip();").Succeeded,
+  "read guard permits a local function sharing the XClip name");
+
+foreach (var (label, snippet) in new[] {
+  ("Database setting", "Db.Ltscale = 2;"),
+  ("Database increment", "Db.Ltscale++;"),
+  ("Database deconstruction", "(Db.Ltscale, Db.Textsize) = (2.0, 3.0);"),
+  ("SetSystemVariable", "Application.SetSystemVariable(\"LTSCALE\", 2.0);"),
+  ("WriteFile", "WriteFile(\"test.txt\", \"test\");"),
+  ("WriteFile method group", "Func<string,string,string> f = WriteFile; return f;"),
+  ("File.WriteAllText", "File.WriteAllText(\"C:/out.txt\", \"test\");"),
+  ("Directory.Delete", "Directory.Delete(\"C:/test\");"),
+  ("Insert", "using var side = new Database(false, true); Db.Insert(\"X\", side, true);"),
+  ("AttachXref Database API", "Db.AttachXref(\"C:/source.dwg\", \"X\");"),
+  ("AttachXref helper", "AttachXref(\"C:/source.dwg\", Point3d.Origin);"),
+  ("save", "Db.SaveAs(\"C:/out.dwg\", DwgVersion.Current);"),
+  ("layout switch", "LayoutManager.Current.CurrentLayout = \"Sheet\";"),
+  ("Session indexer", "Session[\"test\"] = 1;"),
+  ("Session TryAdd", "Session.TryAdd(\"test\", 1);"),
+  ("Session alias indexer", "var s = Session; s[\"test\"] = 1;"),
+  ("Session alias Clear", "var s = Session; s.Clear();"),
+  ("Session reassigned alias", "var s = new System.Collections.Concurrent.ConcurrentDictionary<string,object>(); s = Session; s.Clear();") })
+{
+  var result = Compile(snippet, preview: true);
+  Expect(result.Errors.Any(error => error.Code == ScriptCompiler.GuardDiagnosticId)
+      && result.Errors.All(error => error.Code == ScriptCompiler.GuardDiagnosticId),
+    $"preview refuses {label} outside its transaction", result);
+}
+foreach (var snippet in new[] {
+  "Open<DBText>(ById(\"2A\"), true).TextString = \"preview\";",
+  "using var nested = Db.TransactionManager.StartTransaction(); nested.Commit(); return 1;",
+  "return Session.TryGetValue(\"test\", out var value) ? value : null;",
+  "var s = Session; return s.ContainsKey(\"test\") ? s[\"test\"] : null;",
+  "var s = new System.Collections.Concurrent.ConcurrentDictionary<string,object>(); s = Session; return s.Count;",
+  "return Session.AsEnumerable().Count();",
+  "var layer = EnsureLayer(\"MCP\"); Tag(Open<Entity>(ById(\"2A\"), true), \"APP\", \"value\"); return layer;",
+  "return XClip(Open<BlockReference>(ObjectId.Null), new[] { Point3d.Origin, new Point3d(1,0,0), new Point3d(0,1,0) });",
+  "return ModelSpace<Curve>(OpenSide(\"C:/source.dwg\")).Count();",
+  "void WriteFile() {} WriteFile(); return 1;" })
+{
+  var result = Compile(snippet, preview: true);
+  Expect(result.Succeeded, "preview allows transactional changes, nested transactions and Session reads: " + snippet, result);
+}
+foreach (var snippet in new[] {
+  "using var t = Db.TransactionManager.StartOpenCloseTransaction(); return 1;",
+  "return Db.BlockTableId.Open(OpenMode.ForRead);",
+  "return Ed.GetPoint(\"point\");" })
+{
+  var result = Compile(snippet, preview: true);
+  Expect(HasError(result, ScriptCompiler.GuardDiagnosticId, 1), "preview retains the write guard: " + snippet, result);
+}
+var baseClip = Compile("return base.XClip(Open<BlockReference>(ObjectId.Null), new[] { Point3d.Origin, Point3d.Origin, Point3d.Origin });");
+Expect(HasError(baseClip, ScriptCompiler.GuardDiagnosticId, 1), "read mode refuses base-qualified XClip", baseClip);
+var xrefMethodGroup = Compile("Func<string, Point3d, double?, string?, bool, string?, Civil3DMcpPlugin.RunCodeScript.XrefResult> attach = AttachXref; return attach;");
+Expect(HasError(xrefMethodGroup, ScriptCompiler.GuardDiagnosticId, 1), "read mode refuses AttachXref method group", xrefMethodGroup);
+var smokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-run-code-smoke.mjs"));
+var targetDbmod = Compile("return Convert.ToInt32(((dynamic)Doc.GetAcadDocument()).GetVariable(\"DBMOD\"));");
+Expect(targetDbmod.Succeeded, "preview snapshot reads DBMOD from the target document's ActiveX API", targetDbmod);
+var smokeMatches = System.Text.RegularExpressions.Regex.Matches(smokeSource,
+  @"(?ms)^  (?<name>\w+): String\.raw`(?<code>.*?)`,?");
+var smokeModes = new Dictionary<string, bool>(StringComparer.Ordinal) {
+  ["textRead"] = false, ["clipRead"] = false, ["xrefCount"] = false, ["viewportRead"] = false,
+  ["dormantViewport"] = false };
+foreach (System.Text.RegularExpressions.Match match in smokeMatches)
+{
+  var name = match.Groups["name"].Value;
+  var result = Compile(match.Groups["code"].Value, !smokeModes.TryGetValue(name, out var write) || write);
+  Expect(result.Succeeded, $"live helper script {name} compiles without native execution", result);
+}
+Expect(smokeMatches.Count >= 8 && smokeModes.Keys.All(key => smokeMatches.Cast<System.Text.RegularExpressions.Match>()
+  .Any(match => match.Groups["name"].Value == key)), "live helper compiler check covers setup, mutation and read scripts");
 foreach (var snippet in new[] { "EnsureLayer(\"MCP\");", "Tag(Open<Entity>(ObjectId.Null), \"APP\");" })
 {
   var result = Compile(snippet);
@@ -398,6 +496,8 @@ RuntimeChecks.Run((condition, name) => Expect(condition, name));
 PdfChecks.Run((condition, name) => Expect(condition, name));
 PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
+PreviewGuardChecks.Run((code, preview) => Compile(code, write: true, preview: preview),
+  (condition, name, result) => Expect(condition, name, result), code => Compile(code));
 DatabaseGuardChecks.Run((code, write) => Compile(code, write),
   (condition, name, result) => Expect(condition, name, result));
 var executionSource = File.ReadAllText(Path.Combine(repoRoot, "Civil3D-MCP-Plugin", "CivilExecution.cs"));
@@ -443,7 +543,7 @@ return failures == 0 ? 0 : 1;
 }
 catch (Exception error)
 {
-  Console.Error.WriteLine(error);
+  Console.Error.WriteLine($"FAIL harness exception: {error}");
   return 1;
 }
 

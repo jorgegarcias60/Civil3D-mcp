@@ -110,6 +110,11 @@ describe("civil3d_run_code domain", () => {
     expect(RunCodeArgsSchema.safeParse({ ...valid, timeoutSeconds: 600 }).success).toBe(true);
     expect(RunCodeArgsSchema.safeParse({ ...valid, timeoutSeconds: 601 }).success).toBe(false);
     expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "write", timeoutSeconds: 91 }).success).toBe(false);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "preview", timeoutSeconds: 90 }).success).toBe(true);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "preview", timeoutSeconds: 91 }).success).toBe(false);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "preview", copyOutputsTo: "C:/out" }).success).toBe(false);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "preview", copyOutputsTo: "C:/out", keepOutputs: false }).success).toBe(false);
+    expect(RunCodeArgsSchema.safeParse({ ...valid, mode: "preview", keepOutputs: true }).success).toBe(true);
     expect(RunCodeArgsSchema.safeParse({ ...valid, maxInlineBytes: 100 }).success).toBe(false);
     expect(RunCodeArgsSchema.safeParse({ ...valid, args: ["not", "an", "object"] }).success).toBe(false);
     expect(RunCodeArgsSchema.safeParse({ ...valid, code: "x".repeat(200_001) }).success).toBe(false);
@@ -182,12 +187,86 @@ describe("civil3d_run_code domain", () => {
     expect(RunCodeResponseSchema.safeParse({ ...base, committed: "maybe" }).success).toBe(false);
     expect(RunCodeResponseSchema.safeParse({ ...base, activated: true, switchedBack: true }).success).toBe(true);
     expect(RunCodeResponseSchema.safeParse({ ...base, activated: "yes" }).success).toBe(false);
+    expect(RunCodeResponseSchema.parse({ ...base, activatedLayout: true }).activatedLayout).toBe(true);
+    expect(RunCodeResponseSchema.safeParse({ ...base, activatedLayout: "yes" }).success).toBe(false);
   });
 
   it("describes temporary activation for a targeted write", () => {
     const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
     expect(description).toMatch(/write.*document.*another open drawing/i);
     expect(description).toMatch(/briefly activates it.*switches back/i);
+  });
+
+  it("refuses duplicated argsJson before approval exceeds the actual JSON-RPC wire limit", async () => {
+    const code = "return Args.Count;";
+    const large = { code, mode: "write", args: { blob: "x".repeat(600_000) } };
+    // The old code+args check accepted this; argsJson doubles the payload.
+    expect(Buffer.byteLength(JSON.stringify({ code, args: large.args }), "utf8")).toBeLessThan(1_000_000);
+    expect(RunCodeArgsSchema.parse({ action: "run", ...large })).toBeDefined();
+    await expect(prepareRunCode(RunCodeArgsSchema.parse({ action: "run", ...large }), large))
+      .rejects.toThrow(/runCode request is .*plugin limit is 1048576/);
+    const escaped = { code, mode: "write", args: { blob: "\\".repeat(300_000) } };
+    expect(Buffer.byteLength(JSON.stringify({ code, args: escaped.args }), "utf8")).toBeLessThan(1_000_000);
+    await expect(prepareRunCode(RunCodeArgsSchema.parse({ action: "run", ...escaped }), escaped))
+      .rejects.toThrow(/runCode request is/);
+    await expect(prepareRunCode(RunCodeArgsSchema.parse({ action: "run", code, mode: "write", args: { blob: "x".repeat(400_000) } }),
+      { code, mode: "write" })).resolves.toBeDefined();
+
+    sendCommandMock.mockReset();
+    registerApprovalTool({ registerTool: () => undefined } as unknown as McpServer);
+    const result = await getToolHandler("civil3d_request_approval")!({
+      toolName: "civil3d_run_code", action: "run", parameters: large,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toMatch(/runCode request is/);
+    expect(sendCommandMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts the bounded preview change summary and rollback state", () => {
+    const base = { runId: "p", mode: "preview", status: "ok", ok: true, logFolder: "C:/log/p",
+      timing: { compileMs: 1, runMs: 2, totalMs: 3 }, committed: false, rolledBack: true,
+      changes: { byType: [{ type: "TEXT", layer: "A", added: 3, erased: 1, modified: 1 },
+        { type: "BLOCK_RECORD", layer: null, added: 0, erased: 0, modified: 1 }],
+        totals: { added: 3, erased: 1, modified: 1 }, erasedHandles: ["AB"], modifiedHandles: ["CD"], truncated: false },
+      note: "The transaction was aborted; external effects may remain." };
+    expect(RunCodeResponseSchema.safeParse(base).success).toBe(true);
+    expect(RunCodeResponseSchema.safeParse({ ...base, rolledBack: "unknown" }).success).toBe(true);
+    expect(RunCodeResponseSchema.safeParse({ ...base, changes: { ...base.changes, erasedHandles: Array(201).fill("A") } }).success).toBe(false);
+    expect(RunCodeResponseSchema.safeParse({ ...base, changes: { ...base.changes, totals: { ...base.changes.totals, added: -1 } } }).success).toBe(false);
+  });
+
+  it("describes preview and its separate write approval", () => {
+    const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
+    expect(description).toContain("mode 'preview'");
+    expect(description).toMatch(/Preview requires its own approval; a later write needs fresh approval/);
+    expect(description).toMatch(/SetSystemVariable and WriteFile/);
+  });
+
+  it("describes the API 6 drawing helpers without adding tool parameters", () => {
+    const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
+    for (const signature of [
+      "TextBox(entity, toWcs?)", "XClip(blockRef, wcsPolygon)",
+      "AttachXref(path, insertionPoint, scale?, layer?, relativePath?, blockName?)",
+      "SetViewport(layoutName, viewportId, paperCenter?, paperWidth?, paperHeight?, modelCenter?, customScale?, twistAngle?, locked?)",
+    ]) expect(description).toContain(signature);
+    expect(description).toMatch(/TextBox.*read and write/);
+    expect(description).toMatch(/XClip, AttachXref and SetViewport need write mode/);
+    expect(description).toContain("plugin API 6");
+    expect(CODE_DOMAIN_DEFINITION.exposures[0].inputShape).not.toHaveProperty("helpers");
+  });
+
+  it("explains text frames, xref scale decisions and viewport identity", () => {
+    const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
+    expect(description).toContain("lower-left, lower-right, upper-right, upper-left");
+    expect(description).toContain("DBText, AttributeReference and MText");
+    expect(description).toContain("unitless drawings need an explicit scale");
+    expect(description).toContain("Feet and US survey feet use scale 1");
+    expect(description).toContain("same viewport ObjectId");
+    expect(description).toContain("overall paper-space viewport");
+    expect(description).toContain("empty GetViewports");
+    expect(description).toContain("restores the previous layout even on failure");
+    expect(description).toContain("activatedLayout=true");
   });
 });
 
@@ -482,6 +561,30 @@ describe("civil3d_run_code PR2 plumbing", () => {
     const missingApi = await handler({ code: "return 1;", copyOutputsTo: dir });
     expect(missingApi.content[0].text).toContain("copyOutputsTo needs runCode API 3, the loaded plugin has 1.");
     expect(sendCommandMock.mock.calls.some(([method]) => method === "runCode")).toBe(false);
+  });
+
+  it("refuses preview on API 5 before issuing an approval or running code", async () => {
+    sendCommandMock.mockResolvedValue({ runCodeApi: 5 });
+    registerApprovalTool({ registerTool: () => undefined } as unknown as McpServer);
+    const parameters = { code: "return 1;", mode: "preview" };
+    const approval = await getToolHandler("civil3d_request_approval")!({ toolName: "civil3d_run_code", action: "run", parameters });
+    expect(approval.isError).toBe(true);
+    expect(approval.structuredContent).toBeUndefined();
+    expect(approval.content[0].text).toMatch(/mode preview needs runCode API 6.*Nothing ran/);
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth"]);
+  });
+
+  it("checks preview API again and sends sorted-key args JSON", async () => {
+    const handler = directHandler();
+    sendCommandMock.mockImplementation(async (method: string) => method === "getCivil3DHealth"
+      ? { runCodeApi: 6 }
+      : { runId: "p", mode: "preview", status: "ok", ok: true, committed: false, rolledBack: true,
+        changes: { byType: [], totals: { added: 0, erased: 0, modified: 0 }, erasedHandles: [], modifiedHandles: [], truncated: false },
+        logFolder: dir, timing: { compileMs: 1, runMs: 1, totalMs: 2 } });
+    const result = await handler({ code: "return Args;", mode: "preview", args: { z: [2, { β: "Δ", a: 1.25 }], a: 0 } });
+    expect(result.isError).toBeUndefined();
+    const request = sendCommandMock.mock.calls.find(([method]) => method === "runCode")![1];
+    expect(request).toMatchObject({ mode: "preview", argsJson: '{"a":0,"z":[2,{"a":1.25,"β":"Δ"}]}' });
   });
 
   it("emits opt-in heartbeat progress below 100 and stops on completion", async () => {

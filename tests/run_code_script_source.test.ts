@@ -26,6 +26,41 @@ const compareSource = readFileSync(
   fileURLToPath(new URL("../Civil3D-MCP-Plugin/CompareCommands.cs", import.meta.url)),
   "utf8",
 ).replaceAll("\r\n", "\n").replace(/^[\t ]*\/\/.*$/gm, "");
+const drawingHelpersSource = readFileSync(
+  fileURLToPath(new URL("../Civil3D-MCP-Plugin/RunCodeScript.DrawingHelpers.cs", import.meta.url)),
+  "utf8",
+).replaceAll("\r\n", "\n");
+
+describe("SetViewport on a dormant layout", () => {
+  const helper = drawingHelpersSource.slice(drawingHelpersSource.indexOf("public ObjectId SetViewport("));
+
+  it("activates before identifying the overall viewport and refuses an empty refreshed collection", () => {
+    expect(helper).toContain("viewportsEmpty = layout.GetViewports().Count == 0;");
+    expect(helper).toContain("RunCodeHelpers.WithCurrentLayout(layoutName, viewportsEmpty,");
+    const edit = helper.slice(helper.indexOf("return RunCodeHelpers.WithCurrentLayout("));
+    expect(edit).toContain("name => manager.CurrentLayout = name");
+    expect(edit).toContain("var viewports = layout.GetViewports();");
+    expect(edit).toContain("if (viewports.Count == 0)");
+    expect(edit.indexOf("viewportId == viewports[0]")).toBeLessThan(edit.indexOf("viewport.UpgradeOpen();"));
+    expect(edit).toContain("viewport.Number == 1");
+  });
+
+  it("edits the same viewport and updates the display before committing", () => {
+    expect(helper).toContain("OpenMode.ForRead");
+    expect(helper).toContain("viewport.UpgradeOpen();");
+    expect(helper.indexOf("viewport.UpdateDisplay();")).toBeLessThan(helper.indexOf("tx.Commit();"));
+    expect(helper).toContain("return viewportId;");
+    expect(helper).not.toMatch(/\.Erase\(|AppendEntity\(|new Viewport\b/);
+  });
+
+  it("reports layout activation in the response and run.json, including failed edits", () => {
+    expect(helper).toContain("() => ActivatedLayout = true");
+    expect(commandsSource).toContain("if (outcome.Script?.ActivatedLayout == true)");
+    for (const container of ["response", "summary"]) {
+      expect(commandsSource).toContain(`${container}["activatedLayout"] = true;`);
+    }
+  });
+});
 
 describe("OpenSide retry ownership", () => {
   it("opens each attempt in a new Database and disposes a failed attempt", () => {
@@ -165,7 +200,7 @@ describe("PR4 targeted write host route", () => {
   });
 
   it("reports activation and restoration in both the response and run.json, with restoration failures as warnings", () => {
-    expect(commandsSource).toContain("internal const int ApiVersion = 5;");
+    expect(commandsSource).toContain("internal const int ApiVersion = 6;");
     expect(commandsSource).toMatch(/finally\s*\{\s*if \(outcome.Activation.Activated\)/);
     for (const container of ["response", "summary"]) {
       expect(commandsSource).toContain(`${container}["activated"] = true;`);

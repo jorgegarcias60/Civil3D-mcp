@@ -175,7 +175,7 @@ internal static class ScriptCompiler
     return source.ToString();
   }
 
-  internal static ScriptCompileResult Compile(string code, string assemblyName, IEnumerable<string> referencePaths, bool writeMode)
+  internal static ScriptCompileResult Compile(string code, string assemblyName, IEnumerable<string> referencePaths, bool writeMode, bool previewMode = false)
   {
     var className = "Script_" + Regex.Replace(assemblyName, @"[^A-Za-z0-9_]", "_");
     var source = BuildSource(code, className);
@@ -223,7 +223,7 @@ internal static class ScriptCompiler
       return result;
     }
 
-    result.Errors.AddRange(FindGuardViolations(compilation, tree, writeMode));
+    result.Errors.AddRange(FindGuardViolations(compilation, tree, writeMode, previewMode));
     if (result.Errors.Count > 0)
     {
       return result;
@@ -356,6 +356,30 @@ internal static class ScriptCompiler
     "RestoreForwardingXrefSymbols", "RestoreOriginalXrefSymbols", "XBindXrefs", "ForceWblockDatabaseCopy",
   };
 
+  // Preview cannot undo filesystem changes. New members fail closed instead
+  // of relying on a list of write-like names. Metadata setters are not reads.
+  private static readonly HashSet<string> PreviewReadOnlyFileMembers = new(StringComparer.Ordinal)
+  {
+    "Exists", "ReadAllText", "ReadAllTextAsync", "ReadAllLines", "ReadAllLinesAsync",
+    "ReadAllBytes", "ReadAllBytesAsync", "ReadLines", "ReadLinesAsync", "OpenRead", "OpenText",
+    "GetAttributes", "GetCreationTime", "GetCreationTimeUtc", "GetLastAccessTime", "GetLastAccessTimeUtc",
+    "GetLastWriteTime", "GetLastWriteTimeUtc", "GetUnixFileMode", "GetCurrentDirectory", "GetDirectoryRoot",
+    "GetLogicalDrives", "EnumerateFiles", "EnumerateDirectories", "EnumerateFileSystemEntries",
+    "GetFiles", "GetDirectories", "GetFileSystemEntries", "EnumerateFileSystemInfos", "GetFileSystemInfos",
+    "Length", "Name", "FullName", "Extension", "DirectoryName", "Directory", "Parent", "Root",
+    "Attributes", "CreationTime", "CreationTimeUtc", "LastAccessTime", "LastAccessTimeUtc",
+    "LastWriteTime", "LastWriteTimeUtc", "IsReadOnly", "UnixFileMode", "LinkTarget", "ResolveLinkTarget", "Refresh",
+    "ToString", "Equals", "GetHashCode", "GetType",
+  };
+
+  private static readonly HashSet<string> PreviewReadOnlyFileStreamMembers = new(StringComparer.Ordinal)
+  {
+    "CanRead", "CanSeek", "CanWrite", "CanTimeout", "IsAsync", "Length", "Name", "Position",
+    "Read", "ReadAsync", "ReadByte", "ReadAtLeast", "ReadAtLeastAsync", "ReadExactly", "ReadExactlyAsync",
+    "BeginRead", "EndRead", "Seek", "Close", "Dispose", "DisposeAsync",
+    "ToString", "Equals", "GetHashCode", "GetType",
+  };
+
   // A snippet's own #line directive would map the code after it away from
   // "script", where the guard does not look (that is how it skips the
   // wrapper), so refuse any inside the snippet's body. Ours sit outside it,
@@ -378,7 +402,7 @@ internal static class ScriptCompiler
     }
   }
 
-  private static IEnumerable<ScriptDiagnostic> FindGuardViolations(CSharpCompilation compilation, SyntaxTree tree, bool writeMode)
+  private static IEnumerable<ScriptDiagnostic> FindGuardViolations(CSharpCompilation compilation, SyntaxTree tree, bool writeMode, bool previewMode)
   {
     var model = compilation.GetSemanticModel(tree);
     var reported = new HashSet<(int, string)>();
@@ -397,10 +421,42 @@ internal static class ScriptCompiler
         continue;
       }
 
-      var reason = DenyReason(symbol, node, model, writeMode);
+      var reason = DenyReason(symbol, node, model, writeMode, previewMode);
       if (reason != null && reported.Add((line, symbol.Name)))
       {
         yield return new ScriptDiagnostic(line, column, GuardDiagnosticId, reason);
+      }
+    }
+
+    if (previewMode)
+    {
+      foreach (var creation in tree.GetRoot().DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
+      {
+        if (model.GetOperation(creation) is not IObjectCreationOperation operation
+            || operation.Constructor?.ContainingType is not { } writerType
+            || !IsPreviewWriterType(writerType)) continue;
+        if (InheritsFrom(writerType, "System.IO.FileStream") && IsReadOnlyFileOpen(operation.Arguments)) continue;
+        var (line, column) = MapToScript(creation.GetLocation());
+        if (line != 0 && reported.Add((line, writerType.Name)))
+          yield return new(line, column, GuardDiagnosticId,
+            writerType.Name + ": Preview cannot roll back file writes; use mode 'write'.");
+      }
+
+      foreach (var expression in tree.GetRoot().DescendantNodes().OfType<ExpressionSyntax>())
+      {
+        var target = expression switch
+        {
+          AssignmentExpressionSyntax assignment => assignment.Left,
+          PrefixUnaryExpressionSyntax prefix when prefix.IsKind(SyntaxKind.PreIncrementExpression)
+            || prefix.IsKind(SyntaxKind.PreDecrementExpression) => prefix.Operand,
+          PostfixUnaryExpressionSyntax postfix when postfix.IsKind(SyntaxKind.PostIncrementExpression)
+            || postfix.IsKind(SyntaxKind.PostDecrementExpression) => postfix.Operand,
+          _ => null,
+        };
+        if (target == null || !IsSessionMutationTarget(model, ExpressionOperation(model, target))) continue;
+        var (line, column) = MapToScript(expression.GetLocation());
+        if (line != 0 && reported.Add((line, "Session")))
+          yield return new(line, column, GuardDiagnosticId, "Preview cannot roll back Session writes; Session reads are allowed.");
       }
     }
 
@@ -430,6 +486,66 @@ internal static class ScriptCompiler
     }
   }
 
+  // Require explicit constant mode/access and constant sharing/options for
+  // FileStream, File.Open and FileInfo.Open. Options must not change the file
+  // outside the transaction, even when opening with read-only access.
+  private static bool IsReadOnlyFileOpen(IEnumerable<IArgumentOperation> arguments)
+  {
+    const FileOptions readOnlyOptions = FileOptions.SequentialScan | FileOptions.RandomAccess | FileOptions.Asynchronous;
+    var hasMode = false;
+    var hasAccess = false;
+    foreach (var argument in arguments)
+    {
+      switch (argument.Parameter?.Type.ToDisplayString())
+      {
+        case "System.IO.FileMode":
+          if (argument.Value.ConstantValue is not { HasValue: true, Value: int mode } || mode != (int)FileMode.Open)
+            return false;
+          hasMode = true;
+          break;
+        case "System.IO.FileAccess":
+          if (argument.Value.ConstantValue is not { HasValue: true, Value: int access } || access != (int)FileAccess.Read)
+            return false;
+          hasAccess = true;
+          break;
+        case "System.IO.FileShare":
+          if (argument.Value.ConstantValue is not { HasValue: true, Value: int }) return false;
+          break;
+        case "System.IO.FileOptions":
+          if (argument.Value.ConstantValue is not { HasValue: true, Value: int options }
+              || (options & ~(int)readOnlyOptions) != 0) return false;
+          break;
+        case "System.IO.FileStreamOptions":
+          return false;
+      }
+    }
+    return hasMode && hasAccess;
+  }
+
+  private static bool IsPreviewWriterType(INamedTypeSymbol type)
+  {
+    return InheritsFrom(type, "System.IO.FileStream")
+      || InheritsFrom(type, "System.IO.TextWriter")
+      || InheritsFrom(type, "System.IO.BinaryWriter")
+      || InheritsFrom(type, "System.IO.BufferedStream")
+      || InheritsFrom(type, "System.IO.Compression.DeflateStream")
+      || InheritsFrom(type, "System.IO.Compression.GZipStream")
+      || InheritsFrom(type, "System.IO.Compression.BrotliStream")
+      || InheritsFrom(type, "System.IO.Compression.ZLibStream")
+      || InheritsFrom(type, "System.IO.Compression.ZipArchive");
+  }
+
+  private static bool IsPreviewFileMemberAllowed(ISymbol symbol, SimpleNameSyntax node, SemanticModel model)
+  {
+    if (symbol is IMethodSymbol { MethodKind: MethodKind.Constructor })
+      return symbol.ContainingType.ToDisplayString() is "System.IO.FileInfo" or "System.IO.DirectoryInfo";
+    if (symbol is IPropertySymbol && IsAssignmentTarget(node)) return false;
+    if (symbol.ContainingType.ToDisplayString() is "System.IO.File" or "System.IO.FileInfo" && symbol.Name == "Open")
+      return InvocationOf(node) is { } call && model.GetOperation(call) is IInvocationOperation operation
+        && IsReadOnlyFileOpen(operation.Arguments);
+    return PreviewReadOnlyFileMembers.Contains(symbol.Name);
+  }
+
   // The OpenMode member a constant expression stands for ("ForRead",
   // "ForWrite"...), "(OpenMode)n" for a value without a member, or null when
   // the expression is not a constant OpenMode.
@@ -451,7 +567,7 @@ internal static class ScriptCompiler
     return member?.Name ?? $"(OpenMode){value}";
   }
 
-  private static string? DenyReason(ISymbol symbol, SimpleNameSyntax node, SemanticModel model, bool writeMode)
+  private static string? DenyReason(ISymbol symbol, SimpleNameSyntax node, SemanticModel model, bool writeMode, bool previewMode)
   {
     var type = symbol.ContainingType;
     var name = symbol.Name;
@@ -562,6 +678,53 @@ internal static class ScriptCompiler
       return "OpenSide(...): the run disposes side databases when it ends; remove the using or the Dispose() call.";
     }
 
+    if (previewMode)
+    {
+      const string outside = " Preview cannot roll back changes outside Tr; use mode 'write'.";
+      if (symbol is IMethodSymbol or IPropertySymbol or IFieldSymbol or IEventSymbol
+          && (typeName is "System.IO.File" or "System.IO.Directory"
+            || InheritsFrom(type, "System.IO.FileSystemInfo"))
+          && !IsPreviewFileMemberAllowed(symbol, node, model))
+        return display + ": Preview allows only read-only filesystem members." + outside;
+      // Path manipulation is safe, but GetTempFileName also creates a file.
+      if (typeName == "System.IO.Path" && name == "GetTempFileName") return display + outside;
+      if (symbol is IMethodSymbol or IPropertySymbol
+          && (InheritsFrom(type, "System.IO.FileStream")
+            || MethodReceiver(node) is { } streamReceiver
+              && InheritsFrom(model.GetTypeInfo(streamReceiver).Type as INamedTypeSymbol, "System.IO.FileStream"))
+          && !(symbol is IMethodSymbol { MethodKind: MethodKind.Constructor })
+          && (!PreviewReadOnlyFileStreamMembers.Contains(name)
+            || symbol is IPropertySymbol && IsAssignmentTarget(node)))
+        return display + outside;
+      if (symbol is IMethodSymbol previewMethod)
+      {
+        if ((InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.TransactionManager")
+              && name == "StartTransaction"
+            || InheritsFrom(type, "Autodesk.AutoCAD.ApplicationServices.Document") && name == "LockDocument")
+            && !(MethodReceiver(node) is { } drawingReceiver
+              && IsRunDrawingValue(model, drawingReceiver, new HashSet<ISymbol>(SymbolEqualityComparer.Default))))
+          return display + ": Preview allows locks and nested transactions only on the run's drawing (Db or Doc.Database).";
+        if (typeName == DatabaseTypeName && DatabaseDenyReason(previewMethod, node, model) is { } reason)
+          return reason + outside;
+        if (typeName == BaseClassName && name is "WriteFile" or "AttachXref"
+            || typeName is "Autodesk.AutoCAD.ApplicationServices.Application" or "Autodesk.AutoCAD.ApplicationServices.Core.Application"
+              && name == "SetSystemVariable"
+            || InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.LayoutManager")
+              && name is "CreateLayout" or "DeleteLayout" or "RenameLayout" or "CopyLayout" or "CloneLayout" or "SetCurrentLayoutId")
+          return display + outside;
+        if (MethodReceiver(node) is { } sessionReceiver
+            && IsSessionValue(model, sessionReceiver, new HashSet<ISymbol>(SymbolEqualityComparer.Default))
+            && !IsSessionReadOnlyMethod(previewMethod))
+          return "Preview cannot roll back Session writes; Session reads are allowed.";
+      }
+      if (symbol is IPropertySymbol && IsAssignmentTarget(node)
+          && (IsHostApi(type) && !InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.DBObject")
+              && !(typeName == "Autodesk.AutoCAD.DatabaseServices.HostApplicationServices" && name == "WorkingDatabase")
+            || MethodReceiver(node) is { } receiver
+              && IsSessionValue(model, receiver, new HashSet<ISymbol>(SymbolEqualityComparer.Default))))
+        return "Setting " + display + outside;
+    }
+
     if (writeMode)
     {
       return null;
@@ -569,7 +732,7 @@ internal static class ScriptCompiler
 
     const string useWrite = " Use mode 'write' to change the drawing.";
 
-    if (symbol is IMethodSymbol && typeName == BaseClassName && name is ("EnsureLayer" or "Tag"))
+    if (symbol is IMethodSymbol && typeName == BaseClassName && name is ("EnsureLayer" or "Tag" or "XClip" or "AttachXref" or "SetViewport"))
     {
       return $"{display} changes the drawing. Use mode 'write'.";
     }
@@ -625,6 +788,259 @@ internal static class ScriptCompiler
     }
 
     return null;
+  }
+
+  // Follow mutable Session aliases, separately from copied scalars, strings and
+  // detached containers. Shallow copies still share their reference-type elements.
+  // Reflection/dynamic and mutable aliases passed to other code remain outside
+  // this mistake-prevention guard, as they do in read/write modes.
+  private static bool IsSessionValue(SemanticModel model, ExpressionSyntax expression, HashSet<ISymbol> visiting) =>
+    IsSessionAlias(model, ExpressionOperation(model, expression), visiting);
+
+  private static bool IsSessionReadOnlyMethod(IMethodSymbol method)
+  {
+    var type = method.ContainingType;
+    var name = method.Name;
+    if (type.ContainingNamespace.ToDisplayString() == "System.Linq"
+        || type.ToDisplayString() == "System.Array" && name == "Clone"
+        || name is "TryGetValue" or "ContainsKey" or "Contains" or "GetEnumerator" or "ToArray" or "ToString" or "GetType") return true;
+    var collection = type.ContainingNamespace.ToDisplayString() + "." + type.OriginalDefinition.MetadataName;
+    return collection switch
+    {
+      "System.Collections.Generic.List`1" => name is "AsReadOnly" or "BinarySearch"
+        or "Exists" or "Find" or "FindAll" or "FindIndex" or "FindLast" or "FindLastIndex"
+        or "GetRange" or "IndexOf" or "LastIndexOf" or "TrueForAll",
+      "System.Collections.Generic.Dictionary`2" or "System.Collections.Generic.SortedDictionary`2"
+        or "System.Collections.Generic.SortedList`2" => name is "ContainsValue" or "IndexOfKey" or "IndexOfValue",
+      "System.Collections.Generic.IList`1" => name == "IndexOf",
+      _ => false,
+    };
+  }
+
+  private static bool IsDetachedSessionCopy(IMethodSymbol method)
+  {
+    var type = method.ContainingType;
+    return method.Name is "ToArray" or "ToList" && (type.ContainingNamespace.ToDisplayString() == "System.Linq"
+        || type.OriginalDefinition.MetadataName == "ConcurrentDictionary`2"
+          && type.ContainingNamespace.ToDisplayString() == "System.Collections.Concurrent")
+      || method.Name is "ToArray" or "GetRange" or "FindAll"
+        && type.OriginalDefinition.MetadataName == "List`1"
+        && type.ContainingNamespace.ToDisplayString() == "System.Collections.Generic"
+      || method.Name == "Clone" && type.ToDisplayString() == "System.Array";
+  }
+
+  // Roslyn does not give parentheses or nullable suppression their own operation.
+  private static IOperation? ExpressionOperation(SemanticModel model, ExpressionSyntax expression)
+  {
+    while (true)
+    {
+      if (expression is ParenthesizedExpressionSyntax parentheses) expression = parentheses.Expression;
+      else if (expression is PostfixUnaryExpressionSyntax suppressed
+          && suppressed.IsKind(SyntaxKind.SuppressNullableWarningExpression)) expression = suppressed.Operand;
+      else if (expression is RefExpressionSyntax reference) expression = reference.Expression;
+      else return model.GetOperation(expression);
+    }
+  }
+
+  private static bool IsSessionAlias(SemanticModel model, IOperation? operation, HashSet<ISymbol> visiting,
+    bool contents = false, int[]? tuplePath = null)
+  {
+    if (operation == null || operation.Type?.SpecialType == SpecialType.System_String
+        || !contents && (tuplePath == null || tuplePath.Length == 0) && operation.Type?.IsValueType == true) return false;
+    switch (operation)
+    {
+      case IConversionOperation conversion:
+        return IsSessionAlias(model, conversion.Operand, visiting, contents, tuplePath);
+      case IParenthesizedOperation parentheses:
+        return IsSessionAlias(model, parentheses.Operand, visiting, contents, tuplePath);
+      case IPropertyReferenceOperation property when property.Property.Name == "Session"
+          && InheritsFrom(property.Property.ContainingType, BaseClassName):
+        return true;
+      case ILocalReferenceOperation reference:
+        var local = reference.Local;
+        if (!visiting.Add(local)) return false;
+        try
+        {
+          return SessionLocalValues(model, local, operation.Syntax.SyntaxTree)
+            .Any(value => IsSessionAlias(model, value.Value, visiting, contents,
+              value.TuplePath.Concat(tuplePath ?? Array.Empty<int>()).ToArray()))
+            || IsSessionOutOrIterationValue(model, local, operation.Syntax.SyntaxTree, visiting);
+        }
+        finally { visiting.Remove(local); }
+      case IArrayElementReferenceOperation element:
+        return IsSessionAlias(model, element.ArrayReference, visiting, contents: true);
+      case IPropertyReferenceOperation property:
+        return IsSessionAlias(model, property.Instance, visiting, contents: true);
+      case IFieldReferenceOperation field:
+        if (field.Field.ContainingType.IsTupleType)
+        {
+          var elements = field.Field.ContainingType.TupleElements;
+          var index = Enumerable.Range(0, elements.Length).FirstOrDefault(i =>
+            SymbolEqualityComparer.Default.Equals(elements[i].CorrespondingTupleField, field.Field.CorrespondingTupleField), -1);
+          if (index >= 0) return IsSessionAlias(model, field.Instance, visiting, contents,
+            new[] { index }.Concat(tuplePath ?? Array.Empty<int>()).ToArray());
+        }
+        return IsSessionAlias(model, field.Instance, visiting, contents: true);
+      case ITupleOperation tuple:
+        return tuplePath is { Length: > 0 }
+          ? tuplePath[0] < tuple.Elements.Length && IsSessionAlias(model, tuple.Elements[tuplePath[0]], visiting,
+              contents, tuplePath.Skip(1).ToArray())
+          : contents && tuple.Elements.Any(element => IsSessionAlias(model, element, visiting, contents: true));
+      case IInvocationOperation invocation:
+        var method = invocation.TargetMethod;
+        if (!contents && IsDetachedSessionCopy(method)) return false;
+        return IsSessionAlias(model, invocation.Instance, visiting, contents)
+          || method.IsExtensionMethod && invocation.Arguments.Any(argument => argument.Parameter?.Ordinal == 0
+            && IsSessionAlias(model, argument.Value, visiting, contents));
+      case IConditionalOperation conditional:
+        return IsSessionAlias(model, conditional.WhenTrue, visiting, contents, tuplePath)
+          || IsSessionAlias(model, conditional.WhenFalse, visiting, contents, tuplePath);
+      case ICoalesceOperation coalesce:
+        return IsSessionAlias(model, coalesce.Value, visiting, contents, tuplePath)
+          || IsSessionAlias(model, coalesce.WhenNull, visiting, contents, tuplePath);
+      case IConditionalAccessOperation conditionalAccess:
+        return IsSessionAlias(model, conditionalAccess.WhenNotNull, visiting, contents, tuplePath);
+      case IConditionalAccessInstanceOperation instance:
+        var access = instance.Syntax.AncestorsAndSelf().OfType<ConditionalAccessExpressionSyntax>().FirstOrDefault();
+        return access != null && IsSessionAlias(model, ExpressionOperation(model, access.Expression), visiting, contents, tuplePath);
+    }
+    return false;
+  }
+
+  // Select the matching tuple slot, so an independent sibling is not tainted.
+  private static IEnumerable<(IOperation? Value, int[] TuplePath)> SessionLocalValues(
+    SemanticModel model, ILocalSymbol local, SyntaxTree tree)
+  {
+    foreach (var value in LocalValues(model, local, tree))
+      yield return (ExpressionOperation(model, value), Array.Empty<int>());
+    foreach (var assignment in tree.GetRoot().DescendantNodes().OfType<AssignmentExpressionSyntax>())
+      if (model.GetOperation(assignment) is IDeconstructionAssignmentOperation deconstruction
+          && DeconstructionPath(deconstruction.Target, local) is { } path)
+        yield return (deconstruction.Value, path);
+  }
+
+  private static int[]? DeconstructionPath(IOperation target, ILocalSymbol local)
+  {
+    if (target is IDeclarationExpressionOperation declaration) return DeconstructionPath(declaration.Expression, local);
+    if (target is ILocalReferenceOperation reference)
+      return SymbolEqualityComparer.Default.Equals(reference.Local, local) ? Array.Empty<int>() : null;
+    if (target is ITupleOperation tuple)
+      for (var i = 0; i < tuple.Elements.Length; i++)
+        if (DeconstructionPath(tuple.Elements[i], local) is { } path) return new[] { i }.Concat(path).ToArray();
+    return null;
+  }
+
+  private static bool IsSessionOutOrIterationValue(SemanticModel model, ILocalSymbol local, SyntaxTree tree,
+    HashSet<ISymbol> visiting)
+  {
+    foreach (var argument in tree.GetRoot().DescendantNodes().OfType<ArgumentSyntax>()
+        .Where(argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)))
+    {
+      if (model.GetOperation(argument) is not IArgumentOperation output
+          || argument.Parent?.Parent is not InvocationExpressionSyntax call
+          || model.GetOperation(call) is not IInvocationOperation invocation
+          || invocation.TargetMethod.Name != "TryGetValue") continue;
+      var value = output.Value is IDeclarationExpressionOperation declaration ? declaration.Expression : output.Value;
+      if (value is ILocalReferenceOperation reference && SymbolEqualityComparer.Default.Equals(reference.Local, local)
+          && IsSessionAlias(model, invocation.Instance, visiting, contents: true)) return true;
+    }
+
+    foreach (var declaration in local.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax()))
+    {
+      var source = (declaration as ForEachStatementSyntax)?.Expression;
+      if (declaration is SingleVariableDesignationSyntax designation)
+        source = designation.Ancestors().OfType<ForEachVariableStatementSyntax>()
+          .FirstOrDefault(candidate => candidate.Variable.Span.Contains(designation.Span))?.Expression;
+      // Iteration copies the container's elements, not the container itself.
+      // A shallow copy therefore still exposes Session's mutable values.
+      if (source != null && IsSessionAlias(model, ExpressionOperation(model, source), visiting, contents: true))
+        return true;
+    }
+    return false;
+  }
+
+  // An element or member write mutates its container even when the target is a
+  // scalar. Reassignment/increment of an independent local does not.
+  private static bool IsSessionMutationTarget(SemanticModel model, IOperation? operation, HashSet<ISymbol>? visiting = null)
+  {
+    visiting ??= new(SymbolEqualityComparer.Default);
+    if (operation is ILocalReferenceOperation reference && reference.Local.RefKind != RefKind.None)
+    {
+      if (!visiting.Add(reference.Local)) return false;
+      try
+      {
+        return SessionLocalValues(model, reference.Local, operation.Syntax.SyntaxTree)
+          .Any(value => IsSessionMutationTarget(model, value.Value, visiting));
+      }
+      finally { visiting.Remove(reference.Local); }
+    }
+    return operation switch
+    {
+      IConversionOperation conversion => IsSessionMutationTarget(model, conversion.Operand, visiting),
+      IParenthesizedOperation parentheses => IsSessionMutationTarget(model, parentheses.Operand, visiting),
+      IArrayElementReferenceOperation element => IsSessionAlias(model, element.ArrayReference, new(SymbolEqualityComparer.Default)),
+      IPropertyReferenceOperation property => IsSessionAlias(model, property.Instance, new(SymbolEqualityComparer.Default))
+        || IsSessionMutationTarget(model, property.Instance, visiting),
+      IFieldReferenceOperation field => IsSessionAlias(model, field.Instance, new(SymbolEqualityComparer.Default))
+        || IsSessionMutationTarget(model, field.Instance, visiting),
+      ITupleOperation tuple => tuple.Elements.Any(element => IsSessionMutationTarget(model, element, visiting)),
+      _ => false,
+    };
+  }
+
+  private static IEnumerable<ExpressionSyntax> LocalValues(SemanticModel model, ILocalSymbol local, SyntaxTree tree) =>
+    local.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax())
+      .OfType<VariableDeclaratorSyntax>().Where(variable => variable.Initializer != null)
+      .Select(variable => variable.Initializer!.Value)
+      .Concat(tree.GetRoot().DescendantNodes().OfType<AssignmentExpressionSyntax>()
+        .Where(assignment => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local))
+        .Select(assignment => assignment.Right));
+
+  // Prove every definition of a document/database/transaction-manager alias
+  // belongs to this run. A transaction on another database is not nested in Tr.
+  private static bool IsRunDrawingValue(SemanticModel model, ExpressionSyntax expression, HashSet<ISymbol> visiting)
+  {
+    switch (ExpressionOperation(model, expression))
+    {
+      case IConversionOperation conversion when conversion.Operand.Syntax is ExpressionSyntax operand:
+        return IsRunDrawingValue(model, operand, visiting);
+      case IParenthesizedOperation parentheses when parentheses.Operand.Syntax is ExpressionSyntax operand:
+        return IsRunDrawingValue(model, operand, visiting);
+      case IConditionalOperation conditional when conditional.WhenTrue?.Syntax is ExpressionSyntax whenTrue
+          && conditional.WhenFalse?.Syntax is ExpressionSyntax whenFalse:
+        return IsRunDrawingValue(model, whenTrue, visiting) && IsRunDrawingValue(model, whenFalse, visiting);
+      case IPropertyReferenceOperation property:
+        if (InheritsFrom(property.Property.ContainingType, BaseClassName)
+            && property.Property.Name is "Db" or "Doc") return true;
+        return (property.Property.Name == "Database"
+              && InheritsFrom(property.Property.ContainingType, "Autodesk.AutoCAD.ApplicationServices.Document")
+            || property.Property.Name == "TransactionManager" && property.Property.ContainingType.ToDisplayString() == DatabaseTypeName)
+          && property.Instance?.Syntax is ExpressionSyntax instance && IsRunDrawingValue(model, instance, visiting);
+      case ILocalReferenceOperation reference:
+        var local = reference.Local;
+        if (local.RefKind != RefKind.None || !visiting.Add(local)) return false;
+        try
+        {
+          // Ref/out exposure and deconstruction make provenance ambiguous;
+          // LocalValues tracks only direct assignments to this local.
+          foreach (var name in expression.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
+          {
+            if (!SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(name).Symbol, local)) continue;
+            if (name.Ancestors().Any(parent => parent is RefExpressionSyntax
+                || parent is ArgumentSyntax argument && argument.RefOrOutKeyword.Kind() is SyntaxKind.RefKeyword or SyntaxKind.OutKeyword))
+              return false;
+            var assignment = name.Ancestors().OfType<AssignmentExpressionSyntax>()
+              .FirstOrDefault(candidate => candidate.Left.Span.Contains(name.Span));
+            if (assignment != null && (!assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                || !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assignment.Left).Symbol, local))) return false;
+          }
+          var values = LocalValues(model, local, expression.SyntaxTree).ToList();
+          return values.Count > 0 && values.All(value => IsRunDrawingValue(model, value, visiting));
+        }
+        finally { visiting.Remove(local); }
+      default:
+        return false;
+    }
   }
 
   private static string? DatabaseDenyReason(IMethodSymbol method, SimpleNameSyntax node, SemanticModel model)

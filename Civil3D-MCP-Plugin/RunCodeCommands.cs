@@ -31,7 +31,7 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class RunCodeCommands
 {
-  internal const int ApiVersion = 5;
+  internal const int ApiVersion = 6;
   private const int MaxCodeChars = 200_000;
   private const int DefaultTimeoutSeconds = 30;
   // Reads may take ten minutes and keep Civil 3D's UI busy. Writes stay short.
@@ -64,6 +64,11 @@ public static class RunCodeCommands
     public volatile bool TransactionEndedByScript;
     // Write mode: transactions the script left open and the run aborted.
     public int LeakedTransactions;
+    public JsonObject? Changes;
+    public volatile bool PreviewRolledBack;
+    public volatile bool PreviewUncertain;
+    public string? PreviewWarning;
+    public Exception? PreviewCaptureError;
     // 0 waiting, 1 started (main thread, just before the script is created),
     // 2 given up (request thread, cancelled while queued). The first claim
     // wins, so a script never starts after "cancelled before start" was recorded.
@@ -87,12 +92,13 @@ public static class RunCodeCommands
     }
 
     var mode = (PluginRuntime.GetOptionalString(parameters, "mode") ?? "read").Trim().ToLowerInvariant();
-    if (mode is not ("read" or "write"))
+    if (mode is not ("read" or "write" or "preview"))
     {
-      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'mode' must be 'read' or 'write'.");
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'mode' must be 'read', 'write' or 'preview'.");
     }
 
-    var writeMode = mode == "write";
+    var previewMode = mode == "preview";
+    var writeMode = mode != "read";
     var document = OptionalAuditString(parameters, "document")?.Trim();
     if (document != null && (document.Length < 1 || document.Length > 1024))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'document' must contain 1-1024 characters.");
@@ -130,6 +136,8 @@ public static class RunCodeCommands
     var argsPath = OptionalAuditString(parameters, "argsPath");
     var approval = OptionalAuditString(parameters, "approval");
     var copyOutputsTo = OptionalAuditString(parameters, "copyOutputsTo");
+    if (previewMode && copyOutputsTo != null)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Preview cannot roll back output copies; omit 'copyOutputsTo'.");
     if (copyOutputsTo != null)
     {
       try
@@ -149,6 +157,13 @@ public static class RunCodeCommands
     if (!keepOutputs && copyOutputsTo == null)
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'keepOutputs: false' requires 'copyOutputsTo'.");
     var scriptSha256 = RunCodeHelpers.Sha256Hex(code);
+    string argsJson;
+    try { argsJson = RunCodeArguments.CanonicalJson(args, OptionalAuditString(parameters, "argsJson")); }
+    catch (Exception exception) when (exception is ArgumentException or System.Text.Json.JsonException)
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", exception.Message);
+    }
+    var argsSha256 = RunCodeHelpers.Sha256Hex(argsJson);
 
     // Log the script before anything runs, so it is on disk even if Civil 3D hangs.
     var runId = $"{DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}-{Guid.NewGuid().ToString("N")[..8]}";
@@ -163,6 +178,7 @@ public static class RunCodeCommands
       ["startWithinSeconds"] = startWithinSeconds,
       ["args"] = args.DeepClone(),
       ["scriptSha256"] = scriptSha256,
+      ["argsSha256"] = argsSha256,
       ["keepOutputs"] = keepOutputs,
       ["status"] = "started",
     };
@@ -187,6 +203,7 @@ public static class RunCodeCommands
       ["runId"] = runId,
       ["mode"] = mode,
       ["scriptSha256"] = scriptSha256,
+      ["argsSha256"] = argsSha256,
       ["status"] = "started",
     };
     var warnings = new JsonArray();
@@ -201,7 +218,7 @@ public static class RunCodeCommands
       ScriptCompileResult compiled;
       try
       {
-        compiled = await Task.Run(() => CompileScript(code, "C3dMcpRun_" + runId.Replace('-', '_'), writeMode));
+        compiled = await Task.Run(() => CompileScript(code, "C3dMcpRun_" + runId.Replace('-', '_'), writeMode, previewMode));
       }
       catch (Exception exception) when (RunCodeAssemblies.IsRoslynLoadFailure(exception))
       {
@@ -226,7 +243,7 @@ public static class RunCodeCommands
       var (scriptType, context) = RunCodeAssemblies.LoadScript(runId, compiled.Assembly!, compiled.Pdb!, compiled.TypeName);
       try
       {
-        status = await ExecuteScriptAsync(scriptType, document, writeMode, args, TimeSpan.FromSeconds(timeoutSeconds),
+        status = await ExecuteScriptAsync(scriptType, document, writeMode, previewMode, args, TimeSpan.FromSeconds(timeoutSeconds),
           total, TimeSpan.FromSeconds(startWithinSeconds), runFolder, outcome, response);
         if (outcome.CancelledAfterCommit)
         {
@@ -240,7 +257,7 @@ public static class RunCodeCommands
         {
           warnings.Add("The script ended the run's transaction itself, so what is in the drawing is unknown: check it, and one UNDO reverts the whole run.");
         }
-        else if (writeMode && !outcome.Committed && outcome.Script != null)
+        else if (writeMode && !previewMode && !outcome.Committed && outcome.Script != null)
         {
           warnings.Add("The transaction was rolled back. Changes made outside Tr (database or system variables, files, Session) are not undone.");
         }
@@ -326,6 +343,11 @@ public static class RunCodeCommands
         summary["switchedBack"] = outcome.Activation.SwitchedBack;
       }
       if (outcome.Activation.Warning != null) warnings.Add(outcome.Activation.Warning);
+      if (outcome.Script?.ActivatedLayout == true)
+      {
+        response["activatedLayout"] = true;
+        summary["activatedLayout"] = true;
+      }
       response["status"] = status;
       response["ok"] = status == "ok";
       if (outcome.Drawing != null)
@@ -352,19 +374,31 @@ public static class RunCodeCommands
         : JsonValue.Create(outcome.Committed);
       if (writeMode)
       {
-        response["committed"] = committed?.DeepClone();
+        response["committed"] = previewMode ? JsonValue.Create(false) : committed?.DeepClone();
+      }
+      if (previewMode)
+      {
+        var uncertain = outcome.PreviewUncertain || outcome.TransactionEndedByScript
+          || outcome.Script != null && !outcome.PreviewRolledBack;
+        response["rolledBack"] = uncertain ? JsonValue.Create("unknown") : JsonValue.Create(true);
+        if (outcome.Changes != null) response["changes"] = outcome.Changes.DeepClone();
+        response["note"] = "Civil 3D commit-time updates (labels and dependent objects) are not counted. Preview leaves an empty undo step and clears redo, as failed writes do.";
+        if (outcome.PreviewWarning != null) warnings.Add(outcome.PreviewWarning);
+        if (uncertain && outcome.PreviewWarning == null)
+          warnings.Add("Preview rollback could not be confirmed; check the drawing and the run log before writing.");
+        if (warnings.Count > 0) response["warnings"] = warnings;
       }
 
       summary["status"] = status;
       summary["drawing"] = outcome.Drawing;
       summary["finishedUtc"] = DateTimeOffset.UtcNow.ToString("O");
       summary["timing"] = response["timing"]!.DeepClone();
-      summary["committed"] = committed;
+      summary["committed"] = previewMode ? JsonValue.Create(false) : committed;
       if (outcome.Script != null && !outcome.ActionDone && !outcome.Committed)
       {
         summary["note"] = "The request ended while the script was still running; a write is rolled back when it returns.";
       }
-      foreach (var key in new[] { "errors", "error", "resultShape", "resultBytes", "resultFile", "outputFile", "files", "copiedFiles", "sideErrors", "tryErrors", "warnings" })
+      foreach (var key in new[] { "errors", "error", "resultShape", "resultBytes", "resultFile", "outputFile", "files", "copiedFiles", "sideErrors", "tryErrors", "warnings", "rolledBack", "changes", "note" })
       {
         if (response[key] != null)
         {
@@ -414,7 +448,7 @@ public static class RunCodeCommands
   // its regular transaction), so the commit comes after the last checks and
   // outcome.Committed records what really happened. The script starts within
   // startWithin of the request (received) or not at all.
-  private static async Task<string> ExecuteScriptAsync(Type scriptType, string? document, bool writeMode, JsonObject args, TimeSpan budget,
+  private static async Task<string> ExecuteScriptAsync(Type scriptType, string? document, bool writeMode, bool previewMode, JsonObject args, TimeSpan budget,
     Stopwatch received, TimeSpan startWithin, string runFolder, RunOutcome outcome, JsonObject response)
   {
     var token = PluginRuntime.GetCurrentRequestCancellationToken();
@@ -444,10 +478,12 @@ public static class RunCodeCommands
         var script = (RunCodeScript)Activator.CreateInstance(scriptType)!;
         outcome.Script = script;
         outcome.Drawing = host.Doc?.Name;
-        script.Attach(host.Doc, database, host.Civil, transaction, writeMode, args, token, budget, runFolder);
+        script.Attach(host.Doc, database, host.Civil, transaction, writeMode, args, token, budget, runFolder, previewMode);
         var clock = Stopwatch.StartNew();
+        RunCodePreview? preview = null;
         try
         {
+          if (previewMode) preview = new RunCodePreview(database!, transaction!);
           var value = script.Run();
           outcome.RunMs = clock.ElapsedMilliseconds;
           // Save now, while the objects in the result are still open. Failure
@@ -477,8 +513,12 @@ public static class RunCodeCommands
               throw new InvalidOperationException("The script committed, aborted or disposed the run's transaction itself (for example through Db.TransactionManager.TopTransaction); its changes may or may not be in the drawing. Return instead of ending it.");
             }
 
-            transaction!.Commit();
-            outcome.Committed = true;
+            if (!previewMode)
+            {
+              transaction!.Commit();
+              outcome.Committed = true;
+            }
+            else script.Check();
           }
         }
         catch (Exception)
@@ -503,12 +543,58 @@ public static class RunCodeCommands
         }
         finally
         {
-          script.ReleaseOwned();
-          outcome.ActionDone = true;
+          try
+          {
+            if (previewMode && preview != null)
+            {
+              try
+              {
+                if (!outcome.TransactionEndedByScript)
+                  outcome.Changes = preview.Capture(script.Check);
+              }
+              catch (Exception error)
+              {
+                outcome.PreviewCaptureError = error;
+                outcome.PreviewWarning = $"Preview changes could not be captured ({error.Message}); no change summary is available.";
+              }
+              finally
+              {
+                // Detach before abort: rollback events are not script edits.
+                preview.Dispose();
+                if (preview.OutsideTransaction || preview.ObservationFailed)
+                {
+                  outcome.PreviewUncertain = true;
+                  outcome.PreviewWarning = preview.OutsideTransaction
+                    ? "Preview observed a database change outside Tr; rollback status is unknown. Check the drawing before writing."
+                    : "Preview could not inspect a database event; rollback status is unknown.";
+                }
+                try
+                {
+                  if (!outcome.TransactionEndedByScript)
+                  {
+                    transaction!.Abort();
+                    outcome.PreviewRolledBack = true;
+                  }
+                }
+                catch (Exception error)
+                {
+                  outcome.PreviewUncertain = true;
+                  outcome.PreviewWarning = $"Preview transaction abort failed ({error.Message}); rollback status is unknown.";
+                }
+              }
+            }
+          }
+          finally
+          {
+            try { script.ReleaseOwned(); }
+            finally { outcome.ActionDone = true; }
+          }
         }
 
         return true;
       }, outcome.Activation);
+      if (outcome.PreviewCaptureError != null)
+        throw outcome.PreviewCaptureError;
       return "ok";
     }
     catch (Exception exception) when (outcome.Script != null)
@@ -574,9 +660,9 @@ public static class RunCodeCommands
   // Not inlined: this is the first method that touches Roslyn types, and the
   // resolver must be registered before the JIT needs them.
   [MethodImpl(MethodImplOptions.NoInlining)]
-  private static ScriptCompileResult CompileScript(string code, string assemblyName, bool writeMode)
+  private static ScriptCompileResult CompileScript(string code, string assemblyName, bool writeMode, bool previewMode)
   {
-    return ScriptCompiler.Compile(code, assemblyName, RunCodeAssemblies.ReferencePaths(), writeMode);
+    return ScriptCompiler.Compile(code, assemblyName, RunCodeAssemblies.ReferencePaths(), writeMode, previewMode);
   }
 
   private static void AddOutput(JsonObject response, JsonArray warnings, RunOutcome outcome, string runFolder, int maxInlineBytes)

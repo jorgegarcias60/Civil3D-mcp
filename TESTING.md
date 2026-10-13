@@ -5,6 +5,51 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Run-code preview and drawing helpers: issues #20 and #22 (2026-10-12)
+
+Offline results for `jorgegarcias60/run-code-helpers-preview`, measured outside any
+sandbox on Jorge's machine on 2026-10-12. The integration build included
+`civil3d-2027`, this branch and `jorgegarcias60/plot-hardening`.
+
+| Check | Result |
+|---|---|
+| `npm run build` | ok |
+| vitest | All passed: 739 tests (55 files) |
+| `docs:check` | ok |
+| Plugin Release net8, refs-2026 | 0 warnings |
+| Plugin Release net10, C_References | 0 warnings |
+| RunCodeHarness, net8 and net10 | pass |
+| `tests/powershell/install-trusted.check.ps1` | 0 failures |
+
+New tests and checks cover:
+
+- #20: preview validation, API skew, separate approvals, args hashes, final counts and handle limits, drawing rollback, document targeting, and transaction, Session and filesystem guards.
+- #22: helper signatures and read-mode guards, text bounds, XClip geometry at large coordinates, xref units and paths, helper rollback and undo, viewport identity, activation and layout restoration.
+
+#### Live results
+
+Civil 3D 2026, 2026-10-12, run by Claude Code with the integration build installed
+and scratch drawings A (active) and B. The command passed 67, failed 0 and skipped 3
+(the long read, plus a dormant-layout check that found no candidate):
+
+`node scripts/live-run-code-smoke.mjs --approval client --expect-drawing RUNCODE-SMOKE --side <10 MB background> --damaged <fixtures> --other <B> --helpers --preview`
+
+- `--helpers`: TextBox corners for rotated DBText, MText and attributes; XClip kept only the inside line; AttachXref required an explicit scale for a unitless source, converted inches into feet as 1/12, and one UNDO removed it; SetViewport edits persisted after layout activation and the overall viewport was refused.
+- `--preview`: exact added, erased and modified counts and handles, unchanged drawings on A and with `document` = B, and refusal of system-variable and file writes.
+
+The same round passed 47 hardening checks with 0 failures and live-label-smoke 9/9.
+AutoCAD reads XClip's BackClip back as `1e300`, meaning no back plane, although the helper passes zero.
+
+Hand checks on a reopened drawing, with layouts not yet activated in the session,
+refused SetViewport on a dormant layout's overall viewport and restored the previous
+layout. An edit to a normal viewport on another dormant layout persisted after
+activation over COM and regeneration. The automated dormant-layout check has not
+been run live yet; it found no candidate in the smoke run.
+
+The live findings were fixed in this branch: preview identifies new objects by the
+starting Handseed because `IsNewObject` is false inside the open run transaction;
+SetViewport activates dormant layouts before identifying the overall viewport and
+restores the previous layout.
 ### Plot publishing hardening: issue #21 (2026-10-12)
 
 Offline results for `jorgegarcias60/plot-hardening`, measured outside any

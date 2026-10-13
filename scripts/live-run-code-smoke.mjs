@@ -5,7 +5,8 @@
 //
 //   npm run build
 //   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
-//     [--long <seconds>] [--damaged <directory>] [--other <open drawing path>] [--no-drawing] [--hardening]
+//     [--long <seconds>] [--damaged <directory>] [--other <open drawing path>] [--no-drawing] [--hardening] [--helpers]
+//     [--preview] [--other <open scratch drawing path>]
 //
 // --expect-drawing: the write cases run only when the active drawing's name contains
 //   this text (guards against testing on a real job by accident); without it, or
@@ -15,6 +16,9 @@
 //   OpenSide and bulk-sampling cases; skipped when not given.
 // --hardening: opt-in checks for #7, #11, #12 and #24. With this option,
 //   --damaged also accepts one damaged .dwg file inside the plugin's import roots.
+// --helpers: API 6 fixtures, only with --expect-drawing matching the scratch drawing.
+// --preview: API 6 rollback and guard checks, only on a named scratch drawing.
+//   Xref checks need the plugin's import roots to include its run-code folder.
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import net from "node:net";
@@ -38,6 +42,8 @@ const { values: options } = parseArgs({
     other: { type: "string" },
     "no-drawing": { type: "boolean", default: false },
     hardening: { type: "boolean", default: false },
+    helpers: { type: "boolean", default: false },
+    preview: { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -56,6 +62,14 @@ if (options["no-drawing"] && (options.other || expectDrawing || options["allow-w
 }
 if (approvalMode !== "token" && approvalMode !== "client") {
   console.error("--approval must be token or client");
+  process.exit(2);
+}
+if (options.helpers && (!expectDrawing || options["no-drawing"])) {
+  console.error("--helpers requires --expect-drawing <scratch drawing name> and an open scratch drawing");
+  process.exit(2);
+}
+if (options.preview && (!expectDrawing || options["no-drawing"] || options["allow-writes"])) {
+  console.error("--preview requires --expect-drawing <scratch drawing name> and an open scratch drawing");
   process.exit(2);
 }
 
@@ -344,6 +358,446 @@ function rawRpc(method, params, timeoutMs = 120_000) {
   });
 }
 
+// Static snippets also compile in the offline RunCodeHarness. No host code executes there.
+const helperScripts = {
+  dormantViewport: String.raw`
+var path = Doc.Name;
+if (!Path.IsPathFullyQualified(path) || !File.Exists(path) || !Path.IsPathFullyQualified(Db.Filename)
+    || !string.Equals(Path.GetFullPath(path), Path.GetFullPath(Db.Filename), StringComparison.OrdinalIgnoreCase))
+  return new { skip = "The open drawing has no saved DWG to read with OpenSide." };
+var original = LayoutManager.Current.CurrentLayout;
+var layouts = Open<DBDictionary>(Db.LayoutDictionaryId);
+var side = OpenSide(path);
+var savedLayouts = Open<DBDictionary>(side.LayoutDictionaryId);
+foreach (DBDictionaryEntry entry in layouts) {
+  var layout = Open<Layout>(entry.Value);
+  if (layout.ModelType || layout.LayoutName == original || !savedLayouts.Contains(layout.LayoutName)) continue;
+  var openViewports = layout.GetViewports();
+  if (openViewports.Count != 0) continue;
+  var paper = Open<BlockTableRecord>(layout.BlockTableRecordId);
+  var entities = paper.Cast<ObjectId>().Select(id => Open<DBObject>(id)).OfType<Viewport>().ToList();
+  if (entities.Count == 0) continue;
+  var saved = Open<Layout>(savedLayouts.GetAt(layout.LayoutName));
+  var savedViewports = saved.GetViewports();
+  if (savedViewports.Count == 0) continue;
+  var overall = Open<Viewport>(savedViewports[0]);
+  var matching = entities.FirstOrDefault(v => string.Equals(v.Handle.ToString(), overall.Handle.ToString(), StringComparison.OrdinalIgnoreCase));
+  if (matching == null) continue;
+  return new { layout = layout.LayoutName, handle = matching.Handle.ToString(),
+    savedHandle = overall.Handle.ToString(), openCount = openViewports.Count,
+    savedCount = savedViewports.Count, entityCount = entities.Count, original };
+}
+return new { skip = "No dormant saved paper layout has zero open GetViewports(), VIEWPORT entities, and a matching saved overall viewport." };
+`,
+  textSetup: String.raw`
+var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), true);
+var text = new DBText { TextString = "Rotated helper", Position = new Point3d(-1e6, -1e6, 0), Height = 2, Rotation = Math.PI / 6 };
+text.SetDatabaseDefaults(Db);
+ms.AppendEntity(text); Tr.AddNewlyCreatedDBObject(text, true); text.AdjustAlignment(Db);
+var mtext = new MText { Contents = "MText helper", Location = new Point3d(-1e6, -1e6 - 20, 0), TextHeight = 2, Width = 40, Rotation = Math.PI / 6 };
+mtext.SetDatabaseDefaults(Db);
+ms.AppendEntity(mtext); Tr.AddNewlyCreatedDBObject(mtext, true);
+return new[] { text.ObjectId, mtext.ObjectId };
+`,
+  textRead: String.raw`
+return ((JsonArray)Args["handles"]!).Select(node => {
+  var entity = Open<Entity>(ById((string)node!));
+  var extents = entity.GeometricExtents;
+  var corners = TextBox(entity);
+  var translated = TextBox(entity, Matrix3d.Displacement(new Vector3d(10, 20, 0)));
+  return new { corners, translated, min = extents.MinPoint, max = extents.MaxPoint };
+}).ToArray();
+`,
+  eraseEntities: String.raw`
+foreach (var node in (JsonArray)Args["handles"]!) {
+  var handle = new Handle(Convert.ToInt64((string)node!, 16));
+  if (Db.TryGetObjectId(handle, out var id) && !id.IsNull && !id.IsErased) Open<Entity>(id, true).Erase();
+}
+return 1;
+`,
+  clipSetup: String.raw`
+var blocks = Open<BlockTable>(Db.BlockTableId, true);
+var definition = new BlockTableRecord { Name = (string)Args["name"]! };
+var definitionId = blocks.Add(definition); Tr.AddNewlyCreatedDBObject(definition, true);
+foreach (var x in new[] { 2.0, 20.0 }) {
+  var line = new Line(new Point3d(x, 2, 0), new Point3d(x + 1, 3, 0));
+  definition.AppendEntity(line); Tr.AddNewlyCreatedDBObject(line, true);
+}
+var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), true);
+var reference = new BlockReference(new Point3d(-1e6, -1e6, 0), definitionId) { Rotation = Math.PI / 6, ScaleFactors = new Scale3d(2.5) };
+ms.AppendEntity(reference); Tr.AddNewlyCreatedDBObject(reference, true);
+return reference.ObjectId;
+`,
+  clipWrite: String.raw`
+var reference = Open<BlockReference>(ById((string)Args["handle"]!));
+var local = new[] { new Point3d(0,0,0), new Point3d(10,0,0), new Point3d(10,10,0), new Point3d(0,10,0) };
+return XClip(reference, local.Select(p => p.TransformBy(reference.BlockTransform)).ToArray());
+`,
+  clipRead: String.raw`
+using Autodesk.AutoCAD.DatabaseServices.Filters;
+var reference = Open<BlockReference>(ById((string)Args["handle"]!));
+var extension = Open<DBDictionary>(reference.ExtensionDictionary);
+var filters = Open<DBDictionary>(extension.GetAt("ACAD_FILTER"));
+var filter = Open<SpatialFilter>(filters.GetAt("SPATIAL"));
+var definition = filter.Definition;
+var points = definition.GetPoints().Cast<Point2d>().ToArray();
+bool Inside(Point3d p) {
+  var inside = false;
+  for (int i = 0, j = points.Length - 1; i < points.Length; j = i++) {
+    var a = points[i]; var b = points[j];
+    if ((a.Y > p.Y) != (b.Y > p.Y) && p.X < (b.X - a.X) * (p.Y - a.Y) / (b.Y - a.Y) + a.X) inside = !inside;
+  }
+  return inside;
+}
+var block = Open<BlockTableRecord>(reference.BlockTableRecord);
+var lines = block.Cast<ObjectId>().Select(id => Open<Line>(id)).ToArray();
+return new { id = filter.ObjectId, points, definition.Enabled, definition.Elevation, definition.FrontClip, definition.BackClip,
+  total = lines.Length, visible = lines.Count(line => Inside(line.StartPoint) && Inside(line.EndPoint)) };
+`,
+  clipCleanup: String.raw`
+var blocks = Open<BlockTable>(Db.BlockTableId);
+if (blocks.Has((string)Args["name"]!)) {
+  var definition = Open<BlockTableRecord>(blocks[(string)Args["name"]!], true);
+  foreach (ObjectId id in definition.GetBlockReferenceIds(true, false)) Open<BlockReference>(id, true).Erase();
+  definition.Erase();
+}
+return 1;
+`,
+  xrefSetup: String.raw`
+var folder = (string)Args["folder"]!;
+var originalUnits = Db.Insunits.ToString();
+foreach (var units in new[] { UnitsValue.Inches, UnitsValue.Undefined }) {
+  // A new fixture needs default symbol tables; false is for reading an existing DWG.
+  using var source = new Database(true, true);
+  source.Insunits = units;
+  using (var t = source.TransactionManager.StartTransaction()) {
+    var ms = (BlockTableRecord)t.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(source), OpenMode.ForWrite);
+    var line = new Line(Point3d.Origin, new Point3d(12,0,0));
+    ms.AppendEntity(line); t.AddNewlyCreatedDBObject(line, true); t.Commit();
+  }
+  source.SaveAs(Path.Combine(folder, units == UnitsValue.Inches ? "helpers-inches.dwg" : "helpers-unitless.dwg"), DwgVersion.Current);
+}
+Db.Insunits = UnitsValue.Feet;
+return originalUnits;
+`,
+  xrefAuto: String.raw`
+var result = AttachXref((string)Args["path"]!, new Point3d(-1e6, -1e6, 0), layer: (string)Args["layer"]!, blockName: (string)Args["name"]!);
+var reference = Open<BlockReference>(result.ReferenceId);
+return new { value = result, position = reference.Position, scale = reference.ScaleFactors.X, layer = reference.Layer,
+  length = reference.GeometricExtents.MaxPoint.X - reference.GeometricExtents.MinPoint.X };
+`,
+  xrefCount: String.raw`
+var blocks = Open<BlockTable>(Db.BlockTableId);
+var layers = Open<LayerTable>(Db.LayerTableId);
+return new { definition = blocks.Has((string)Args["name"]!), layer = layers.Has((string)Args["layer"]!),
+  inserts = ModelSpace<BlockReference>().Count(r => r.Name == (string)Args["name"]!) };
+`,
+  xrefUnitless: String.raw`
+var name = (string)Args["name"]!;
+var layer = (string)Args["layer"]!;
+var recovered = Try("unitless", () => AttachXref((string)Args["path"]!, Point3d.Origin, layer: layer, blockName: name));
+var blocks = Open<BlockTable>(Db.BlockTableId);
+var layers = Open<LayerTable>(Db.LayerTableId);
+return new { failed = recovered == null, errors = TryErrors, partialDefinition = blocks.Has(name), partialLayer = layers.Has(layer) };
+`,
+  xrefExplicit: String.raw`
+return AttachXref((string)Args["path"]!, new Point3d(-1e6, -1e6, 0), scale: 1.0 / 12, layer: (string)Args["layer"]!, blockName: (string)Args["name"]!);
+`,
+  xrefCleanup: String.raw`
+foreach (var node in (JsonArray)Args["names"]!) {
+  var name = (string)node!;
+  var blocks = Open<BlockTable>(Db.BlockTableId);
+  if (blocks.Has(name)) {
+    var definition = Open<BlockTableRecord>(blocks[name]);
+    foreach (ObjectId id in definition.GetBlockReferenceIds(true, false)) Open<BlockReference>(id, true).Erase();
+    Db.DetachXref(definition.ObjectId);
+  }
+}
+foreach (var node in (JsonArray)Args["layers"]!) {
+  var layers = Open<LayerTable>(Db.LayerTableId);
+  if (layers.Has((string)node!)) Open<LayerTableRecord>(layers[(string)node!], true).Erase();
+}
+Db.Insunits = Enum.Parse<UnitsValue>((string)Args["units"]!);
+return 1;
+`,
+  viewportSetup: String.raw`
+var manager = LayoutManager.Current;
+var original = manager.CurrentLayout;
+try {
+  var id = manager.CreateLayout((string)Args["layout"]!);
+  manager.CurrentLayout = (string)Args["layout"]!;
+  var layout = Open<Layout>(id);
+  var overall = layout.GetViewports()[0];
+  var ps = Open<BlockTableRecord>(layout.BlockTableRecordId, true);
+  var viewport = new Viewport { CenterPoint = new Point3d(10,10,0), Width = 8, Height = 5, ViewDirection = Vector3d.ZAxis };
+  ps.AppendEntity(viewport); Tr.AddNewlyCreatedDBObject(viewport, true); viewport.On = true; viewport.Locked = true;
+  return new { handle = viewport.ObjectId, overall, original };
+} finally { manager.CurrentLayout = original; }
+`,
+  viewportWrite: String.raw`
+return SetViewport((string)Args["layout"]!, ById((string)Args["handle"]!), paperCenter: new Point3d(18,12,0),
+  paperWidth: 26, paperHeight: 10, modelCenter: new Point3d(1000,2000,0), customScale: 0.025, twistAngle: 0.15, locked: true);
+`,
+  viewportRead: String.raw`
+var viewport = Open<Viewport>(ById((string)Args["handle"]!));
+return new { id = viewport.ObjectId, center = viewport.CenterPoint, width = viewport.Width, height = viewport.Height,
+  target = viewport.ViewTarget, viewCenter = viewport.ViewCenter, viewHeight = viewport.ViewHeight,
+  scale = viewport.CustomScale, twist = viewport.TwistAngle, locked = viewport.Locked, current = LayoutManager.Current.CurrentLayout };
+`,
+  viewportActivate: String.raw`
+LayoutManager.Current.CurrentLayout = (string)Args["layout"]!;
+return LayoutManager.Current.CurrentLayout;
+`,
+  viewportOverall: String.raw`
+return SetViewport((string)Args["layout"]!, ById((string)Args["handle"]!), paperWidth: 7);
+`,
+  viewportCleanup: String.raw`
+var manager = LayoutManager.Current;
+manager.CurrentLayout = (string)Args["original"]!;
+var layouts = Open<DBDictionary>(Db.LayoutDictionaryId);
+if (layouts.Contains((string)Args["layout"]!)) manager.DeleteLayout((string)Args["layout"]!);
+return 1;
+`,
+};
+
+async function helperChecks(runCodeApi) {
+  if (runCodeApi < 6) {
+    skip("helpers #22 (plugin API below 6)", `runCodeApi=${runCodeApi}`);
+    return;
+  }
+  const drawing = await run({ code: "return Doc.Name;" });
+  if (drawing.status !== "ok" || typeof drawing.result !== "string"
+      || !drawing.result.toLowerCase().includes(expectDrawing.toLowerCase())) {
+    throw new Error("Active drawing changed before helper checks; stopping before any helper write.");
+  }
+  const unique = `RUNCODE-HELPERS-${process.pid}-${Date.now()}`;
+  const execute = async (name, args = {}, mode = "write") => await run({ code: helperScripts[name], args, mode });
+  const requireOk = (response) => {
+    if (response.status !== "ok") throw new Error(JSON.stringify({ status: response.status, errors: response.errors, error: response.error }));
+    return response.result;
+  };
+  const close = (a, b) => typeof a === "number" && Math.abs(a - b) < 1e-6;
+  const vector = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => close(v, b[i]));
+
+  await check("helpers: dormant layout overall viewport refuses without mutation", async () => {
+    const probe = await execute("dormantViewport", {}, "read");
+    if (probe.status === "runtime_error" && /CIVIL3D_(?:IMPORT|FILE)_ROOTS|outside.*roots|PATH_NOT_ALLOWED/i.test(probe.error?.message ?? "")) {
+      skip("helpers: dormant layout overall viewport (saved DWG outside import roots)", probe.error.message);
+      return;
+    }
+    const fixture = requireOk(probe);
+    if (fixture.skip) { skip("helpers: dormant layout overall viewport", fixture.skip); return; }
+    const args = { layout: fixture.layout, handle: fixture.handle };
+    const before = requireOk(await execute("viewportRead", args, "read"));
+    const refused = await execute("viewportOverall", args);
+    const after = requireOk(await execute("viewportRead", args, "read"));
+    record("helpers: dormant layout overall viewport refuses without mutation",
+      fixture.openCount === 0 && fixture.savedCount > 0 && fixture.entityCount > 0
+        && fixture.handle === fixture.savedHandle && before.id === fixture.handle
+        && refused.status === "runtime_error" && refused.committed === false && refused.activatedLayout === true
+        && /overall.*paper space.*revert/i.test(refused.error?.message ?? "")
+        && before.current === fixture.original && after.current === fixture.original
+        && JSON.stringify(before) === JSON.stringify(after),
+      { fixture, status: refused.status, committed: refused.committed, activatedLayout: refused.activatedLayout,
+        error: refused.error?.message, before, after });
+  });
+
+  let textHandles = [];
+  try {
+    await check("helpers: TextBox rotated DBText and MText match extents", async () => {
+      textHandles = requireOk(await execute("textSetup"));
+      const response = await execute("textRead", { handles: textHandles }, "read");
+      const values = requireOk(response);
+      const inReadingFrame = corners => {
+        const right = [corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]];
+        const up = [corners[3][0] - corners[0][0], corners[3][1] - corners[0][1]];
+        const normalize = v => v.map(x => x / Math.hypot(...v));
+        return vector(normalize(right), [Math.cos(Math.PI / 6), Math.sin(Math.PI / 6)])
+          && vector(normalize(up), [-Math.sin(Math.PI / 6), Math.cos(Math.PI / 6)]);
+      };
+      const valid = values.length === 2 && values.every(({ corners, translated, min, max }) =>
+        corners.length === 4 && inReadingFrame(corners) && [0, 1, 2].every(axis => close(Math.min(...corners.map(p => p[axis])), min[axis])
+          && close(Math.max(...corners.map(p => p[axis])), max[axis]))
+        && corners.every((p, i) => vector(translated[i], [p[0] + 10, p[1] + 20, p[2]])));
+      record("helpers: TextBox rotated DBText and MText match extents", valid, values);
+    });
+  } finally {
+    if (textHandles.length) await check("helpers: text cleanup", async () => {
+      requireOk(await execute("eraseEntities", { handles: textHandles }));
+      record("helpers: text cleanup", true);
+    });
+  }
+
+  const clipName = `${unique}-CLIP`;
+  try {
+    await check("helpers: XClip transformed insert keeps only the inside line", async () => {
+      const handle = requireOk(await execute("clipSetup", { name: clipName }));
+      const first = requireOk(await execute("clipWrite", { handle }));
+      const second = requireOk(await execute("clipWrite", { handle }));
+      const value = requireOk(await execute("clipRead", { handle }, "read"));
+      record("helpers: XClip transformed insert keeps only the inside line", first !== second && value.id === second
+        && value.Enabled && value.Elevation === 0 && value.FrontClip === 0
+        && (value.BackClip === 0 || Math.abs(value.BackClip) >= 1e299)
+        && value.total === 2 && value.visible === 1 && value.points.length === 4
+        && [[0,0], [10,0], [10,10], [0,10]].every(p => value.points.some(q => vector(q, p))), value);
+    });
+  } finally {
+    await check("helpers: clip cleanup", async () => {
+      requireOk(await execute("clipCleanup", { name: clipName }));
+      record("helpers: clip cleanup", true);
+    });
+  }
+
+  const names = [`${unique}-INCHES`, `${unique}-UNITLESS`];
+  const layers = [`${unique}-INCHES-LAYER`, `${unique}-UNITLESS-LAYER`];
+  const initial = requireOk(await run({ code: "return new { folder = RunFolder, units = Db.Insunits.ToString() };" }));
+  const paths = [join(initial.folder, "helpers-inches.dwg"), join(initial.folder, "helpers-unitless.dwg")];
+  try {
+    await check("helpers: AttachXref scale 1/12 and one UNDO", async () => {
+      requireOk(await execute("xrefSetup", { folder: initial.folder }));
+      const attached = await execute("xrefAuto", { path: paths[0], name: names[0], layer: layers[0] });
+      if (attached.status === "runtime_error" && /CIVIL3D_(?:IMPORT|FILE)_ROOTS|outside.*roots|PATH_NOT_ALLOWED/i.test(attached.error?.message ?? "")) {
+        skip("helpers: AttachXref fixtures refused by import-root policy", attached.error.message);
+        return;
+      }
+      const value = requireOk(attached);
+      record("helpers: AttachXref inches into feet uses 1/12", attached.committed === true && close(value.value.Scale, 1 / 12)
+        && close(value.scale, 1 / 12) && close(value.length, 1) && vector(value.position, [-1e6,-1e6,0]) && value.layer === layers[0], value);
+      // No intervening writes: undo exactly the committed attach, not fixture setup.
+      const before = requireOk(await execute("xrefCount", { name: names[0], layer: layers[0] }, "read"));
+      if (!attached.committed || before.inserts !== 1) throw new Error("Attach did not commit exactly one reference; UNDO was not sent.");
+      const approvalToken = await approve("civil3d_drawing", "undo", { action: "undo", steps: 1 });
+      const undo = await call("civil3d_drawing", { action: "undo", steps: 1, approvalToken });
+      if (undo.isError) throw new Error(`UNDO failed: ${text(undo)}`);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const after = requireOk(await execute("xrefCount", { name: names[0], layer: layers[0] }, "read"));
+      record("helpers: one UNDO removes attach and its layer", !after.definition && !after.layer && after.inserts === 0, after);
+      const failed = requireOk(await execute("xrefUnitless", { path: paths[1], name: names[1], layer: layers[1] }));
+      record("helpers: unitless xref fails without partial changes", failed.failed && !failed.partialDefinition && !failed.partialLayer
+        && failed.errors.length === 1 && /explicit scale/i.test(failed.errors[0].Message), failed);
+      const explicit = requireOk(await execute("xrefExplicit", { path: paths[1], name: names[1], layer: layers[1] }));
+      const explicitCount = requireOk(await execute("xrefCount", { name: names[1], layer: layers[1] }, "read"));
+      record("helpers: unitless xref works with explicit scale", close(explicit.Scale, 1 / 12) && explicitCount.inserts === 1, explicit);
+    });
+  } finally {
+    await check("helpers: xref cleanup and unit restoration", async () => {
+      requireOk(await execute("xrefCleanup", { names, layers, units: initial.units }));
+      for (const path of paths) rmSync(path, { force: true });
+      record("helpers: xref cleanup and unit restoration", true);
+    });
+  }
+
+  const layoutName = `${unique}-LAYOUT`;
+  let original = requireOk(await run({ code: "return LayoutManager.Current.CurrentLayout;" }));
+  try {
+    await check("helpers: SetViewport persists after non-current layout activation", async () => {
+      const fixture = requireOk(await execute("viewportSetup", { layout: layoutName }));
+      original = fixture.original;
+      const args = { layout: layoutName, handle: fixture.handle };
+      const changedResponse = await execute("viewportWrite", args);
+      const changed = requireOk(changedResponse);
+      const before = requireOk(await execute("viewportRead", args, "read"));
+      requireOk(await execute("viewportActivate", { layout: layoutName }));
+      const after = requireOk(await execute("viewportRead", args, "read"));
+      const valid = value => value.id === fixture.handle && vector(value.center, [18,12,0]) && close(value.width, 26)
+        && close(value.height, 10) && vector(value.target, [1000,2000,0]) && vector(value.viewCenter, [0,0])
+        && close(value.viewHeight, 400) && close(value.scale, 0.025) && close(value.twist, 0.15) && value.locked;
+      record("helpers: SetViewport persists after non-current layout activation", changed === fixture.handle
+        && changedResponse.activatedLayout === true && valid(before) && valid(after)
+        && before.current === original && after.current === layoutName, { before, after });
+      const overallArgs = { layout: layoutName, handle: fixture.overall };
+      const overallBefore = requireOk(await execute("viewportRead", overallArgs, "read"));
+      const refused = await execute("viewportOverall", overallArgs);
+      const overallAfter = requireOk(await execute("viewportRead", overallArgs, "read"));
+      record("helpers: SetViewport refuses overall viewport without changing it", refused.status === "runtime_error" && refused.committed === false
+        && /overall.*paper space.*revert/i.test(refused.error?.message ?? "")
+        && JSON.stringify(overallBefore) === JSON.stringify(overallAfter), { status: refused.status, error: refused.error });
+    });
+  } finally {
+    await check("helpers: viewport cleanup and layout restoration", async () => {
+      requireOk(await execute("viewportCleanup", { layout: layoutName, original }));
+      record("helpers: viewport cleanup and layout restoration", true);
+    });
+  }
+}
+
+async function previewChecks(runCodeApi, activeDrawing) {
+  if (runCodeApi < 6) { skip("preview (plugin API below 6)", `runCodeApi=${runCodeApi}`); return; }
+  const tag = `RUNCODE-PREVIEW-${process.pid}-${Date.now()}`;
+  const setupCode = [
+    "var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), true);",
+    "var handles = new List<string>();",
+    "foreach (var suffix in new[] { \"-ERASE\", \"-MODIFY\" }) {",
+    "  var text = new DBText { TextString = (string)Args[\"tag\"] + suffix, Layer = \"0\", Position = new Point3d(-1e6, -1e6, 0), Height = 1 };",
+    "  ms.AppendEntity(text); Tr.AddNewlyCreatedDBObject(text, true); handles.Add(text.Handle.ToString());",
+    "}",
+    "return handles;",
+  ].join("\n");
+  const snapshotCode = [
+    "var tag = (string)Args[\"tag\"];",
+    "return new { name = Doc.Name, objectCount = ModelSpace().Count(), count = ModelSpace<DBText>().Count(t => t.TextString.StartsWith(tag)),",
+    "  erase = Open<DBText>(ById((string)Args[\"erase\"])).TextString,",
+    "  modify = Open<DBText>(ById((string)Args[\"modify\"])).TextString,",
+    // GetVariable belongs to this document even when a read targets B while A is active.
+    "  dbmod = Convert.ToInt32(((dynamic)Doc.GetAcadDocument()).GetVariable(\"DBMOD\")) };",
+  ].join("\n");
+  const previewCode = [
+    "Open<DBText>(ById((string)Args[\"erase\"]), true).Erase();",
+    "Open<DBText>(ById((string)Args[\"modify\"]), true).TextString = (string)Args[\"tag\"] + \"-CHANGED\";",
+    "var ms = Open<BlockTableRecord>(SymbolUtilityServices.GetBlockModelSpaceId(Db), true);",
+    "for (int i = 0; i < 3; i++) {",
+    "  var text = new DBText { TextString = (string)Args[\"tag\"] + \"-ADDED-\" + i, Layer = \"0\", Position = new Point3d(-1e6 + i, -1e6, 0), Height = 1 };",
+    "  ms.AppendEntity(text); Tr.AddNewlyCreatedDBObject(text, true);",
+    "}",
+    "return ModelSpace<DBText>().Count(t => t.TextString.StartsWith((string)Args[\"tag\"]));",
+  ].join("\n");
+  const targets = [undefined, ...(options.other ? [resolve(options.other)] : [])];
+  for (const document of targets) {
+    const label = document ? "target B" : "active A";
+    const runIn = async (parameters) => await run({ ...(document ? { document } : {}), ...parameters });
+    const initialActive = (await run({ code: "return Doc.Name;" })).result;
+    if (initialActive?.toLowerCase() !== activeDrawing.toLowerCase()) throw new Error("Active scratch drawing changed before preview checks");
+    let handles;
+    try {
+      const setup = await runIn({ mode: "write", code: setupCode, args: { tag } });
+      if (setup.status !== "ok" || setup.committed !== true || setup.result?.length !== 2) throw new Error(`preview fixture setup failed: ${JSON.stringify(setup)}`);
+      handles = setup.result;
+      const args = { tag, erase: handles[0], modify: handles[1] };
+      const before = await runIn({ code: snapshotCode, args });
+      const preview = await runIn({ mode: "preview", code: previewCode, args });
+      const after = await runIn({ code: snapshotCode, args });
+      const activeAfter = (await run({ code: "return Doc.Name;" })).result;
+      const textGroup = preview.changes?.byType?.find(row => row.type.toUpperCase() === "TEXT" && row.layer === "0");
+      record(`preview ${label}: counts and rollback`, preview.status === "ok" && preview.committed === false && preview.rolledBack === true
+        && textGroup?.added === 3 && textGroup?.erased === 1 && textGroup?.modified === 1
+        && JSON.stringify(preview.changes?.erasedHandles) === JSON.stringify([handles[0]])
+        && preview.changes?.modifiedHandles?.filter(handle => handle === handles[1]).length === 1
+        && preview.changes?.truncated === false && before.result?.count === 2
+        && JSON.stringify(after.result) === JSON.stringify(before.result)
+        && activeAfter?.toLowerCase() === activeDrawing.toLowerCase()
+        && (document ? preview.activated === true && preview.switchedBack === true : true),
+      { textGroup, changes: preview.changes, before: before.result, after: after.result, activeAfter, activated: preview.activated, switchedBack: preview.switchedBack });
+      for (const code of ["Application.SetSystemVariable(\"CMDECHO\", 0); return 1;", "WriteFile(\"preview.txt\", \"unsafe\"); return 1;"]) {
+        const cmdechoBefore = (await runIn({ code: "return Convert.ToInt32(Application.GetSystemVariable(\"CMDECHO\"));" })).result;
+        const refused = await runIn({ mode: "preview", code });
+        const cmdechoAfter = (await runIn({ code: "return Convert.ToInt32(Application.GetSystemVariable(\"CMDECHO\"));" })).result;
+        record(`preview ${label}: refuses ${code.startsWith("WriteFile") ? "WriteFile" : "SetSystemVariable"}`,
+          refused.status === "rejected" && refused.committed === false && cmdechoBefore === cmdechoAfter
+          && (!refused.logFolder || !existsSync(join(refused.logFolder, "preview.txt"))),
+          { status: refused.status, errors: refused.errors, cmdechoBefore, cmdechoAfter });
+      }
+    } finally {
+      if (handles) {
+        const cleanup = await runIn({ mode: "write", code: [
+          "foreach (var id in ((JsonArray)Args[\"handles\"]!).Select(h => ById((string)h!))) Open<DBText>(id, true).Erase();",
+          "return 1;",
+        ].join("\n"), args: { handles } });
+        record(`preview ${label}: fixture cleanup`, cleanup.status === "ok" && cleanup.committed === true, { status: cleanup.status, committed: cleanup.committed });
+      }
+    }
+  }
+}
+
 async function check(name, fn) {
   try {
     await fn();
@@ -391,6 +845,7 @@ try {
   if (expectDrawing && !drawingName.toLowerCase().includes(expectDrawing.toLowerCase())) {
     throw new Error(`Active drawing '${drawingName}' does not contain '${expectDrawing}'; stopping before any write.`);
   }
+  if (options.helpers) await helperChecks(runCodeApi);
 
   if (options.other) {
     if (runCodeApi < 4) {
@@ -1026,6 +1481,7 @@ try {
 
   }
   if (options.hardening) await hardeningChecks(!options["no-drawing"]);
+  if (options.preview) await previewChecks(runCodeApi, drawingName);
   console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", passes: results.filter((result) => result.passed === true).length,
     failures, skips, drawing: drawingName, results }, null, 2));
   process.exitCode = failures === 0 ? 0 : 1;

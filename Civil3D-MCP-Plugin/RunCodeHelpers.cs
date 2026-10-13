@@ -7,6 +7,29 @@ namespace Civil3DMcpPlugin;
 /// <summary>Small, AutoCAD-free helpers shared with the offline harness.</summary>
 internal static class RunCodeHelpers
 {
+  // Activation is needed even for populated non-current layouts. Keep the
+  // edit's transaction inside this callback so it closes before restoration.
+  internal static T WithCurrentLayout<T>(string layoutName, bool viewportsEmpty,
+    Func<string> getCurrentLayout, Action<string> setCurrentLayout, Action activated, Func<T> edit)
+  {
+    var previous = getCurrentLayout();
+    var activate = viewportsEmpty || !string.Equals(previous, layoutName, StringComparison.OrdinalIgnoreCase);
+    try
+    {
+      if (activate)
+      {
+        setCurrentLayout(layoutName);
+        activated();
+      }
+      return edit();
+    }
+    finally
+    {
+      // Do not check the request budget here: cancellation still restores.
+      if (activate) setCurrentLayout(previous);
+    }
+  }
+
   internal static (int Index, string? Error) MatchDocument(string key, IReadOnlyList<string> openNames)
   {
     key = key.Trim().Replace('/', Path.DirectorySeparatorChar);
@@ -56,4 +79,69 @@ internal static class RunCodeHelpers
 
   internal static bool IsDrawingContentError(string? status) => status is
     "DwgNeedsRecovery" or "DwgNotRecoverable" or "InvalidDwgVersion" or "DwgObjectImproperlyRead";
+
+  internal static double XrefScale(double? scale, string sourceUnits, string hostUnits, Func<double> conversion)
+  {
+    if (scale.HasValue)
+    {
+      if (!double.IsFinite(scale.Value) || scale.Value <= 0) throw new ArgumentOutOfRangeException(nameof(scale), "Xref scale must be finite and positive.");
+      return scale.Value;
+    }
+    if (sourceUnits is "Undefined" or "Unitless" || hostUnits is "Undefined" or "Unitless")
+      throw new ArgumentException($"Cannot infer xref scale from source units '{sourceUnits}' and host units '{hostUnits}'; provide an explicit scale.");
+    if ((sourceUnits is "Feet" or "USSurveyFeet") && (hostUnits is "Feet" or "USSurveyFeet")) return 1;
+    var result = conversion();
+    if (!double.IsFinite(result) || result <= 0)
+      throw new ArgumentException($"Invalid conversion from '{sourceUnits}' to '{hostUnits}'; provide an explicit scale.");
+    return result;
+  }
+
+  internal static string XrefPathName(string source, string host, bool relative)
+  {
+    var full = Path.GetFullPath(source);
+    if (!relative || !Path.IsPathFullyQualified(host)) return full;
+    var hostDirectory = Path.GetDirectoryName(Path.GetFullPath(host));
+    if (hostDirectory == null || !string.Equals(Path.GetPathRoot(full), Path.GetPathRoot(hostDirectory), StringComparison.OrdinalIgnoreCase)) return full;
+    var path = Path.GetRelativePath(hostDirectory, full);
+    return path.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+      ? path : "." + Path.DirectorySeparatorChar + path;
+  }
+
+  internal static (double X, double Y)[] ClipPolygon(IReadOnlyList<(double X, double Y)> points, Action? check = null)
+  {
+    if (points == null) throw new ArgumentNullException(nameof(points));
+    var vertices = points.ToList();
+    if (vertices.Count > 1 && vertices[0] == vertices[^1]) vertices.RemoveAt(vertices.Count - 1);
+    if (vertices.Count < 3 || vertices.Any(p => !double.IsFinite(p.X) || !double.IsFinite(p.Y)) || vertices.Distinct().Count() < 3)
+      throw new ArgumentException("XClip requires at least three distinct, finite points.", nameof(points));
+    double cross((double X, double Y) a, (double X, double Y) b, (double X, double Y) c) =>
+      (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+    var area = 0.0;
+    var origin = vertices[0];
+    for (var i = 0; i < vertices.Count; i++)
+    {
+      check?.Invoke();
+      var a = vertices[i]; var b = vertices[(i + 1) % vertices.Count];
+      if (a == b) throw new ArgumentException("XClip has a zero-length edge.", nameof(points));
+      // Translate before multiplying: absolute-coordinate products can cancel
+      // the area of a small clip boundary far from the drawing origin.
+      area += (a.X - origin.X) * (b.Y - origin.Y) - (b.X - origin.X) * (a.Y - origin.Y);
+      for (var j = i + 1; j < vertices.Count; j++)
+      {
+        check?.Invoke();
+        if (j == i + 1 || i == 0 && j == vertices.Count - 1) continue;
+        var c = vertices[j]; var d = vertices[(j + 1) % vertices.Count];
+        var c1 = cross(a, b, c); var c2 = cross(a, b, d);
+        var c3 = cross(c, d, a); var c4 = cross(c, d, b);
+        bool between(double x, double a, double b) => x >= Math.Min(a, b) && x <= Math.Max(a, b);
+        bool on((double X, double Y) x, (double X, double Y) y, (double X, double Y) z) =>
+          cross(x, y, z) == 0 && between(z.X, x.X, y.X) && between(z.Y, x.Y, y.Y);
+        if ((c1 * c2 < 0 && c3 * c4 < 0) || on(a, b, c) || on(a, b, d) || on(c, d, a) || on(c, d, b))
+          throw new ArgumentException("XClip polygon self-intersects or has touching edges.", nameof(points));
+      }
+    }
+    if (!double.IsFinite(area) || Math.Abs(area) < 1e-12) throw new ArgumentException("XClip polygon has zero area.", nameof(points));
+    if (area < 0) vertices.Reverse();
+    return vertices.ToArray();
+  }
 }
