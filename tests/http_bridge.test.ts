@@ -38,7 +38,7 @@ interface BridgeHandle {
   close: () => Promise<void>;
 }
 
-async function launchBridge(options: Parameters<typeof startHttpBridge>[0] = {}): Promise<BridgeHandle> {
+async function launchBridge(options: Parameters<typeof startHttpBridge>[0] = {}, portAttempt = 0): Promise<BridgeHandle> {
   const server = startHttpBridge({ port: 0, host: "127.0.0.1", ...options });
 
   await new Promise<void>((resolve, reject) => {
@@ -47,7 +47,7 @@ async function launchBridge(options: Parameters<typeof startHttpBridge>[0] = {})
   });
 
   const address = server.address() as AddressInfo;
-  return {
+  const handle = {
     server,
     baseUrl: `http://127.0.0.1:${address.port}`,
     close: () =>
@@ -55,6 +55,20 @@ async function launchBridge(options: Parameters<typeof startHttpBridge>[0] = {})
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
+  // Windows can assign an ephemeral port that Node fetch refuses before sending.
+  // Probe cheap liveness and retry only that error, never a bridge failure.
+  try {
+    const response = await fetch(`${handle.baseUrl}/health`);
+    await response.arrayBuffer();
+  } catch (error) {
+    await handle.close();
+    if (portAttempt < 20 && error instanceof TypeError
+      && error.cause instanceof Error && error.cause.message === "bad port") {
+      return await launchBridge(options, portAttempt + 1);
+    }
+    throw error;
+  }
+  return handle;
 }
 
 interface BridgeResponse {

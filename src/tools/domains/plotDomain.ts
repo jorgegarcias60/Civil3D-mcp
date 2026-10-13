@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { withApplicationConnection } from "../../utils/ConnectionManager.js";
+import { withApplicationConnection, type ApplicationCommandClient } from "../../utils/ConnectionManager.js";
+import { Civil3DRpcError } from "../../utils/SocketClient.js";
 import type { DomainToolDefinition } from "../domainRuntime.js";
 
 /**
@@ -23,6 +24,7 @@ export const PLOT_JOB_OPERATIONS = {
 } as const;
 
 const OrientationSchema = z.enum(["portrait", "landscape"]);
+const NonBlankStringSchema = z.string().refine((value) => value.trim().length > 0, "must not be blank");
 
 const PlotSettingsSummaryShape = {
   device: z.string().nullable(),
@@ -40,9 +42,12 @@ const LayoutSummarySchema = z.object({
   name: z.string(),
   tabOrder: z.number().int(),
   isModel: z.boolean(),
+  initialized: z.boolean().optional(),
   isCurrent: z.boolean(),
   pageSetup: z.string().nullable(),
   handle: z.string(),
+  ctbFound: z.boolean().optional(),
+  mediaAvailable: z.boolean().optional(),
   ...PlotSettingsSummaryShape,
 }).passthrough();
 
@@ -88,7 +93,14 @@ const PublishResultSchema = z.object({
     index: z.number().int().positive(),
     layoutName: z.string(),
     drawingPath: z.string(),
-  })),
+    pageSetup: z.string().nullable().optional(),
+    device: z.string().optional(),
+    media: z.string().nullable().optional(),
+    plotStyleTable: z.string().nullable().optional(),
+    paperSizeMm: z.array(z.number()).length(2).optional(),
+  }).passthrough()),
+  verified: z.boolean().optional(),
+  verification: z.enum(["verified", "unverified"]).optional(),
   method: z.string(),
   dsdPath: z.string().nullable(),
   durationMs: z.number().nonnegative(),
@@ -106,6 +118,7 @@ const JobHandleSchema = z.object({
 const ListLayoutsArgsSchema = z.object({
   action: z.literal("list_layouts"),
   includeModel: z.boolean().optional(),
+  document: NonBlankStringSchema.optional(),
 });
 
 const ListPageSetupsArgsSchema = z.object({
@@ -120,8 +133,6 @@ const PlotAreaSchema = z.enum(["layout", "extents", "window"]);
 
 // The plugin treats a whitespace-only override as absent, so reject it here
 // instead of silently plotting with the layout's own settings.
-const NonBlankStringSchema = z.string().refine((value) => value.trim().length > 0, "must not be blank");
-
 const ListPlottersArgsSchema = z.object({
   action: z.literal("list_plotters"),
   device: NonBlankStringSchema.optional(),
@@ -185,6 +196,7 @@ const PublishSheetSchema = z.object({
 
 export const PublishSheetSetArgsSchema = z.object({
   action: z.literal("publish_sheet_set"),
+  document: NonBlankStringSchema.optional(),
   outputPath: z.string().min(1).regex(/\.pdf$/i, "outputPath must end in .pdf."),
   layoutNames: z.array(z.string().min(1)).min(1).optional(),
   sheets: z.array(PublishSheetSchema).min(1).optional(),
@@ -220,6 +232,7 @@ export function toPlotLayoutsParameters(args: PlotLayoutsToPdfArgs) {
 
 export function toPublishSheetSetParameters(args: PublishSheetSetArgs) {
   return {
+    ...(args.document !== undefined ? { document: args.document } : {}),
     outputPath: args.outputPath,
     layoutNames: args.layoutNames,
     sheets: args.sheets,
@@ -229,15 +242,36 @@ export function toPublishSheetSetParameters(args: PublishSheetSetArgs) {
   };
 }
 
+// Keep this list in sync with parameters added after the original plot API.
+// Both direct plotting and generic job starts must refuse ignored targeting.
+export async function requirePlotApi(
+  client: ApplicationCommandClient,
+  parameters: Record<string, unknown>,
+) {
+  const parameter = ["document"].find((name) => parameters[name] !== undefined);
+  if (!parameter) return;
+  const health = await client.sendCommand("getCivil3DHealth", {}) as Record<string, unknown>;
+  const api = typeof health?.plotApi === "number" && Number.isFinite(health.plotApi) ? health.plotApi : 1;
+  if (api < 2) {
+    throw new Civil3DRpcError(
+      `The Civil 3D plugin is older than this server: ${parameter} needs plot API 2, the loaded plugin has ${api}. Install the plugin from this build (Civil 3D closed); nothing ran.`,
+      "CIVIL3D.INVALID_INPUT", -32602,
+    );
+  }
+}
+
 async function runPlotOperation(
   pluginMethod: string,
   jobOperation: string,
   parameters: Record<string, unknown>,
   asJob: boolean | undefined,
 ) {
-  return await withApplicationConnection(async (appClient) => asJob
-    ? await appClient.sendCommand("startJob", { operation: jobOperation, parameters })
-    : await appClient.sendCommand(pluginMethod, parameters));
+  return await withApplicationConnection(async (appClient) => {
+    await requirePlotApi(appClient, parameters);
+    return asJob
+      ? await appClient.sendCommand("startJob", { operation: jobOperation, parameters })
+      : await appClient.sendCommand(pluginMethod, parameters);
+  });
 }
 
 export const PLOT_DOMAIN_DEFINITION: DomainToolDefinition = {
@@ -257,9 +291,13 @@ export const PLOT_DOMAIN_DEFINITION: DomainToolDefinition = {
       safeForRetry: true,
       pluginMethods: ["plotListLayouts"],
       execute: async (args) => await withApplicationConnection(
-        async (appClient) => await appClient.sendCommand("plotListLayouts", {
-          includeModel: args.includeModel ?? false,
-        }),
+        async (appClient) => {
+          await requirePlotApi(appClient, args);
+          return await appClient.sendCommand("plotListLayouts", {
+            includeModel: args.includeModel ?? false,
+            ...(args.document !== undefined ? { document: args.document } : {}),
+          });
+        },
       ),
     },
     list_page_setups: {
@@ -340,7 +378,7 @@ export const PLOT_DOMAIN_DEFINITION: DomainToolDefinition = {
       description:
         "Lists layouts, page setups, and plot devices, and plots layouts (paper-space, or the Model tab by name) to PDF (one file per layout) or publishes paper-space layouts as one multi-sheet PDF. " +
         "Uses the -PLOT/-PUBLISH commands with BACKGROUNDPLOT=0 and the 'DWG To PDF.pc3' device; output paths must be absolute .pdf paths inside the configured export roots. " +
-        "Set asJob=true for long runs and poll civil3d_job action=status.",
+        "Publish preflight checks every sheet's plot style table and PDF media. Set asJob=true for long runs and poll civil3d_job action=status.",
       inputShape: {
         action: z.enum([
           "list_layouts",
@@ -350,10 +388,11 @@ export const PLOT_DOMAIN_DEFINITION: DomainToolDefinition = {
           "publish_sheet_set",
         ]),
         includeModel: z.boolean().optional().describe("list_layouts: include the Model layout."),
+        document: NonBlankStringSchema.optional().describe("list_layouts/publish_sheet_set: open drawing full path or unique file name, or saved .dwg inside import roots. Reads settings without activating it; publish uses its saved path."),
         device: z.string().optional().describe("list_plotters: also list paper sizes for this device (for example 'DWG To PDF.pc3')."),
         layoutNames: z.array(z.string()).optional().describe("Layouts to plot/publish, in output order. plot_layouts_to_pdf also accepts 'Model'."),
         allLayouts: z.boolean().optional().describe("plot_layouts_to_pdf: plot every paper-space layout in tab order."),
-        sheets: z.array(PublishSheetSchema).optional().describe("publish_sheet_set: explicit sheet list; drawingPath (absolute .dwg inside the import roots) defaults to the active drawing."),
+        sheets: z.array(PublishSheetSchema).optional().describe("publish_sheet_set: explicit sheet list; drawingPath (absolute .dwg inside the import roots) defaults to document, or the active drawing when omitted."),
         outputDirectory: z.string().optional().describe("plot_layouts_to_pdf: absolute folder for one PDF per layout."),
         outputPath: z.string().optional().describe("Absolute .pdf path (single layout for plot_layouts_to_pdf; the combined PDF for publish_sheet_set)."),
         fileNamePrefix: z.string().optional().describe("plot_layouts_to_pdf: file name prefix (default '<drawing>-')."),

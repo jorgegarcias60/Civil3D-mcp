@@ -198,6 +198,19 @@ internal static class Civil3DCompatibility
   // Document.GetAcadDocument(). Method reflection cannot see COM members, so
   // this goes through InvokeMember; a failure inside the call surfaces as its
   // own exception (usually COMException), not a TargetInvocationException.
+  public static object? GetComProperty(object comObject, string propertyName)
+  {
+    try
+    {
+      return comObject.GetType().InvokeMember(propertyName, BindingFlags.GetProperty, null, comObject, null);
+    }
+    catch (TargetInvocationException ex) when (ex.InnerException != null)
+    {
+      System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+      throw;
+    }
+  }
+
   public static object? InvokeComMethod(object comObject, string methodName, params object?[] arguments)
   {
     try

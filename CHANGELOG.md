@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Harden sheet-set publishing with document selection, plot API checks, reopened layout initialization and saved-revision settings. Check CTB/STB and media before writing; verify PDF page count, size and object streams. Drain cancellations and lock job snapshots. Add a guarded live smoke check with an opt-in missing-table fixture and cleanup after failures. Fixes #21.
+
 ### Added
 
 - Run-code API 6 adds `mode: "preview"`: aborts the transaction, reports final counts and bounded existing handles using the starting Handseed, and returns script/args hashes. Guards refuse changes outside the run's drawing or transaction, Session mutations and file writes while allowing read-only operations and detached copies. Rollback uncertainty produces a warning. Preview needs separate approval from a later write, leaves an empty undo step and clears redo. Opt-in smoke checks cover rollback, counts and document targeting. Fixes #20.

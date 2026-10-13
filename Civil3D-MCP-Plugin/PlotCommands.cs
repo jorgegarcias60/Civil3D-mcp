@@ -54,22 +54,69 @@ public static class PlotCommands
   public static Task<object?> ListLayoutsAsync(JsonObject? parameters)
   {
     var includeModel = PluginRuntime.GetOptionalBool(parameters, "includeModel") ?? false;
-    return CivilExecution.ReadAsync<object?>((doc, _, database, transaction) =>
+    var document = PluginRuntime.GetOptionalString(parameters, "document");
+    return CivilExecution.ReadAsync<object?>((active, _, database, transaction) =>
     {
-      var currentLayout = Convert.ToString(App.GetSystemVariable("CTAB"));
+      if (document == null)
+        return ListLayouts(database, transaction, active.Name,
+          Convert.ToString(App.GetSystemVariable("CTAB")), includeModel);
+
+      var open = App.DocumentManager.Cast<Document>().ToArray();
+      var match = RunCodeHelpers.MatchDocument(document, open.Select(item => item.Name).ToArray());
+      if (match.Error == null)
+      {
+        var target = open[match.Index];
+        if (ReferenceEquals(target, active))
+          return ListLayouts(database, transaction, target.Name,
+            Convert.ToString(App.GetSystemVariable("CTAB")), includeModel);
+        using var targetLock = target.LockDocument();
+        using var targetTransaction = target.Database.TransactionManager.StartOpenCloseTransaction();
+        return ListLayouts(target.Database, targetTransaction, target.Name, null, includeModel);
+      }
+
+      // A full path under an import root can also name a saved closed DWG.
+      // A filename alone must uniquely identify an open drawing.
+      if (!Path.IsPathFullyQualified(document))
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", match.Error);
+      var path = FileBoundary.ResolveImportPath(document, ".dwg");
+      using var side = new Database(false, true);
+      side.ReadDwgFile(path, FileOpenMode.OpenForReadAndAllShare, true, "");
+      side.CloseInput(true);
+      using var sideTransaction = side.TransactionManager.StartOpenCloseTransaction();
+      return ListLayouts(side, sideTransaction, path, null, includeModel);
+    });
+  }
+
+  private static object ListLayouts(Database database, Transaction transaction, string drawing,
+    string? currentLayout, bool includeModel)
+  {
+      var validator = PlotSettingsValidator.Current;
+      using var probe = new PlotSettings(false);
+      validator.RefreshLists(probe);
+      var devices = ToList(validator.GetPlotDeviceList());
+      var styles = ToList(validator.GetPlotStyleSheetList());
+      var pdfMedia = devices.Contains(DefaultPdfDevice, StringComparer.OrdinalIgnoreCase)
+        ? ReadMedia(probe, DefaultPdfDevice) : [];
       var layouts = ReadLayouts(database, transaction)
         .Where(layout => includeModel || !layout.ModelType)
-        .Select(layout => ToLayoutSummary(layout, currentLayout))
+        .Select(layout =>
+        {
+          var summary = ToLayoutSummary(layout, transaction, currentLayout);
+          summary["ctbFound"] = !string.IsNullOrWhiteSpace(layout.CurrentStyleSheet)
+            && styles.Contains(layout.CurrentStyleSheet, StringComparer.OrdinalIgnoreCase);
+          summary["mediaAvailable"] = pdfMedia.Any(media =>
+            string.Equals(media.Canonical, layout.CanonicalMediaName, StringComparison.OrdinalIgnoreCase));
+          return summary;
+        })
         .ToList();
 
       return new Dictionary<string, object?>
       {
-        ["drawing"] = doc.Name,
+        ["drawing"] = drawing,
         ["currentLayout"] = currentLayout,
         ["count"] = layouts.Count,
         ["layouts"] = layouts,
       };
-    });
   }
 
   // -------------------------------------------------------------------------
@@ -300,6 +347,7 @@ public static class PlotCommands
     var overwrite = PluginRuntime.GetOptionalBool(parameters, "overwrite") ?? false;
     var requireSaved = PluginRuntime.GetOptionalBool(parameters, "requireSaved") ?? true;
     var keepDsd = PluginRuntime.GetOptionalBool(parameters, "keepDsd") ?? false;
+    var document = PluginRuntime.GetOptionalString(parameters, "document");
     var layoutNames = GetOptionalStringArray(parameters, "layoutNames");
     var sheetsNode = parameters?["sheets"] as JsonArray;
 
@@ -327,30 +375,53 @@ public static class PlotCommands
     return CivilExecution.ExecuteCommandSequenceAsync<object?>(async (doc, cancellationToken) =>
     {
       var warnings = new List<string>();
-      var currentPath = doc.Database.Filename;
-      var titled = Convert.ToInt32(App.GetSystemVariable("DWGTITLED") ?? 0) != 0;
-      var unsaved = Convert.ToInt32(App.GetSystemVariable("DBMOD") ?? 0) != 0;
+      Document? source = doc;
+      string currentPath;
+      if (document != null)
+      {
+        var open = App.DocumentManager.Cast<Document>().ToArray();
+        var match = RunCodeHelpers.MatchDocument(document, open.Select(item => item.Name).ToArray());
+        if (match.Error == null)
+          source = open[match.Index];
+        else
+        {
+          if (!Path.IsPathFullyQualified(document))
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", match.Error);
+          source = null;
+        }
+      }
+      currentPath = source?.Database.Filename ?? FileBoundary.ResolveImportPath(document!, ".dwg");
 
-      // Resolve sheets. Current-drawing layouts are validated against the
-      // layout dictionary; external drawings go through the import boundary.
-      var currentLayouts = ReadLayoutSnapshots(doc).Where(layout => !layout.ModelType).ToList();
+      // PUBLISH reads the saved DWG. With requireSaved=false, selection and
+      // initialization must use that same revision, including renamed tabs.
+      var usesCurrentSource = requestedSheets.Count == 0 || requestedSheets.Any(sheet =>
+        string.IsNullOrWhiteSpace(sheet.DrawingPath)
+        || string.Equals(FileBoundary.ResolveImportPath(sheet.DrawingPath, ".dwg"), currentPath, StringComparison.OrdinalIgnoreCase));
+      var currentLayouts = new List<LayoutSnapshot>();
+      if (usesCurrentSource)
+      {
+        if (source != null)
+        {
+          using var documentLock = source.LockDocument();
+          CheckSavedSource(source, requireSaved, warnings);
+        }
+        currentLayouts = (source != null && requireSaved ? ReadLayoutSnapshots(source) : ReadLayoutSnapshots(currentPath))
+          .Where(layout => !layout.ModelType).ToList();
+      }
       var sheets = new List<PublishSheet>();
       if (requestedSheets.Count == 0)
       {
-        // PUBLISH refuses layouts that were never initialized (never opened,
-        // so no paper-space viewport or page size yet); skip and report them
-        // instead of failing the whole set.
-        sheets.AddRange(currentLayouts.Where(layout => layout.Initialized).OrderBy(layout => layout.TabOrder).Select(layout => new PublishSheet(layout.Name, null)));
+        // Every paper-space tab is part of the requested set. Refuse an
+        // uninitialized tab before making or replacing any output file.
+        sheets.AddRange(currentLayouts.OrderBy(layout => layout.TabOrder).Select(layout => new PublishSheet(layout.Name, null)));
         var uninitialized = currentLayouts.Where(layout => !layout.Initialized).OrderBy(layout => layout.TabOrder).Select(layout => layout.Name).ToList();
         if (uninitialized.Count > 0)
-        {
-          warnings.Add($"Skipped {uninitialized.Count} layout(s) that were never initialized: {Preview(uninitialized)}. Open each layout tab once and save the drawing to include it.");
-        }
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Uninitialized layouts: {Preview(uninitialized)}. Open each layout tab once and save before publishing.");
         if (sheets.Count == 0)
         {
           throw uninitialized.Count > 0
             ? new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"None of the drawing's paper-space layouts have been initialized ({Preview(uninitialized)}). Open each layout tab once and save the drawing before publishing.")
-            : new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", "The active drawing has no paper-space layouts to publish.");
+            : new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", "The source drawing has no paper-space layouts to publish.");
         }
       }
       else
@@ -377,27 +448,22 @@ public static class PlotCommands
             else
             {
               sheets.Add(new PublishSheet(layout, resolved));
-              warnings.Add($"Layout '{layout}' in external drawing '{resolved}' was not pre-validated; PUBLISH reports missing layouts itself.");
             }
           }
         }
       }
 
+      // Validate the complete sheet set, including saved closed sources, before
+      // BeginExternalWrite moves an existing PDF to its protected backup.
+      var settings = PreflightPublishSheets(source, sheets, currentPath, requireSaved, warnings);
+
       if (sheets.Any(sheet => sheet.DrawingPath == null))
       {
         // PUBLISH reads the drawing from disk, so an untitled drawing cannot be
         // published and unsaved edits may be missing from the PDF.
-        if (!titled || string.IsNullOrWhiteSpace(currentPath) || !File.Exists(currentPath))
+        if (string.IsNullOrWhiteSpace(currentPath) || !File.Exists(currentPath))
         {
-          throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", "The active drawing has never been saved. Save it (civil3d_drawing action=save) before publishing its layouts.");
-        }
-        if (unsaved)
-        {
-          if (requireSaved)
-          {
-            throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", "The active drawing has unsaved changes that PUBLISH may not include. Save it first, or pass requireSaved=false to publish the last saved state.");
-          }
-          warnings.Add("The active drawing has unsaved changes; the PDF may reflect the last saved state.");
+          throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", "The source drawing has never been saved. Save it before publishing its layouts.");
         }
       }
 
@@ -441,7 +507,7 @@ public static class PlotCommands
           warnings.AddRange(sysvars.RestoreWarnings());
         }
 
-        file = output.Commit((path, stream) => VerifyOutput(path, stream, startedUtc));
+        file = output.Commit((path, stream) => VerifyPublishedOutput(path, stream, startedUtc, settings));
       }
       finally
       {
@@ -450,30 +516,45 @@ public static class PlotCommands
           TryDelete(dsdPath);
         }
       }
-      if (file.PageCount is int pages && pages != sheets.Count)
-      {
-        warnings.Add($"Expected {sheets.Count} pages but the PDF appears to contain {pages}; check the sheet list.");
-      }
+      if (file.PageCount == null)
+        warnings.Add("The PDF uses compressed object streams; page count could not be verified.");
 
       return new Dictionary<string, object?>
       {
         ["outputPath"] = file.Path,
         ["bytes"] = file.Bytes,
         ["pageCount"] = file.PageCount,
+        ["pages"] = file.Pages?.Select((page, index) => new Dictionary<string, object?>
+        {
+          ["index"] = index + 1,
+          ["mediaBoxPt"] = page.MediaBoxPt,
+          ["rotation"] = page.Rotation,
+          ["userUnit"] = page.UserUnit,
+          ["widthMm"] = page.WidthMm,
+          ["heightMm"] = page.HeightMm,
+        }).ToList(),
+        ["lastWriteUtc"] = file.LastWriteUtc,
         ["sheetCount"] = sheets.Count,
         ["sheets"] = sheets.Select((sheet, index) => new Dictionary<string, object?>
         {
           ["index"] = index + 1,
           ["layoutName"] = sheet.LayoutName,
           ["drawingPath"] = sheet.DrawingPath ?? currentPath,
+          ["pageSetup"] = settings[index].PageSetup,
+          ["device"] = settings[index].Device,
+          ["media"] = settings[index].Media,
+          ["plotStyleTable"] = settings[index].PlotStyleTable,
+          ["paperSizeMm"] = new[] { settings[index].WidthMm, settings[index].HeightMm },
         }).ToList(),
         ["method"] = "-PUBLISH with generated DSD (BACKGROUNDPLOT=0, multi-sheet PDF)",
         ["dsdPath"] = keepDsd ? dsdPath : null,
         ["durationMs"] = watch.ElapsedMilliseconds,
         ["published"] = true,
+        ["verified"] = file.PageCount != null,
+        ["verification"] = file.PageCount != null ? "verified" : "unverified",
         ["warnings"] = warnings,
       };
-    });
+    }, drainOnCancellation: true);
   }
 
   // =========================================================================
@@ -498,6 +579,103 @@ public static class PlotCommands
 
   private sealed record PublishSheet(string LayoutName, string? DrawingPath);
 
+  private sealed record PublishSettings(string? PageSetup, string Device, string Media,
+    string? PlotStyleTable, double WidthMm, double HeightMm);
+
+  private static List<PublishSettings> PreflightPublishSheets(Document? defaultSource, IReadOnlyList<PublishSheet> sheets,
+    string currentPath, bool requireSaved, List<string> warnings)
+  {
+    var validator = PlotSettingsValidator.Current;
+    using var probe = new PlotSettings(false);
+    validator.RefreshLists(probe);
+    var devices = ToList(validator.GetPlotDeviceList());
+    var styles = ToList(validator.GetPlotStyleSheetList());
+    RequireDevice(devices, DefaultPdfDevice);
+    var media = ReadMedia(probe, DefaultPdfDevice);
+    var results = new List<PublishSettings>(sheets.Count);
+    foreach (var sheet in sheets)
+    {
+      var sourcePath = sheet.DrawingPath ?? currentPath;
+      var open = sheet.DrawingPath == null ? defaultSource : App.DocumentManager.Cast<Document>().FirstOrDefault(item =>
+        Path.IsPathFullyQualified(item.Name)
+        && string.Equals(item.Name, sourcePath, StringComparison.OrdinalIgnoreCase));
+      if (open != null)
+      {
+        using var documentLock = open.LockDocument();
+        CheckSavedSource(open, requireSaved, warnings);
+        if (requireSaved)
+        {
+          using var transaction = open.Database.TransactionManager.StartOpenCloseTransaction();
+          results.Add(ValidatePublishLayout(open.Database, transaction, sheet, sourcePath, devices, styles, media));
+          continue;
+        }
+      }
+      {
+        // Read the original saved drawing in its own database so relative
+        // references retain their source context. Do not activate or save it.
+        // Unsaved page setups must not affect saved-revision preflight.
+        using var database = new Database(false, true);
+        database.ReadDwgFile(sourcePath, FileOpenMode.OpenForReadAndAllShare, true, "");
+        database.CloseInput(true);
+        using var transaction = database.TransactionManager.StartOpenCloseTransaction();
+        results.Add(ValidatePublishLayout(database, transaction, sheet, sourcePath, devices, styles, media));
+      }
+    }
+    return results;
+  }
+
+  private static void CheckSavedSource(Document source, bool requireSaved, List<string> warnings)
+  {
+    if (!Path.IsPathFullyQualified(source.Name) || !File.Exists(source.Name))
+      throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", $"Drawing '{source.Name}' has never been saved. Save it before publishing.");
+    bool saved;
+    try
+    {
+      var acadDocument = source.GetAcadDocument();
+      var value = Civil3DCompatibility.GetComProperty(acadDocument, "Saved");
+      saved = Convert.ToBoolean(value);
+    }
+    catch (Exception error)
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"Could not determine whether '{source.Name}' has unsaved changes: {error.Message}");
+    }
+    if (saved) return;
+    if (requireSaved)
+      throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", $"Drawing '{source.Name}' has unsaved changes. Save it first, or pass requireSaved=false to publish its saved revision.");
+    var warning = $"Drawing '{source.Name}' has unsaved changes; PUBLISH uses its saved revision. Unsaved changes were not included.";
+    if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase)) warnings.Add(warning);
+  }
+
+  private static PublishSettings ValidatePublishLayout(Database database, Transaction transaction,
+    PublishSheet sheet, string sourcePath, IReadOnlyList<string> devices, IReadOnlyList<string> styles,
+    IReadOnlyList<MediaName> media)
+  {
+    var layout = ReadLayouts(database, transaction).FirstOrDefault(item =>
+      string.Equals(item.LayoutName, sheet.LayoutName, StringComparison.OrdinalIgnoreCase));
+    if (layout == null || layout.ModelType)
+      throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", $"Paper-space layout '{sheet.LayoutName}' was not found in '{sourcePath}'.");
+    RequireInitialized(new LayoutSnapshot(layout.LayoutName, layout.TabOrder, false, IsInitialized(layout, transaction)));
+
+    var device = layout.PlotConfigurationName;
+    if (string.IsNullOrWhiteSpace(device))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Layout '{sheet.LayoutName}' in '{sourcePath}' has no plot device.");
+    RequireDevice(devices, device);
+
+    var style = NullIfEmpty(layout.CurrentStyleSheet);
+    if (style == null)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Layout '{sheet.LayoutName}' in '{sourcePath}' has no CTB/STB selected.");
+    if (style != null && !styles.Contains(style, StringComparer.OrdinalIgnoreCase))
+      throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", $"Plot style table '{style}' for layout '{sheet.LayoutName}' in '{sourcePath}' was not found.");
+    var canonical = layout.CanonicalMediaName;
+    if (string.IsNullOrWhiteSpace(canonical) || !media.Any(item => string.Equals(item.Canonical, canonical, StringComparison.OrdinalIgnoreCase)))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Media '{canonical}' for layout '{sheet.LayoutName}' in '{sourcePath}' is not available on {DefaultPdfDevice}.");
+    var size = layout.PlotPaperSize;
+    if (size.X <= 0 || size.Y <= 0)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Layout '{sheet.LayoutName}' in '{sourcePath}' has no valid paper size.");
+    return new PublishSettings(NullIfEmpty(layout.PlotSettingsName), device, canonical, style,
+      size.X, size.Y);
+  }
+
   private sealed record LayoutSnapshot(string Name, int TabOrder, bool ModelType, bool Initialized = true);
 
   private static void RequireInitialized(LayoutSnapshot layout)
@@ -510,9 +688,9 @@ public static class PlotCommands
     }
   }
 
-  // A paper-space layout gets its overall paper-space viewport (and a page
-  // size) when it is first opened; until then it has no viewports.
-  private static bool IsInitialized(Layout layout)
+  // The cached viewport IDs can be empty after reopening a saved drawing.
+  // The paper-space record still contains its saved viewport entities.
+  private static bool IsInitialized(Layout layout, Transaction transaction)
   {
     if (layout.ModelType)
     {
@@ -521,18 +699,34 @@ public static class PlotCommands
 
     try
     {
-      return layout.GetViewports().Count > 0;
+      if (layout.GetViewports().Count > 0)
+        return true;
     }
     catch
     {
-      // Unknown: let PUBLISH report it rather than block a valid sheet.
-      return true;
+      // Continue with the saved paper-space record when the cache is unreadable.
     }
+
+    try
+    {
+      var paperSpace = (BlockTableRecord)transaction.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+      foreach (ObjectId entityId in paperSpace)
+      {
+        if (transaction.GetObject(entityId, OpenMode.ForRead) is Viewport)
+          return true;
+      }
+    }
+    catch
+    {
+      // Neither source established a viewport; keep the preflight fail-closed.
+    }
+    return false;
   }
 
   private sealed record MediaName(string Canonical, string Locale);
 
-  private sealed record OutputFile(string Path, long Bytes, int? PageCount, DateTime LastWriteUtc);
+  private sealed record OutputFile(string Path, long Bytes, int? PageCount, DateTime LastWriteUtc,
+    IReadOnlyList<PdfOutputInspector.Page>? Pages = null);
 
   private static List<PlotJob> PreparePlotJobs(
     Document doc,
@@ -902,6 +1096,30 @@ public static class PlotCommands
     return new OutputFile(path, length, CountPdfPages(stream), lastWriteUtc);
   }
 
+  private static OutputFile VerifyPublishedOutput(string path, FileStream? stream, DateTime startedUtc,
+    IReadOnlyList<PublishSettings> settings)
+  {
+    var file = VerifyOutput(path, stream, startedUtc);
+    if (stream == null || stream.Length > PageCountReadLimitBytes)
+      throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"PDF '{path}' is too large to verify safely.");
+    PdfOutputInspector.Inspection inspection;
+    try { inspection = PdfOutputInspector.Inspect(stream); }
+    catch (Exception error) when (error is InvalidDataException or FormatException or OverflowException)
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"PDF '{path}' failed structure verification: {error.Message}");
+    }
+    try
+    {
+      if (!PdfOutputInspector.Validate(inspection, settings.Select(item => (item.WidthMm, item.HeightMm)).ToArray()))
+        return file with { PageCount = null };
+    }
+    catch (InvalidDataException error)
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"PDF '{path}' failed page verification: {error.Message}");
+    }
+    return file with { PageCount = inspection.Pages.Count, Pages = inspection.Pages };
+  }
+
   // Heuristic: counts uncompressed /Type /Page objects. Returns null when the
   // file is too large to scan or uses compressed object streams (count 0).
   private static int? CountPdfPages(FileStream stream)
@@ -1050,20 +1268,31 @@ public static class PlotCommands
   private static List<LayoutSnapshot> ReadLayoutSnapshots(Document doc)
   {
     using var documentLock = doc.LockDocument();
-    using var transaction = doc.Database.TransactionManager.StartTransaction();
+    using var transaction = doc.Database.TransactionManager.StartOpenCloseTransaction();
     var snapshots = ReadLayouts(doc.Database, transaction)
-      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout)))
+      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout, transaction)))
       .ToList();
-    transaction.Commit();
     return snapshots;
   }
 
-  private static Dictionary<string, object?> ToLayoutSummary(Layout layout, string? currentLayout)
+  private static List<LayoutSnapshot> ReadLayoutSnapshots(string sourcePath)
+  {
+    using var database = new Database(false, true);
+    database.ReadDwgFile(sourcePath, FileOpenMode.OpenForReadAndAllShare, true, "");
+    database.CloseInput(true);
+    using var transaction = database.TransactionManager.StartOpenCloseTransaction();
+    return ReadLayouts(database, transaction)
+      .Select(layout => new LayoutSnapshot(layout.LayoutName, layout.TabOrder, layout.ModelType, IsInitialized(layout, transaction)))
+      .ToList();
+  }
+
+  private static Dictionary<string, object?> ToLayoutSummary(Layout layout, Transaction transaction, string? currentLayout)
   {
     var summary = ToPlotSettingsSummary(layout);
     summary["name"] = layout.LayoutName;
     summary["tabOrder"] = layout.TabOrder;
     summary["isModel"] = layout.ModelType;
+    summary["initialized"] = IsInitialized(layout, transaction);
     summary["isCurrent"] = string.Equals(layout.LayoutName, currentLayout, StringComparison.OrdinalIgnoreCase);
     summary["pageSetup"] = NullIfEmpty(layout.PlotSettingsName);
     summary["handle"] = layout.Handle.ToString();

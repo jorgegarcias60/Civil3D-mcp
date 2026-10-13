@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { withApplicationConnection } from "../../utils/ConnectionManager.js";
 import type { DomainToolDefinition } from "../domainRuntime.js";
+import { PLOT_JOB_OPERATIONS, requirePlotApi } from "./plotDomain.js";
 
 const JobOperationSchema = z.enum([
   "publish_sheet_pdf",
@@ -52,11 +53,15 @@ export const JOB_DOMAIN_DEFINITION: DomainToolDefinition = {
       requiresActiveDrawing: true,
       safeForRetry: false,
       pluginMethods: ["startJob"],
-      execute: async (args) => await withApplicationConnection(async (appClient) =>
-        await appClient.sendCommand("startJob", {
+      execute: async (args) => await withApplicationConnection(async (appClient) => {
+        if (Object.hasOwn(PLOT_JOB_OPERATIONS, String(args.operation))) {
+          await requirePlotApi(appClient, args.parameters as Record<string, unknown>);
+        }
+        return await appClient.sendCommand("startJob", {
           operation: args.operation,
           parameters: args.parameters,
-        })),
+        });
+      }),
     },
     status: {
       action: "status",

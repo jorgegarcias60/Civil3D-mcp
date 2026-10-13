@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { sendCommandMock } = vi.hoisted(() => ({
@@ -143,6 +144,42 @@ function approvalTargetFor(action: string) {
 }
 
 describe("civil3d_plot schemas", () => {
+  it("preserves explicit layout initialization flags and accepts legacy discovery", () => {
+    const schema = PLOT_DOMAIN_DEFINITION.actions.list_layouts.responseSchema!;
+    const layout = {
+      name: "C-101", tabOrder: 1, isModel: false, isCurrent: false,
+      pageSetup: null, handle: "10", device: "DWG To PDF.pc3", canonicalMediaName: "A4",
+      paperUnits: "Millimeters", paperWidth: 210, paperHeight: 297,
+      orientation: "portrait", rotation: "Degrees000", plotType: "Layout", plotStyleTable: "monochrome.ctb",
+    };
+    for (const initialized of [false, true]) {
+      const parsed = schema.parse({ drawing: "scratch.dwg", currentLayout: null, count: 1,
+        layouts: [{ ...layout, initialized }] });
+      expect(parsed.layouts[0].initialized).toBe(initialized);
+    }
+    expect(schema.safeParse({ drawing: "scratch.dwg", currentLayout: null, count: 1,
+      layouts: [layout] }).success).toBe(true);
+    expect(schema.safeParse({ drawing: "scratch.dwg", currentLayout: null, count: 1,
+      layouts: [{ ...layout, initialized: "true" }] }).success).toBe(false);
+  });
+
+  it("selects two initialized smoke layouts even after a configured uninitialized tab", () => {
+    const source = readFileSync(new URL("../scripts/live-plot-smoke.mjs", import.meta.url), "utf8");
+    const expression = source.match(/const selected = (discovery\.layouts\.filter\([\s\S]*?\.slice\(0, 2\));/);
+    expect(expression).not.toBeNull();
+    const configured = { isModel: false, ctbFound: true, mediaAvailable: true,
+      plotStyleTable: "monochrome.ctb", paperWidth: 210, paperHeight: 297 };
+    const selected = runInNewContext(expression![1], { discovery: { layouts: [
+      { ...configured, name: "Never opened", initialized: false },
+      { ...configured, name: "Legacy plugin" },
+      { ...configured, name: "C-101", initialized: true },
+      { ...configured, name: "C-102", initialized: true },
+    ] } });
+    expect(selected.map((layout: { name: string }) => layout.name)).toEqual(["C-101", "C-102"]);
+    const summary = pluginSource("PlotCommands.cs").split("ToLayoutSummary(Layout layout")[1].split("return summary;")[0];
+    expect(summary).toContain('summary["initialized"] = IsInitialized(layout, transaction)');
+  });
+
   it("accepts a layout list or allLayouts with exactly one output target", () => {
     expect(PlotLayoutsToPdfArgsSchema.safeParse({
       action: "plot_layouts_to_pdf",
@@ -303,6 +340,70 @@ describe("civil3d_plot routing", () => {
     sendCommandMock.mockReset();
   });
 
+  it("keeps document selection in discovery and publish schemas", () => {
+    const document = "C:/imports/scratch.dwg";
+    expect(PLOT_DOMAIN_DEFINITION.actions.list_layouts.inputSchema.parse({
+      action: "list_layouts", document,
+    })).toMatchObject({ document });
+    expect(PublishSheetSetArgsSchema.parse({
+      action: "publish_sheet_set", document, outputPath: "C:/out/set.pdf",
+    })).toMatchObject({ document });
+    expect(PublishSheetSetArgsSchema.safeParse({
+      action: "publish_sheet_set", document: "  ", outputPath: "C:/out/set.pdf",
+    }).success).toBe(false);
+  });
+
+  it.each([{}, { plotApi: 1 }, { plotApi: "2" }])("refuses document against a legacy plugin on all routes (%j)", async (health) => {
+    sendCommandMock.mockResolvedValue(health);
+    const parameters = { document: "scratch.dwg", outputPath: "C:/out/set.pdf" };
+    for (const asJob of [false, true]) {
+      sendCommandMock.mockClear();
+      await expect(PLOT_DOMAIN_DEFINITION.actions.publish_sheet_set.execute({
+        action: "publish_sheet_set", ...parameters, asJob,
+      })).rejects.toThrow(/install the plugin from this build.*nothing ran/i);
+      expect(sendCommandMock.mock.calls).toEqual([["getCivil3DHealth", {}]]);
+    }
+    sendCommandMock.mockClear();
+    await expect(JOB_DOMAIN_DEFINITION.actions.start.execute({
+      action: "start", operation: "publish_sheet_set", parameters,
+    })).rejects.toThrow(/install the plugin from this build.*nothing ran/i);
+    expect(sendCommandMock.mock.calls).toEqual([["getCivil3DHealth", {}]]);
+    sendCommandMock.mockClear();
+    await expect(PLOT_DOMAIN_DEFINITION.actions.list_layouts.execute({
+      action: "list_layouts", document: "scratch.dwg",
+    })).rejects.toThrow(/install the plugin from this build.*nothing ran/i);
+    expect(sendCommandMock.mock.calls).toEqual([["getCivil3DHealth", {}]]);
+  });
+
+  it("passes document only after plot API 2 is confirmed on both job routes", async () => {
+    sendCommandMock.mockImplementation(async (method) => method === "getCivil3DHealth"
+      ? { plotApi: 2 } : { jobId: "abc", state: "running", operation: "publish_sheet_set" });
+    const parameters = { document: "C:/imports/scratch.dwg", outputPath: "C:/out/set.pdf" };
+    await PLOT_DOMAIN_DEFINITION.actions.publish_sheet_set.execute(PublishSheetSetArgsSchema.parse({
+      action: "publish_sheet_set", ...parameters, asJob: true,
+    }));
+    expect(sendCommandMock.mock.calls[0]).toEqual(["getCivil3DHealth", {}]);
+    expect(sendCommandMock).toHaveBeenLastCalledWith("startJob", {
+      operation: "publish_sheet_set", parameters: expect.objectContaining(parameters),
+    });
+    sendCommandMock.mockClear();
+    await JOB_DOMAIN_DEFINITION.actions.start.execute({
+      action: "start", operation: "publish_sheet_set", parameters,
+    });
+    expect(sendCommandMock.mock.calls[0]).toEqual(["getCivil3DHealth", {}]);
+    expect(sendCommandMock).toHaveBeenLastCalledWith("startJob", { operation: "publish_sheet_set", parameters });
+  });
+
+  it("passes document for direct publishing and discovery after the version check", async () => {
+    sendCommandMock.mockResolvedValue({ plotApi: 2 });
+    await PLOT_DOMAIN_DEFINITION.actions.list_layouts.execute({ action: "list_layouts", document: "scratch.dwg" });
+    expect(sendCommandMock).toHaveBeenLastCalledWith("plotListLayouts", { includeModel: false, document: "scratch.dwg" });
+    await PLOT_DOMAIN_DEFINITION.actions.publish_sheet_set.execute({
+      action: "publish_sheet_set", outputPath: "C:/out/set.pdf", document: "scratch.dwg",
+    });
+    expect(sendCommandMock).toHaveBeenLastCalledWith("plotPublishSheetSet", expect.objectContaining({ document: "scratch.dwg" }));
+  });
+
   it("sends plot_layouts_to_pdf to the plugin with safe defaults", async () => {
     sendCommandMock.mockResolvedValue({ plotted: 1 });
     const args = PlotLayoutsToPdfArgsSchema.parse({
@@ -444,7 +545,7 @@ describe("civil3d_plot native implementation guards", () => {
     expect(source).not.toContain("TempPath");
     // The content check reads the handle Commit checked, never the path again.
     expect(source).toContain("output.Commit((path, stream) => VerifyOutput(path, stream, job.StartedUtc))");
-    expect(source).toContain("output.Commit((path, stream) => VerifyOutput(path, stream, startedUtc))");
+    expect(source).toContain("output.Commit((path, stream) => VerifyPublishedOutput(path, stream, startedUtc, settings))");
     // Both anchors must exist, or the guard would pass on an empty slice.
     const verifyStart = pluginCode("PlotCommands.cs").indexOf("OutputFile VerifyOutput(");
     expect(verifyStart).toBeGreaterThan(-1);
@@ -489,11 +590,41 @@ describe("civil3d_plot native implementation guards", () => {
     expect(runner).toContain("ReferenceEquals(App.DocumentManager.MdiActiveDocument, doc)");
   });
 
-  it("skips or rejects never-initialized layouts before publishing", () => {
+  it("refuses an incomplete sheet set before moving a PDF or writing the DSD", () => {
     const source = pluginSource("PlotCommands.cs");
     expect(source).toContain("layout.GetViewports().Count > 0");
-    expect(source).toContain("currentLayouts.Where(layout => layout.Initialized)");
+    expect(source).not.toContain("currentLayouts.Where(layout => layout.Initialized)");
+    expect(source).not.toContain("was not pre-validated");
     expect(source.match(/RequireInitialized\(match\);/g)?.length).toBe(2);
+    const publish = source.slice(source.indexOf("public static Task<object?> PublishSheetSetAsync"));
+    const preflight = publish.indexOf("PreflightPublishSheets(");
+    expect(preflight).toBeGreaterThan(0);
+    expect(preflight).toBeLessThan(publish.indexOf("FileBoundary.BeginExternalWrite(outputPath, overwrite)"));
+    expect(preflight).toBeLessThan(publish.indexOf("FileBoundary.WriteAllTextAtomic(dsdPath"));
+    const read = source.slice(source.indexOf("private static List<LayoutSnapshot> ReadLayoutSnapshots(Document doc)"),
+      source.indexOf("private static List<LayoutSnapshot> ReadLayoutSnapshots(string sourcePath)"));
+    expect(read).toContain("doc.LockDocument()");
+    expect(read).toContain("StartOpenCloseTransaction()");
+    expect(read).not.toContain("transaction.Commit()");
+  });
+
+  it("drains native publishing on cancellation and preserves an accepted result", () => {
+    const execution = pluginCode("CivilExecution.cs");
+    const sequence = execution.slice(execution.indexOf("ExecuteCommandSequenceAsync"), execution.indexOf("public static Task<T> ReadAsync"));
+    expect(sequence).toContain("bool drainOnCancellation = false");
+    expect(sequence).toContain("drainOnCancellation: drainOnCancellation");
+    expect(sequence).toContain("if (drainOnCancellation)");
+    expect(sequence).toContain("await hostTask;");
+    expect(sequence).toContain("catch (OperationCanceledException) when (actionCompleted)");
+    expect(sequence).toContain("catch (OperationCanceledException) when (capturedException != null)");
+    expect(sequence).toContain("else await AwaitHostContextAsync(hostTask, cancellationToken)");
+    const plots = pluginCode("PlotCommands.cs");
+    const publish = plots.slice(plots.indexOf("PublishSheetSetAsync"), plots.indexOf("private sealed class PlotJob"));
+    expect(publish).toContain("drainOnCancellation: true");
+    expect(plots.slice(plots.indexOf("PlotLayoutsToPdfAsync"), plots.indexOf("PublishSheetSetAsync"))).not.toContain("drainOnCancellation: true");
+    expect(sequence).not.toMatch(/MdiActiveDocument\s*=(?!=)/);
+    const jobs = pluginCode("JobCommands.cs");
+    expect(jobs).toMatch(/lock\s*\(job.SyncRoot\)[\s\S]*?job.Warnings.ToArray\(\)/);
   });
 
   it("routes every output path through FileBoundary and fails fast without a document", () => {
