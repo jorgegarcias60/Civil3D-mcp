@@ -100,6 +100,26 @@ describe("run_code client approval policy", () => {
     await expect(policy.authorize(runTarget, { code: "return 1;", approvalToken: receipt.approvalToken }, { directClientCall: true }))
       .rejects.toBeInstanceOf(ApprovalValidationError);
   });
+
+  it("requires a fresh write approval after preview and still permits direct client calls", async () => {
+    const policy = new ApprovalPolicyService(async () => "drawing-a");
+    const preview = { code: "return 1;", mode: "preview" };
+    const write = { code: "return 1;", mode: "write" };
+    const receipt = await policy.requestApproval(runTarget, preview);
+    await expect(policy.authorize(runTarget, { ...write, approvalToken: receipt.approvalToken }, { directClientCall: false }))
+      .rejects.toBeInstanceOf(ApprovalValidationError);
+    await expect(policy.authorize(runTarget, { ...preview, approvalToken: receipt.approvalToken }, { directClientCall: false }))
+      .rejects.toBeInstanceOf(ApprovalValidationError);
+    const previewReceipt = await policy.requestApproval(runTarget, preview);
+    await expect(policy.authorize(runTarget, { ...preview, approvalToken: previewReceipt.approvalToken }, { directClientCall: false }))
+      .resolves.toBe("token");
+    await expect(policy.authorize(runTarget, { ...write, approvalToken: previewReceipt.approvalToken }, { directClientCall: false }))
+      .rejects.toBeInstanceOf(ApprovalValidationError);
+    const writeReceipt = await policy.requestApproval(runTarget, write);
+    await expect(policy.authorize(runTarget, { ...write, approvalToken: writeReceipt.approvalToken }, { directClientCall: false }))
+      .resolves.toBe("token");
+    await expect(policy.authorize(runTarget, write, { directClientCall: true })).resolves.toBe("client");
+  });
 });
 
 describe("run_code handler routing", () => {

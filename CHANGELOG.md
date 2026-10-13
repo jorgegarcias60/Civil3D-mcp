@@ -4,6 +4,10 @@
 
 ### Added
 
+- Run-code API 6 adds single-snippet `mode: "preview"`. It uses the write route and budget, aborts the transaction, reports final object counts and bounded existing handles, and returns script/args hashes. A tripwire warns when rollback is unknown. Preview refuses changes outside the transaction and needs separate approval from a later write. It leaves an empty undo step and clears redo. Opt-in `--preview` smoke checks cover rollback and document targeting. Fixes #20
+
+- Run-code API 6 adds `TextBox`, `XClip`, scaled `AttachXref` and in-place `SetViewport`. Text boxes support attributes and nested-block transforms. Write helpers use nested transactions. Unitless xrefs require an explicit scale; feet and US survey feet use scale 1. Overall paper-space viewports are refused. Opt-in `--helpers` live checks cover these cases. `ImportBlock` remains deferred. Part of #22
+
 - Run-code API 5: `mode: "write"` with `document` can target another open drawing. The plugin briefly activates that drawing for the command, then attempts to switch back even when the script fails. Responses report `activated` and `switchedBack`; the server refuses these writes against older plugins before running them.
 
 - Run-code API 4: optional `document` selects another open drawing for read scripts by full path or unique file name, without changing the active drawing. With no drawing open, read scripts can use `OpenSide(path)`; `HasDrawing` reports whether drawing-backed accessors are available. API 4 plugins limit writes to the active drawing. The server checks API 4 before sending `document` on reads.
@@ -115,6 +119,25 @@
   stderr no longer stops the start under Windows PowerShell 5.1.
 
 ### Fixed
+
+- Preview recognizes `List<T>.ToArray` and `GetRange` as detached containers. Shared reference-type elements remain protected. Fixes #20
+
+- Preview allows known collection reads, including `List<T>.IndexOf`, `BinarySearch`, `Find` and `Dictionary<TKey, TValue>.ContainsValue`. Mutators remain refused. Fixes #20
+
+- Preview tracks Session values through deconstruction, tuple slots, ref locals and conditional access. Writes to independent copies remain allowed. Fixes #20
+
+- Preview refuses file opens with unsafe or non-constant `FileOptions`, including `DeleteOnClose`. File opens require constant read-only mode/access and constant sharing. `FileStreamOptions` overloads are refused. Safe read-only `FileInfo.Open` calls are allowed. Fixes #20
+
+- Preview now refuses mutations through `Session.TryGetValue` out variables and `foreach` values. Scalar copies and strings remain allowed. Fixes #20
+
+- Preview allows only explicit read-only filesystem members. `File.Open` and `FileStream` require constant `FileMode.Open` and `FileAccess.Read`. Metadata setters and writer constructors are refused before execution. Fixes #20.
+
+- Preview refuses document locks and nested transactions outside the run's drawing. Proven aliases of `Db` and `Doc.Database` remain allowed. Fixes #20.
+- Preview checks explicit and target-typed `StreamWriter` and `FileStream` constructors. File writes through these constructors are refused before execution; explicit read-only file streams remain allowed. Fixes #20.
+- Preview refuses increments and decrements of Session array elements and object fields. Independent local value copies remain editable. Fixes #20.
+- Preview allows Session scalar reads, string methods and edits to detached container copies. Shared mutable elements of shallow copies remain guarded. Fixes #20.
+- XClip validates area relative to the first vertex. Small polygons at large coordinates no longer lose their area through cancellation. Fixes #22.
+- Targeted preview smoke snapshots read the selected drawing's DBMOD through its document API. Fixes #20.
 
 - Expected approval refusals (approval required; unknown, expired, used or mismatched token) log one WARN line with tool, action and request ID and no stack trace, also when nested through `civil3d_orchestrate`, `civil3d_docs` or the HTTP bridge. Unexpected errors keep their stacks; client responses are unchanged. Fixes #29.
 

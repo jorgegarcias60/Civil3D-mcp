@@ -165,7 +165,7 @@ describe("PR4 targeted write host route", () => {
   });
 
   it("reports activation and restoration in both the response and run.json, with restoration failures as warnings", () => {
-    expect(commandsSource).toContain("internal const int ApiVersion = 5;");
+    expect(commandsSource).toContain("internal const int ApiVersion = 6;");
     expect(commandsSource).toMatch(/finally\s*\{\s*if \(outcome.Activation.Activated\)/);
     for (const container of ["response", "summary"]) {
       expect(commandsSource).toContain(`${container}["activated"] = true;`);

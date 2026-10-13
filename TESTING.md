@@ -5,6 +5,149 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Preview collection reads and local aliases: issue #20 (2026-10-12)
+
+Compiler regressions cover `List<T>.ToArray` and `GetRange`, read-only list and dictionary methods, and Session aliases through deconstruction, tuples, ref locals and conditional access. Cached mutators and shared reference-type elements are refused. Independent copies, mixed tuple slots and refs into detached arrays remain editable. Each refused snippet also compiles in write mode. Snippets are compiled only; no Autodesk APIs run.
+
+Before the compiler fix, `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` exited 1 with 17 new regression failures. Two focused net8 runs after the fix passed. Additional regressions were included in the final runs below.
+
+All commands ran from this worktree. The .NET commands set `$env:UseSharedCompilation = 'false'` and `$env:NUGET_PACKAGES = 'C:\Users\jorge\.nuget\packages'`. The initial net8 build used normal restore sources and passed with 0 warnings. The initial net10 build exited 0 with 2 NU1900 warnings because the NuGet audit endpoint was unreachable. The final builds used the local cache with auditing disabled. Net8 was rebuilt after net10.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 705 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. Run after net10. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failure(s). Fake roots only. |
+
+Each final harness skipped two existing file-symlink checks because Windows did not grant the required privilege. Civil 3D/AutoCAD and live checks were not run. No plugin was installed. Changes remain unstaged and uncommitted.
+
+### Preview file-open options guard: issue #20 (2026-10-12)
+
+The compiler harness refuses `DeleteOnClose`, `Encrypted`, `WriteThrough`, unknown option bits and non-constant options or sharing. It allows the four safe option values, safe flag combinations, constant sharing and read-only `FileInfo.Open`. Tests cover explicit and target-typed constructors, reordered named arguments and `FileStreamOptions` overloads. Refused snippets still compile in read and write modes. Snippets are compiled only; no filesystem or Autodesk calls in those snippets run.
+
+Before the fix, `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` exited 1 with 18 failures. One was an invalid test argument name, corrected from `isAsync` to `useAsync`. The other failures exposed the missing option/sharing checks and refused read-only `FileInfo.Open` calls.
+
+All commands ran from this worktree. The .NET commands set `$env:UseSharedCompilation = 'false'` and `$env:NUGET_PACKAGES = 'C:\Users\jorge\.nuget\packages'`. Final builds and harness runs restored with the normal source configuration. Net8 was rebuilt after net10.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 705 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 0 warnings and 0 errors. Run before and after net10. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Fake roots only. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-run-code-features diff --check` | Exit 0; no whitespace errors. |
+
+Each harness skipped two existing symlink checks because Windows denied the required privilege. Civil 3D/AutoCAD and live checks were not run. No plugin was installed. All changes remain unstaged and uncommitted.
+
+### Preview Session alias guard: issue #20 (2026-10-12)
+
+The compiler tracks mutable Session values returned through `TryGetValue` out variables and `foreach`. Ten regressions cover declared/existing out locals, named arguments, aliases, list mutation, array assignment/increment, entries, values, shallow copies and deconstruction. Each refused snippet still compiles in write mode. Eight allowed snippets cover scalar/string copies, detached arrays and unrelated collections. The snippets are compiled only; no Autodesk APIs run.
+
+Before the fix, `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` exited 1 with exactly ten new regression failures and two NU1900 audit warnings. An intermediate harness build failed because the first edit used an unavailable Roslyn syntax base type. That edit was corrected before the final checks.
+
+All commands ran from this worktree. The .NET checks set `$env:UseSharedCompilation = 'false'` and `$env:NUGET_PACKAGES = 'C:\Users\jorge\.nuget\packages'`. The NuGet audit endpoint was unreachable, so final checks used the local cache with auditing disabled. Net8 was rebuilt after net10.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 705 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. Run before and after net10. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; PASS (230 references). Repeated after the final net8 plugin build. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Fake roots only. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-run-code-features diff --check` | Exit 0; no whitespace errors. |
+
+Each final harness skipped two existing symlink checks because Windows denied the required privilege. Civil 3D/AutoCAD and live checks were not run. No plugin was installed. All changes remain unstaged and uncommitted.
+
+### Preview filesystem guard: issue #20 (2026-10-12)
+
+Preview uses an explicit read-only allow-list for files, directories and their metadata. The compiler harness covers creating/truncating `File.Open` calls, read-only constant opens, omitted/default access, variables, named arguments, aliases, method groups, options and handle overloads. It also covers `File.Create`, `File.AppendAllText`, `FileInfo.Delete`, metadata setters, directory creation, writer constructors and the read-only members. Every refused filesystem snippet still compiles in read and write modes. Snippets are compiled only; they do not execute IO or Autodesk APIs.
+
+All commands ran from this worktree. The .NET commands used `$env:UseSharedCompilation = 'false'`. The first net8 build passed with 0 warnings. The initial net10 build exited 0 with two NU1900 warnings because the NuGet audit source was unreachable. Final plugin builds used the local cache with auditing disabled. Net8 was rebuilt after net10. The first harness run found five failures: named-argument labels were incorrectly guarded, and two test snippets collided with the script API's `Open<T>`. Both were corrected before the final runs.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 705 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` | Exit 0; 0 warnings and 0 errors. Run after net10. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Fake roots only. |
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-run-code-features diff --check` | Exit 0; no whitespace errors. |
+
+Each final harness skipped two existing file-symlink checks because Windows denied the required privilege. Civil 3D/AutoCAD and live smoke checks were not run. No plugin was installed. All changes remain unstaged and uncommitted.
+
+### Run-code helpers and preview review fixes: issues #20 and #22 (2026-10-12)
+
+`PreviewGuardChecks` covers cross-drawing commits, database/manager aliases and deconstruction, explicit and target-typed stream constructors, Session array/field increments and decrements, scalar/string reads, detached copies and shared elements of shallow copies. Each refused snippet also compiles in write mode. `RuntimeChecks` covers small XClip squares at coordinates near five and ten million, winding and a distant zero-area polygon. The smoke source regression checks target-document DBMOD; its ActiveX query compiles against both reference sets. No live smoke or Civil 3D execution was run.
+
+All commands ran from this worktree. For the .NET checks, `$env:UseSharedCompilation = 'false'` was set in PowerShell. The initial shared-compiler harness attempt failed with CS2012 (DLL write denied); changing the output folder did not help. Disabling shared compilation resolved it. Two intermediate harness runs found test failures in shallow-copy tracking and array `Clone`; both were fixed before the final checks. NuGet restore succeeded with the normal sources.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 705 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 0 warnings and 0 errors. Repeated after the net10 build. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. Fake roots only. |
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-run-code-features diff --check` | Exit 0; no whitespace errors. |
+
+Each final harness skipped two existing file-symlink retention/pruning checks because Windows did not grant the required privilege. Live rollback and target-document DBMOD still need scratch-drawing checks. No plugin was installed, and no files were staged or committed.
+
+An extra `git diff --check` with `-c core.autocrlf=false` exited 1 because it treated existing CRLF endings as trailing whitespace. The command above, with the repository's normal line-ending settings, exited 0. No Git configuration was changed.
+
+### Run-code preview v1: issue #20 (2026-10-12)
+
+Checks cover preview validation and API skew, separate approvals, canonical args hashes, final-state counts, handle bounds, and preview guards. The opt-in `--preview` smoke checks were added but not run. Live rollback, nested transactions and document restoration still need scratch-drawing checks.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 704 tests passed in 53 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| Plugin Release net8, net10, then net8 rebuilt with `--restore` and matching references | Each final build exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. |
+
+The initial net10 restore reported two NU1900 audit warnings. Final builds used the local NuGet cache with `-p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false`. Each harness skipped two existing file-link retention checks because Windows did not grant the required privilege.
+
+### Run-code drawing helpers: issue #22 (2026-10-12)
+
+Checks cover the four signatures, named `XrefResult`, read-mode guards, xref units and paths, polygon validation, and compilation of the live snippets. The new help tests failed before implementation. Live `--helpers` checks were added but not run. Native text geometry, xref undo and viewport persistence still need live checks.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 698 tests passed in 53 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| Plugin Release net8, net10, then net8 rebuilt with `--restore` and matching references | Each exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failures. |
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0. |
+
+Both harness runs skipped two existing file-link retention checks because Windows did not grant the required privilege.
+
 ### Approval logging: issue #29 (2026-10-12)
 
 `tests/approval_logging.test.ts` covers direct MCP, registry, nested `civil3d_orchestrate` / `civil3d_docs` and authenticated HTTP calls in token and client modes. Each expected refusal logs one WARN line with no stack frames; unexpected errors keep their stacks; client error text, `isError`, codes and request IDs are unchanged. The tests fail on the previous code.

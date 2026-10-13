@@ -19,15 +19,17 @@ namespace Civil3DMcpPlugin;
 /// ModelSpace&lt;T&gt;(), PaperSpace&lt;T&gt;(layout), OpenSide(path),
 /// OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, ById(handle),
 /// EnsureLayer(...), Tag(...), TagValue(...), Tagged&lt;T&gt;(...),
+/// TextBox(...), XClip(...), AttachXref(...), SetViewport(...),
 /// TransactionFor(db), WriteFile(...), RunFolder, Session.
-/// EnsureLayer and Tag need write mode. SideErrors and TryErrors keep at most
+/// EnsureLayer, Tag, XClip, AttachXref and SetViewport need write mode.
+/// SideErrors and TryErrors keep at most
 /// 200 entries each; timeout and cancellation are never swallowed.
 ///
 /// The script runs on Civil 3D's main thread and cannot be stopped from
 /// outside: call Check() in long loops (ModelSpace() does it for every entity)
 /// so the time budget and a cancelled request end it.
 /// </summary>
-public abstract class RunCodeScript
+public abstract partial class RunCodeScript
 {
   public sealed record RunCodeSideError(string Path, string? ErrorStatus, string Message);
   public sealed record RunCodeTryError(string Label, string Type, string Message, int? Line);
@@ -74,6 +76,7 @@ public abstract class RunCodeScript
 
   private Document? _doc;
   private Database? _db;
+  private bool _previewMode;
   private CivilDocument? _civil;
   private Transaction? _transaction;
   public bool HasDrawing => _doc != null;
@@ -132,13 +135,14 @@ public abstract class RunCodeScript
   public abstract object? Run();
 
   internal void Attach(Document? doc, Database? db, CivilDocument? civil, Transaction? transaction, bool writeMode,
-    JsonObject args, CancellationToken token, TimeSpan budget, string runFolder)
+    JsonObject args, CancellationToken token, TimeSpan budget, string runFolder, bool previewMode = false)
   {
     _doc = doc;
     _db = db;
     _civil = civil;
     _transaction = transaction == null ? null : new RunTransaction(transaction);
     WriteMode = writeMode;
+    _previewMode = previewMode;
     Args = args;
     Token = token;
     RunFolder = runFolder;
@@ -505,10 +509,18 @@ public abstract class RunCodeScript
     PaperSpace<Autodesk.AutoCAD.DatabaseServices.Entity>(layoutName, db);
 
   /// <summary>Writes a text file into RunFolder (a file name, no folders) and returns its full path.</summary>
-  public string WriteFile(string fileName, string contents) => RunCodeLog.WriteScriptFile(RunFolder, fileName, contents, null);
+  public string WriteFile(string fileName, string contents)
+  {
+    if (_previewMode) throw new InvalidOperationException("Preview cannot roll back WriteFile; use mode 'write'.");
+    return RunCodeLog.WriteScriptFile(RunFolder, fileName, contents, null);
+  }
 
   /// <summary>Writes lines into a file in RunFolder and returns its full path.</summary>
-  public string WriteFile(string fileName, IEnumerable<string> lines) => RunCodeLog.WriteScriptFile(RunFolder, fileName, null, lines);
+  public string WriteFile(string fileName, IEnumerable<string> lines)
+  {
+    if (_previewMode) throw new InvalidOperationException("Preview cannot roll back WriteFile; use mode 'write'.");
+    return RunCodeLog.WriteScriptFile(RunFolder, fileName, null, lines);
+  }
 
   internal void ReleaseOwned()
   {

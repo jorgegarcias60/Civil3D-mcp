@@ -16,11 +16,114 @@ internal static class RuntimeChecks
     CheckOutput(expect);
     CheckAuth(expect);
     CheckHelpers(expect);
+    CheckDrawingHelpers(expect);
+    CheckPreview(expect);
     CheckDocuments(expect);
     CheckCopies(expect);
     RetentionChecks.Run(expect);
     ResultChecks.Run(expect);
     CheckDispatchGateAsync(expect).GetAwaiter().GetResult();
+  }
+
+  private static void CheckPreview(Action<bool, string> expect)
+  {
+    var objects = new[] {
+      new RunCodeChange("TEXT", "0", true, false, true, "NEW"),
+      new RunCodeChange("TEXT", "0", true, false, false, "NEW2"),
+      new RunCodeChange("TEXT", "0", true, false, false, "NEW3"),
+      new RunCodeChange("TEXT", "0", true, true, true, "DISCARDED"),
+      new RunCodeChange("TEXT", "0", false, true, true, "2a"),
+      new RunCodeChange("TEXT", "0", false, false, true, "2b"),
+      new RunCodeChange("TEXT", "0", false, false, false, "2c"),
+      new RunCodeChange("LAYER", null, false, false, true, "1"),
+      new RunCodeChange("TEXT", "A", false, false, true, "3"),
+    };
+    var summary = RunCodeChanges.Reduce(objects);
+    var text = summary["byType"]!.AsArray().Single(row => (string?)row!["type"] == "TEXT" && (string?)row["layer"] == "0")!;
+    expect((long)text["added"]! == 3 && (long)text["erased"]! == 1 && (long)text["modified"]! == 1,
+      "preview final flags count additions, erasures and modifications exactly once");
+    expect((long)summary["totals"]!["modified"]! == 3 && summary["byType"]![0]!["layer"] == null,
+      "preview groups separate layers and include non-entity objects");
+    expect(summary["erasedHandles"]!.ToJsonString() == "[\"2A\"]" && summary["modifiedHandles"]!.ToJsonString() == "[\"1\",\"2B\",\"3\"]",
+      "preview handles are existing objects only, uppercase and ordered");
+    expect(summary.ToJsonString() == RunCodeChanges.Reduce(objects.Reverse()).ToJsonString(),
+      "preview groups and handles are independent of transaction iteration order");
+    var many = Enumerable.Range(1, 250).SelectMany(i => new[] {
+      new RunCodeChange("TEXT", "0", false, true, true, i.ToString("X")),
+      new RunCodeChange("TEXT", "0", false, false, true, (i + 500).ToString("X")),
+    }).ToArray();
+    var bounded = RunCodeChanges.Reduce(many);
+    expect(bounded["erasedHandles"]!.AsArray().Count == 200 && bounded["modifiedHandles"]!.AsArray().Count == 200 && (bool)bounded["truncated"]!,
+      "preview independently caps both existing handle lists at 200");
+    expect((long)bounded["totals"]!["erased"]! == 250 && (long)bounded["totals"]!["modified"]! == 250 &&
+        bounded.ToJsonString() == RunCodeChanges.Reduce(many.Reverse()).ToJsonString(),
+      "preview truncates only handles, preserves complete totals and deterministic selection");
+    var exact = RunCodeChanges.Reduce(many.Where(obj => Convert.ToInt32(obj.Handle, 16) <= 200));
+    expect(!(bool)exact["truncated"]! && exact["erasedHandles"]!.AsArray().Count == 200,
+      "preview does not mark exactly 200 handles truncated");
+    var empty = RunCodeChanges.Reduce(Array.Empty<RunCodeChange>());
+    expect(empty["byType"]!.AsArray().Count == 0 && (long)empty["totals"]!["added"]! == 0 && !(bool)empty["truncated"]!,
+      "preview with no changes returns empty groups and zero totals");
+
+    var args = JsonNode.Parse("{\"z\":null,\"a\":{\"b\":1,\"a\":\"Δ\"},\"list\":[2,1]}")!.AsObject();
+    const string canonical = "{\"a\":{\"a\":\"Δ\",\"b\":1},\"list\":[2,1],\"z\":null}";
+    expect(RunCodeArguments.CanonicalJson(args, null) == canonical,
+      "preview args hash sorts nested keys, preserves arrays, nulls and Unicode");
+    expect(RunCodeArguments.CanonicalJson(args, canonical) == canonical && RunCodeHelpers.Sha256Hex(canonical).Length == 64,
+      "preview preserves the server's canonical bytes for cross-runtime hashes");
+    try { RunCodeArguments.CanonicalJson(args, "{}"); expect(false, "argsJson mismatch is refused"); }
+    catch (ArgumentException) { expect(true, "argsJson mismatch is refused"); }
+  }
+
+  private static void CheckDrawingHelpers(Action<bool, string> expect)
+  {
+    expect(RunCodeHelpers.XrefScale(null, "Feet", "USSurveyFeet", () => throw new Exception()) == 1,
+      "feet and US survey feet use scale one");
+    expect(RunCodeHelpers.XrefScale(null, "USSurveyFeet", "Feet", () => throw new Exception()) == 1 &&
+      RunCodeHelpers.XrefScale(null, "Feet", "Feet", () => throw new Exception()) == 1,
+      "survey feet to feet and feet to feet use scale one");
+    expect(RunCodeHelpers.XrefScale(0.25, "Unitless", "Feet", () => throw new Exception()) == 0.25,
+      "explicit xref scale overrides undefined source units");
+    expect(RunCodeHelpers.XrefScale(null, "Inches", "Feet", () => 1.0 / 12) == 1.0 / 12,
+      "xref unit converter factor is used without double scaling");
+    try { RunCodeHelpers.XrefScale(null, "Unitless", "Feet", () => 1); expect(false, "unitless xref requires explicit scale"); }
+    catch (ArgumentException) { expect(true, "unitless xref requires explicit scale"); }
+    try { RunCodeHelpers.XrefScale(null, "Feet", "Undefined", () => 1); expect(false, "undefined host units require explicit scale"); }
+    catch (ArgumentException) { expect(true, "undefined host units require explicit scale"); }
+    try { RunCodeHelpers.XrefScale(null, "Undefined", "Feet", () => 1); expect(false, "undefined source units require explicit scale"); }
+    catch (ArgumentException) { expect(true, "undefined source units require explicit scale"); }
+    try { RunCodeHelpers.XrefScale(0, "Feet", "Feet", () => 1); expect(false, "zero xref scale is refused"); }
+    catch (ArgumentOutOfRangeException) { expect(true, "zero xref scale is refused"); }
+    try { RunCodeHelpers.XrefScale(null, "Inches", "Feet", () => double.PositiveInfinity); expect(false, "invalid unit conversion is refused"); }
+    catch (ArgumentException) { expect(true, "invalid unit conversion is refused"); }
+    var sourcePath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "xref-source.dwg"));
+    var hostPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "host", "host.dwg"));
+    expect(RunCodeHelpers.XrefPathName(sourcePath, hostPath, true) == Path.GetRelativePath(Path.GetDirectoryName(hostPath)!, sourcePath),
+      "saved same-drive host uses relative xref path");
+    var siblingSource = Path.Combine(Path.GetDirectoryName(hostPath)!, "source.dwg");
+    expect(RunCodeHelpers.XrefPathName(siblingSource, hostPath, true) == "." + Path.DirectorySeparatorChar + "source.dwg",
+      "same-folder xref path is explicitly relative, not AutoCAD No path");
+    expect(RunCodeHelpers.XrefPathName(sourcePath, string.Empty, true) == sourcePath,
+      "unsaved host keeps full xref path");
+    expect(RunCodeHelpers.XrefPathName(sourcePath, hostPath, false) == sourcePath,
+      "relativePath false keeps full xref path");
+    if (OperatingSystem.IsWindows())
+      expect(RunCodeHelpers.XrefPathName(@"D:\source.dwg", @"C:\host\host.dwg", true) == @"D:\source.dwg",
+        "another-drive xref keeps full path");
+    var square = RunCodeHelpers.ClipPolygon(new[] { (0d, 0d), (0d, 2d), (2d, 2d), (2d, 0d), (0d, 0d) });
+    expect(square.Length == 4 && square[0] == (2d, 0d), "clip polygon drops repeated closure and normalizes winding");
+    var distantSquare = RunCodeHelpers.ClipPolygon(new[] {
+      (1e7, 1e7), (1e7, 1e7 + 0.1), (1e7 + 0.1, 1e7 + 0.1), (1e7 + 0.1, 1e7) });
+    expect(distantSquare.Length == 4 && distantSquare[0] == (1e7 + 0.1, 1e7),
+      "clip polygon keeps a 0.1 square at coordinates near ten million and normalizes winding");
+    var smallerSquare = RunCodeHelpers.ClipPolygon(new[] {
+      (5e6, 5e6), (5e6 + 0.05, 5e6), (5e6 + 0.05, 5e6 + 0.05), (5e6, 5e6 + 0.05) });
+    expect(smallerSquare.Length == 4 && smallerSquare[0] == (5e6, 5e6),
+      "clip polygon keeps a 0.05 square at coordinates near five million");
+    try { RunCodeHelpers.ClipPolygon(new[] { (1e7, 1e7), (1e7 + 0.1, 1e7), (1e7 + 0.2, 1e7) }); expect(false, "distant zero-area clip polygon is rejected"); }
+    catch (ArgumentException) { expect(true, "distant zero-area clip polygon is rejected"); }
+    try { RunCodeHelpers.ClipPolygon(new[] { (0d, 0d), (2d, 2d), (0d, 2d), (2d, 0d) }); expect(false, "clip polygon rejects crossings"); }
+    catch (ArgumentException) { expect(true, "clip polygon rejects crossings"); }
   }
 
   private static async Task CheckDispatchGateAsync(Action<bool, string> expect)
