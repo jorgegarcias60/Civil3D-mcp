@@ -584,7 +584,8 @@ async function helperChecks(runCodeApi) {
       const second = requireOk(await execute("clipWrite", { handle }));
       const value = requireOk(await execute("clipRead", { handle }, "read"));
       record("helpers: XClip transformed insert keeps only the inside line", first !== second && value.id === second
-        && value.Enabled && value.Elevation === 0 && value.FrontClip === 0 && value.BackClip === 0
+        && value.Enabled && value.Elevation === 0 && value.FrontClip === 0
+        && (value.BackClip === 0 || Math.abs(value.BackClip) >= 1e299)
         && value.total === 2 && value.visible === 1 && value.points.length === 4
         && [[0,0], [10,0], [10,10], [0,10]].every(p => value.points.some(q => vector(q, p))), value);
     });

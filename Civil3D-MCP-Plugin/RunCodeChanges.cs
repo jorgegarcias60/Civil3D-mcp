@@ -3,14 +3,14 @@ using System.Text.Json.Nodes;
 namespace Civil3DMcpPlugin;
 
 // Final transaction state only. No Autodesk types, events or host calls.
-internal sealed record RunCodeChange(string Type, string? Layer, bool IsNewObject,
+internal sealed record RunCodeChange(string Type, string? Layer, long HandleValue,
   bool IsErased, bool IsModified, string? Handle);
 
 internal static class RunCodeChanges
 {
   internal const int HandleLimit = 200;
 
-  internal static JsonObject Reduce(IEnumerable<RunCodeChange> objects)
+  internal static JsonObject Reduce(IEnumerable<RunCodeChange> objects, long startHandseed)
   {
     var groups = new Dictionary<(string Type, string? Layer), long[]>();
     var totals = new long[3];
@@ -19,7 +19,8 @@ internal static class RunCodeChanges
     var truncated = false;
     foreach (var obj in objects)
     {
-      var kind = obj.IsNewObject ? (obj.IsErased ? -1 : 0)
+      var isNew = obj.HandleValue >= startHandseed;
+      var kind = isNew ? (obj.IsErased ? -1 : 0)
         : obj.IsErased ? 1 : obj.IsModified ? 2 : -1;
       if (kind < 0) continue;
       if (!groups.TryGetValue((obj.Type, obj.Layer), out var counts))

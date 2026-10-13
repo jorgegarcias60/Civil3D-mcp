@@ -9,6 +9,7 @@ internal sealed class RunCodePreview : IDisposable
 {
   private readonly Database _database;
   private readonly Transaction _transaction;
+  private readonly long _startHandseed;
   private readonly int _runDepth;
   internal bool OutsideTransaction { get; private set; }
   internal bool ObservationFailed { get; private set; }
@@ -17,6 +18,8 @@ internal sealed class RunCodePreview : IDisposable
   {
     _database = database;
     _transaction = transaction;
+    // IsNewObject can already be false while the run's transaction is open.
+    _startHandseed = database.Handseed.Value;
     _runDepth = database.TransactionManager.NumberOfActiveTransactions;
     _database.ObjectModified += Modified;
     try { _database.ObjectErased += Erased; }
@@ -67,17 +70,18 @@ internal sealed class RunCodePreview : IDisposable
       foreach (DBObject obj in _transaction.GetAllObjects())
       {
         check();
-        var isNew = obj.IsNewObject;
+        var handle = obj.Handle;
+        var isNew = handle.Value >= _startHandseed;
         var isErased = obj.IsErased;
         var isModified = obj.IsModified;
         if (isNew && isErased || !isNew && !isErased && !isModified) continue;
         // Non-entity objects (tables, dictionaries, Civil objects) count too.
         // New handles are deliberately omitted: abort can reuse them later.
         yield return new(obj.GetRXClass().DxfName, obj is Entity entity ? entity.Layer : null,
-          isNew, isErased, isModified, isNew ? null : obj.Handle.ToString());
+          handle.Value, isErased, isModified, isNew ? null : handle.ToString());
       }
     }
-    return RunCodeChanges.Reduce(Objects());
+    return RunCodeChanges.Reduce(Objects(), _startHandseed);
   }
 
   public void Dispose()

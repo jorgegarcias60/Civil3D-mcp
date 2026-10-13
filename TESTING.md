@@ -5,6 +5,28 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Live-run follow-up: preview counts and XClip, issues #20 and #22 (2026-10-12)
+
+The supplied Civil 3D 2026 live run reported 64 passed and 3 failed before these changes. Preview counted new texts as modified in both the active drawing and document B. The XClip check rejected AutoCAD's `BackClip = 1e300` sentinel despite the expected visible geometry.
+
+Before the classifier fix, the harness used new objects with `IsNewObject = false` and numeric hex handles. `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:RestoreSources=C:\Users\jorge\.nuget\packages -p:NuGetAudit=false` exited 1 with `3 FAILED`. The final reducer uses handle values and the starting seed. Checks cover the exact seed boundary, new-then-erased objects, unchanged objects, type/layer groups, deterministic ordering and both 200-handle limits. New objects do not enter existing-object handle lists or cause truncation. The XClip assertion now accepts zero or an absolute back depth of at least `1e299`. Its other conditions and the helper are unchanged.
+
+All commands ran from this worktree. The .NET commands set `$env:UseSharedCompilation = 'false'` and `$env:NUGET_PACKAGES = 'C:\Users\jorge\.nuget\packages'`. Final builds and harness runs used the normal restore sources. Net8 was rebuilt after net10.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0; 705 tests passed in 54 files. |
+| `npm run docs:check` | Exit 0; 211 entries current. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0; 0 warnings and 0 errors. Run before and after net10. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` | Exit 0; 0 warnings and 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` | Exit 0; PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` | Exit 0; PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0; 0 failure(s). Fake roots only. |
+| `node --check scripts/live-run-code-smoke.mjs` | Exit 0; no syntax errors. |
+
+Each harness skipped two existing file-symlink checks because Windows denied the required privilege. Civil 3D/AutoCAD and live checks were not run. No plugin was installed. Changes remain unstaged and uncommitted.
+
 ### Preview collection reads and local aliases: issue #20 (2026-10-12)
 
 Compiler regressions cover `List<T>.ToArray` and `GetRange`, read-only list and dictionary methods, and Session aliases through deconstruction, tuples, ref locals and conditional access. Cached mutators and shared reference-type elements are refused. Independent copies, mixed tuple slots and refs into detached arrays remain editable. Each refused snippet also compiles in write mode. Snippets are compiled only; no Autodesk APIs run.

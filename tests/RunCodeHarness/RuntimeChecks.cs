@@ -27,41 +27,57 @@ internal static class RuntimeChecks
 
   private static void CheckPreview(Action<bool, string> expect)
   {
+    const long startHandseed = 0x30;
+    // Live objects can have IsNewObject == false before the run commits.
+    // Handles at or above the starting seed still identify additions.
     var objects = new[] {
-      new RunCodeChange("TEXT", "0", true, false, true, "NEW"),
-      new RunCodeChange("TEXT", "0", true, false, false, "NEW2"),
-      new RunCodeChange("TEXT", "0", true, false, false, "NEW3"),
-      new RunCodeChange("TEXT", "0", true, true, true, "DISCARDED"),
-      new RunCodeChange("TEXT", "0", false, true, true, "2a"),
-      new RunCodeChange("TEXT", "0", false, false, true, "2b"),
-      new RunCodeChange("TEXT", "0", false, false, false, "2c"),
-      new RunCodeChange("LAYER", null, false, false, true, "1"),
-      new RunCodeChange("TEXT", "A", false, false, true, "3"),
+      new RunCodeChange("TEXT", "0", 0x30, false, true, "30"),
+      new RunCodeChange("TEXT", "0", 0x31, false, true, "31"),
+      new RunCodeChange("TEXT", "0", 0x32, false, false, "32"),
+      new RunCodeChange("TEXT", "0", 0x33, true, true, "33"),
+      new RunCodeChange("TEXT", "0", 0x2a, true, true, "2a"),
+      new RunCodeChange("TEXT", "0", 0x2b, false, true, "2b"),
+      new RunCodeChange("TEXT", "0", 0x2f, false, false, "2f"),
+      new RunCodeChange("LAYER", null, 1, false, true, "1"),
+      new RunCodeChange("TEXT", "A", 3, false, true, "3"),
     };
-    var summary = RunCodeChanges.Reduce(objects);
+    var summary = RunCodeChanges.Reduce(objects, startHandseed);
     var text = summary["byType"]!.AsArray().Single(row => (string?)row!["type"] == "TEXT" && (string?)row["layer"] == "0")!;
     expect((long)text["added"]! == 3 && (long)text["erased"]! == 1 && (long)text["modified"]! == 1,
-      "preview final flags count additions, erasures and modifications exactly once");
+      "preview starting handseed counts additions, erasures and modifications exactly once");
     expect((long)summary["totals"]!["modified"]! == 3 && summary["byType"]![0]!["layer"] == null,
       "preview groups separate layers and include non-entity objects");
     expect(summary["erasedHandles"]!.ToJsonString() == "[\"2A\"]" && summary["modifiedHandles"]!.ToJsonString() == "[\"1\",\"2B\",\"3\"]",
       "preview handles are existing objects only, uppercase and ordered");
-    expect(summary.ToJsonString() == RunCodeChanges.Reduce(objects.Reverse()).ToJsonString(),
+    expect(summary.ToJsonString() == RunCodeChanges.Reduce(objects.Reverse(), startHandseed).ToJsonString(),
       "preview groups and handles are independent of transaction iteration order");
+    var boundary = RunCodeChanges.Reduce(new[] {
+      new RunCodeChange("TEXT", "0", startHandseed - 1, false, true, "2f"),
+      new RunCodeChange("TEXT", "0", startHandseed, false, true, "30"),
+      new RunCodeChange("TEXT", "0", startHandseed + 1, true, true, "31"),
+    }, startHandseed);
+    expect((long)boundary["totals"]!["added"]! == 1 && (long)boundary["totals"]!["erased"]! == 0 &&
+        (long)boundary["totals"]!["modified"]! == 1 && boundary["modifiedHandles"]!.ToJsonString() == "[\"2F\"]" &&
+        boundary["erasedHandles"]!.AsArray().Count == 0,
+      "preview includes the seed boundary as new and omits new-then-erased objects and new handles");
+    const long manyHandseed = 0x1000;
     var many = Enumerable.Range(1, 250).SelectMany(i => new[] {
-      new RunCodeChange("TEXT", "0", false, true, true, i.ToString("X")),
-      new RunCodeChange("TEXT", "0", false, false, true, (i + 500).ToString("X")),
+      new RunCodeChange("TEXT", "0", i, true, true, i.ToString("X")),
+      new RunCodeChange("TEXT", "0", i + 500, false, true, (i + 500).ToString("X")),
+      new RunCodeChange("TEXT", "0", manyHandseed + i, false, true, (manyHandseed + i).ToString("X")),
+      new RunCodeChange("TEXT", "0", manyHandseed + i + 500, true, true, (manyHandseed + i + 500).ToString("X")),
     }).ToArray();
-    var bounded = RunCodeChanges.Reduce(many);
+    var bounded = RunCodeChanges.Reduce(many, manyHandseed);
     expect(bounded["erasedHandles"]!.AsArray().Count == 200 && bounded["modifiedHandles"]!.AsArray().Count == 200 && (bool)bounded["truncated"]!,
       "preview independently caps both existing handle lists at 200");
-    expect((long)bounded["totals"]!["erased"]! == 250 && (long)bounded["totals"]!["modified"]! == 250 &&
-        bounded.ToJsonString() == RunCodeChanges.Reduce(many.Reverse()).ToJsonString(),
+    expect((long)bounded["totals"]!["added"]! == 250 && (long)bounded["totals"]!["erased"]! == 250 &&
+        (long)bounded["totals"]!["modified"]! == 250 &&
+        bounded.ToJsonString() == RunCodeChanges.Reduce(many.Reverse(), manyHandseed).ToJsonString(),
       "preview truncates only handles, preserves complete totals and deterministic selection");
-    var exact = RunCodeChanges.Reduce(many.Where(obj => Convert.ToInt32(obj.Handle, 16) <= 200));
+    var exact = RunCodeChanges.Reduce(many.Where(obj => obj.HandleValue <= 200 || obj.HandleValue >= manyHandseed), manyHandseed);
     expect(!(bool)exact["truncated"]! && exact["erasedHandles"]!.AsArray().Count == 200,
       "preview does not mark exactly 200 handles truncated");
-    var empty = RunCodeChanges.Reduce(Array.Empty<RunCodeChange>());
+    var empty = RunCodeChanges.Reduce(Array.Empty<RunCodeChange>(), startHandseed);
     expect(empty["byType"]!.AsArray().Count == 0 && (long)empty["totals"]!["added"]! == 0 && !(bool)empty["truncated"]!,
       "preview with no changes returns empty groups and zero totals");
 

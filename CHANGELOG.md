@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Preview counts use the target database's starting `Handseed` to identify new objects when `IsNewObject` is false. New-then-erased objects and new handles stay out of existing-object lists. Fixes #20
+- The XClip live smoke check accepts AutoCAD's no-back-plane sentinel as well as zero. All other assertions and the helper stay unchanged. Fixes #22
+
 ### Added
 
 - Run-code API 6 adds single-snippet `mode: "preview"`. It uses the write route and budget, aborts the transaction, reports final object counts and bounded existing handles, and returns script/args hashes. A tripwire warns when rollback is unknown. Preview refuses changes outside the transaction and needs separate approval from a later write. It leaves an empty undo step and clears redo. Opt-in `--preview` smoke checks cover rollback and document targeting. Fixes #20
