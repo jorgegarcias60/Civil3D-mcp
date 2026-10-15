@@ -105,7 +105,8 @@ and Save As as well as open/close.
   to claim that drawing and answer health. While waiting, it scans only the
   verified launched process's dialogs about every two seconds. It finds that
   process's windows by Win32 enumeration of its pid, so no other process is queried.
-  For the English "References - Not Found Files" dialog, it presses the button
+  For the English "References - Not Found Files" and "Missing SHX Files" prompts
+  (also when they appear after the plugin registers), it presses the button
   whose text starts with "Ignore": through UI Automation Invoke when available,
   otherwise (task dialog command links in Civil 3D 2026 expose no pattern) by
   sending the button's own BN_CLICKED notification to its host window, then
@@ -115,7 +116,11 @@ and Save As as well as open/close.
   exposes them) and every dialog seen during the start, with `action` and `method`.
   Other standard or modal dialogs are reported with their title, class and
   buttons; they are never clicked. The main window and palettes are not reported.
-  No keyboard, mouse, focus or profile changes are used.
+  No keyboard, mouse, focus or profile changes are used. `attach` on an instance
+  that does not respond scans its dialogs too: it answers the known prompts only
+  in this session's own agent instance (then continues the attach once it
+  responds), and for any other instance only reports, e.g. "not responsive:
+  dialog 'Missing SHX Files' is open".
   If the process is still alive at timeout, start returns `status: "starting"`
   and its `pid`. Its claim remains reserved for fifteen minutes total from launch.
   `list` shows the pending launch. Once the plugin registers, `attach` by pid

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Agent starts also answer AutoCAD's "Missing SHX Files" prompt with Ignore, including
+  prompts that appear after the plugin registers (with a substitute-font warning).
+  `attach` on an unresponsive instance names the open dialog; it answers known
+  prompts only in this session's own agent instance and only reports elsewhere
+  (`reportOnly`). Fixes #48.
+
 - Scan dialogs only in the verified agent launch, found by Win32 enumeration of
   its pid. Press Ignore on "References - Not Found Files" (UIA Invoke, else the
   button's BN_CLICKED notification, then BM_CLICK) and report every dialog seen
