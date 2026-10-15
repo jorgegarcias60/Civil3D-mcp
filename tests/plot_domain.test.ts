@@ -533,6 +533,61 @@ describe("civil3d_plot native implementation guards", () => {
     expect(code).not.toMatch(/\b(?:PlotFactory|PlotEngine|BackgroundPlotEngine|PreviewEngine|SetPlotCentered)\b/);
   });
 
+  // Issue #44: viewports erased and re-created without a regen left stale
+  // graphics, and the next DWG To PDF plot killed acad.exe (c0000005).
+  it("regenerates the drawing before the plot engine starts (issue 44)", () => {
+    const code = pluginSource("PlotCommands.cs");
+    const helperStart = code.indexOf("private static async Task RegenerateBeforePlotAsync(Document doc)");
+    expect(helperStart).toBeGreaterThan(-1);
+    const helper = code.slice(helperStart, code.indexOf("private static async Task<OutputFile> PlotOneAsync"));
+    // Same command runner as -PLOT (stale-prompt guard, completion check), no prompts.
+    expect(helper).toContain('await RunCommandAsync(doc, "REGENALL", "_.REGENALL")');
+    // A failed regen fails the plot with a marked error; it is never swallowed.
+    expect(helper).toContain("throw failure;");
+    expect(helper).toContain("RegenFailedKey");
+
+    // plot_layouts_to_pdf: per layout, after CTAB makes it current, before the
+    // output file is claimed and before -PLOT starts.
+    const plotOneStart = code.indexOf("private static async Task<OutputFile> PlotOneAsync");
+    const plotOne = code.slice(plotOneStart, code.indexOf("internal static async Task RunCommandAsync"));
+    const ctab = plotOne.indexOf('App.SetSystemVariable("CTAB"');
+    const regen = plotOne.indexOf("await RegenerateBeforePlotAsync(doc)");
+    expect(ctab).toBeGreaterThan(-1);
+    expect(regen).toBeGreaterThan(ctab);
+    expect(regen).toBeLessThan(plotOne.indexOf("FileBoundary.BeginExternalWrite("));
+    expect(regen).toBeLessThan(plotOne.indexOf("await RunCommandAsync(doc, \"PLOT\""));
+    // The batch regenerates once before its loop makes any layout switch, so the
+    // stale current layout is regenerated before CTAB touches it.
+    const batchStart = code.indexOf("public static Task<object?> PlotLayoutsToPdfAsync");
+    const batch = code.slice(batchStart, code.indexOf("private static async Task<OutputFile> PlotOneAsync"));
+    const batchRegen = batch.indexOf("await RegenerateBeforePlotAsync(doc)");
+    const batchLoop = batch.lastIndexOf("foreach (var job in jobs)");
+    expect(batchStart).toBeGreaterThan(-1);
+    expect(batchRegen).toBeGreaterThan(-1);
+    expect(batchLoop).toBeGreaterThan(batchRegen);
+    expect(batch.indexOf('App.SetSystemVariable("CTAB"')).toBe(-1);
+    expect(batch).toContain("catch (JsonRpcDispatchException ex) when (ex.Data.Contains(RegenFailedKey))");
+    // PlotOneAsync is the only CTAB change the loop reaches.
+    expect(batch).toContain("await PlotOneAsync(doc, job, overwrite)");
+    // A regen failure stops the batch instead of plotting the next layouts.
+    expect(code).toContain("ex.Data.Contains(RegenFailedKey)");
+
+    // publish_sheet_set: only when a sheet comes from the open drawing, before
+    // the PDF is moved aside and before -PUBLISH.
+    const publishStart = code.indexOf("public static Task<object?> PublishSheetSetAsync");
+    const publish = code.slice(publishStart, code.indexOf("private sealed class PlotJob"));
+    const publishRegen = publish.indexOf("await RegenerateBeforePlotAsync(doc)");
+    expect(publishRegen).toBeGreaterThan(-1);
+    expect(publish).toContain("sheet.DrawingPath == null");
+    expect(publishRegen).toBeLessThan(publish.indexOf("FileBoundary.BeginExternalWrite(outputPath, overwrite)"));
+    expect(publishRegen).toBeLessThan(publish.indexOf('await RunCommandAsync(doc, "PUBLISH"'));
+
+    // Every in-session entry reports whether the regen ran.
+    expect(code.match(/\["regenerated"\] =/g)?.length).toBe(3);
+    // Nothing else regenerates through a different mechanism.
+    expect(code.match(/RegenerateBeforePlotAsync\(doc\)/g)?.length).toBe(3);
+  });
+
   it("lets the plotter write the final path under the boundary's link checks", () => {
     const source = pluginSource("PlotCommands.cs");
     const boundary = pluginSource("FileBoundary.cs");
