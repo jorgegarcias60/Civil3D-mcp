@@ -496,10 +496,28 @@ internal static class ScriptCompiler
   // Issue #43: one write run that created a layout, switched to it and created
   // and erased viewports crashed AutoCAD at commit (AccessViolation in
   // FlushGraphics, live, 2026-10-15). Each part alone ran fine in its own run,
-  // so only the combination is refused. SetViewport edits an existing viewport
-  // and neither creates nor erases one, so it is not counted.
+  // so only the combination is refused. This reads the whole source: a branch
+  // chosen by Args at run time still counts, so stages must be separate scripts.
+  // SetViewport edits an existing viewport and neither creates nor erases one,
+  // and it may activate the layout itself, so it is not counted here: it
+  // refuses at run time instead (RunCodeHelpers.WithCurrentLayout).
   private const string LayoutManagerTypeName = "Autodesk.AutoCAD.DatabaseServices.LayoutManager";
   private const string ViewportTypeName = "Autodesk.AutoCAD.DatabaseServices.Viewport";
+
+  // Layout switches that bypass LayoutManager: the CTAB and TILEMODE system
+  // variables and Database.TileMode. A non-constant variable name is not counted.
+  private static bool SwitchesLayoutWithoutManager(ISymbol symbol, SimpleNameSyntax node, SemanticModel model)
+  {
+    if (symbol is IPropertySymbol && symbol.Name == "TileMode"
+        && symbol.ContainingType?.ToDisplayString() == DatabaseTypeName && IsAssignmentTarget(node))
+      return true;
+    return symbol is IMethodSymbol { Name: "SetSystemVariable" }
+      && symbol.ContainingType?.ToDisplayString() is "Autodesk.AutoCAD.ApplicationServices.Application" or "Autodesk.AutoCAD.ApplicationServices.Core.Application"
+      && InvocationOf(node) is { } call && model.GetOperation(call) is IInvocationOperation operation
+      && operation.Arguments.FirstOrDefault(argument => argument.Parameter?.Ordinal == 0)?.Value.ConstantValue
+        is { HasValue: true, Value: string variable }
+      && (variable.Equals("CTAB", StringComparison.OrdinalIgnoreCase) || variable.Equals("TILEMODE", StringComparison.OrdinalIgnoreCase));
+  }
 
   private static ScriptDiagnostic? FindLayoutViewportViolation(SyntaxTree tree, SemanticModel model)
   {
@@ -521,6 +539,8 @@ internal static class ScriptCompiler
           && (symbol is IMethodSymbol && symbol.Name is "CreateLayout" or "SetCurrentLayoutId"
               || symbol is IPropertySymbol && symbol.Name == "CurrentLayout" && IsAssignmentTarget(node)))
         layoutChange = true;
+      else if (SwitchesLayoutWithoutManager(symbol, node, model))
+        layoutChange = true;
       // Erase is declared on DBObject, so the receiver's static type decides.
       else if (symbol is IMethodSymbol && symbol.Name == "Erase" && MethodReceiver(node) is { } receiver
           && InheritsFrom(model.GetTypeInfo(receiver).Type as INamedTypeSymbol, ViewportTypeName))
@@ -538,7 +558,8 @@ internal static class ScriptCompiler
     var (line, column) = MapToScript(firstViewport.GetLocation());
     return new ScriptDiagnostic(line, column, GuardDiagnosticId,
       "Changing or creating a layout and creating/erasing viewports in one write run crashed AutoCAD at commit (AccessViolation in FlushGraphics, 2026-10-15). "
-      + "Split it into separate write runs: (1) layout, title block and table without switching layouts, (2) only the CurrentLayout switch, (3) the viewports. See issue #43.");
+      + "Split it into separate write runs: (1) layout, title block and table without switching layouts, (2) only the CurrentLayout switch, (3) the viewports. "
+      + "This check reads the whole script, so stages chosen by an Args value inside one script or codePath file are refused too: keep each stage in its own script or file. See issue #43.");
   }
 
   // Require explicit constant mode/access and constant sharing/options for

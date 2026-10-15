@@ -348,6 +348,18 @@ var layoutViewportRefused = new (string Label, string Code, int Line)[] {
     "LayoutManager.Current.CurrentLayout = \"Sheet\";\nViewport vp = Open<Viewport>(ObjectId.Null, forWrite: true);\nvp?.Erase(true);\nreturn 1;", 3),
   ("CurrentLayout deconstruction + Erase method group",
     "string unused;\n(LayoutManager.Current.CurrentLayout, unused) = (\"Sheet\", \"x\");\nAction a = Open<Viewport>(ObjectId.Null, forWrite: true).Erase;\nreturn a;", 3),
+  ("CTAB system variable + new Viewport",
+    "Application.SetSystemVariable(\"CTAB\", \"Sheet\");\nusing var vp = new Viewport();\nreturn 1;", 2),
+  ("lower-case ctab + named arguments + new Viewport",
+    "Application.SetSystemVariable(value: \"Sheet\", name: \"ctab\");\nusing var vp = new Viewport();\nreturn 1;", 2),
+  ("TILEMODE system variable + Erase on a Viewport",
+    "Application.SetSystemVariable(\"TILEMODE\", 0);\nOpen<Viewport>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;", 2),
+  ("CTAB through a const name + new Viewport",
+    "const string variable = \"CTAB\";\nApplication.SetSystemVariable(variable, \"Sheet\");\nusing var vp = new Viewport();\nreturn 1;", 3),
+  ("Database.TileMode assignment + new Viewport",
+    "Db.TileMode = false;\nusing var vp = new Viewport();\nreturn 1;", 2),
+  ("stages chosen by Args in one script (the whole source counts)",
+    "var stage = (string)Args[\"stage\"]!;\nif (stage == \"activate\") LayoutManager.Current.CurrentLayout = \"Sheet\";\nelse if (stage == \"viewports\") { using var vp = new Viewport(); }\nreturn stage;", 3),
 };
 foreach (var (label, code, viewportLine) in layoutViewportRefused)
 {
@@ -369,6 +381,14 @@ var layoutViewportAllowed = new (string Label, string Code)[] {
   ("reading CurrentLayout next to a new Viewport", "var name = LayoutManager.Current.CurrentLayout;\nusing var vp = new Viewport();\nreturn name;"),
   ("Erase on a non-Viewport next to a layout switch", "LayoutManager.Current.CurrentLayout = \"Sheet\";\nOpen<DBText>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;"),
   ("a local Erase function next to a layout switch", "void Erase() { }\nLayoutManager.Current.CurrentLayout = \"Sheet\";\nErase();\nreturn 1;"),
+  ("CTAB system variable alone", "Application.SetSystemVariable(\"CTAB\", \"Sheet\");\nreturn 1;"),
+  ("another system variable next to a new Viewport", "Application.SetSystemVariable(\"OSMODE\", 0);\nusing var vp = new Viewport();\nreturn vp.Width;"),
+  ("a system variable named at run time next to a new Viewport",
+    "var name = (string)Args[\"name\"]!;\nApplication.SetSystemVariable(name, 0);\nusing var vp = new Viewport();\nreturn vp.Width;"),
+  ("reading CTAB next to a new Viewport", "var tab = Application.GetSystemVariable(\"CTAB\");\nusing var vp = new Viewport();\nreturn tab;"),
+  ("Database.TileMode read next to a new Viewport", "var tile = Db.TileMode;\nusing var vp = new Viewport();\nreturn tile;"),
+  ("new Viewport with SetViewport (SetViewport refuses a layout switch at run time instead)",
+    "using var vp = new Viewport();\nreturn SetViewport(\"Sheet\", ObjectId.Null, customScale: 0.1);"),
 };
 foreach (var (label, code) in layoutViewportAllowed)
 {
@@ -386,6 +406,11 @@ var layoutViewportPreview = Compile("var id = LayoutManager.Current.CreateLayout
 Expect(layoutViewportPreview.Errors.Count(error => error.Code == ScriptCompiler.GuardDiagnosticId) == 1
     && !layoutViewportPreview.Errors.Any(error => error.Message.Contains("issue #43", StringComparison.OrdinalIgnoreCase)),
   "preview keeps its own layout refusal and does not add the issue #43 message", layoutViewportPreview);
+// The guard reads the whole source, so the message must say a stage chosen by Args is refused too.
+var layoutViewportStages = Compile("var stage = (string)Args[\"stage\"]!;\nif (stage == \"activate\") LayoutManager.Current.CurrentLayout = \"Sheet\";\nelse if (stage == \"viewports\") { using var vp = new Viewport(); }\nreturn stage;", write: true);
+Expect(layoutViewportStages.Errors.Any(error => error.Message.Contains("own script or file", StringComparison.Ordinal)
+    && error.Message.Contains("Args", StringComparison.Ordinal)),
+  "the issue #43 message says stages selected by Args in one script are refused", layoutViewportStages);
 
 var addObject = Compile("Db.AddDBObject(new Xrecord());");
 Expect(HasError(addObject, ScriptCompiler.GuardDiagnosticId, 1), "read mode refuses Database.AddDBObject", addObject);

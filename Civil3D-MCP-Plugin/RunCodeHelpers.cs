@@ -9,11 +9,23 @@ internal static class RunCodeHelpers
 {
   // Activation is needed even for populated non-current layouts. Keep the
   // edit's transaction inside this callback so it closes before restoration.
+  //
+  // Issue #43: switching layouts in a run that also created or erased
+  // viewports crashed AutoCAD at commit. The compile guard cannot see this
+  // path (the switch happens inside the helper), so it is refused here, before
+  // anything is switched and so with nothing to restore.
+  internal const string ActivationWithViewportChangesMessage =
+    "SetViewport needs to make layout '{0}' current, and this run already created or erased viewports. Changing the current layout and creating/erasing viewports in one write run crashed AutoCAD at commit (AccessViolation in FlushGraphics, 2026-10-15). "
+    + "Make the layout current in its own write run (only the CurrentLayout switch) and call SetViewport in a later run. See issue #43.";
+
   internal static T WithCurrentLayout<T>(string layoutName, bool viewportsEmpty,
-    Func<string> getCurrentLayout, Action<string> setCurrentLayout, Action activated, Func<T> edit)
+    Func<string> getCurrentLayout, Action<string> setCurrentLayout, Action activated, Func<T> edit,
+    Func<bool>? viewportsChangedInRun = null)
   {
     var previous = getCurrentLayout();
     var activate = viewportsEmpty || !string.Equals(previous, layoutName, StringComparison.OrdinalIgnoreCase);
+    if (activate && viewportsChangedInRun?.Invoke() == true)
+      throw new InvalidOperationException(string.Format(CultureInfo.InvariantCulture, ActivationWithViewportChangesMessage, layoutName));
     try
     {
       if (activate)
