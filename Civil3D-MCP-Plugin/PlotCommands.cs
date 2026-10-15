@@ -300,6 +300,10 @@ public static class PlotCommands
             {
               stopReason = "An earlier -PLOT did not complete; remaining layouts were not plotted.";
             }
+            else if (ex.Data.Contains(RegenFailedKey))
+            {
+              stopReason = "REGENALL failed before an earlier layout; remaining layouts were not plotted.";
+            }
             else if (!continueOnError)
             {
               stopReason = "Stopped after the first failure (continueOnError=false).";
@@ -325,6 +329,7 @@ public static class PlotCommands
       {
         ["device"] = DefaultPdfDevice,
         ["method"] = "-PLOT (BACKGROUNDPLOT=0)",
+        ["regenerated"] = jobs.Any(job => job.Regenerated),
         ["requested"] = results.Count,
         ["plotted"] = plotted,
         ["failed"] = results.Count(item => Equals(item["status"], "failed")),
@@ -470,6 +475,26 @@ public static class PlotCommands
       var outputPath = FileBoundary.ResolveExportPath(outputPathRaw, overwrite, ".pdf");
       var dsdPath = FileBoundary.ResolveExportPath(Path.ChangeExtension(outputPath, ".mcp-publish.dsd"), true, ".dsd");
 
+      // Same stale-viewport crash guard as -PLOT (issue #44), for sheets taken
+      // from the open drawing. Before BeginExternalWrite, so a failed regen never
+      // moves an existing PDF. Sheets from closed drawings are read from disk
+      // and have no in-session graphics. Commands only run in the active
+      // drawing, so an open source that is not the active one cannot be
+      // regenerated here; say so instead of claiming it.
+      var regenerated = false;
+      if (source != null && sheets.Any(sheet => sheet.DrawingPath == null))
+      {
+        if (ReferenceEquals(source, doc))
+        {
+          await RegenerateBeforePlotAsync(doc);
+          regenerated = true;
+        }
+        else
+        {
+          warnings.Add("The source drawing is open but not the active drawing, so its viewports were not regenerated before publishing.");
+        }
+      }
+
       var watch = Stopwatch.StartNew();
       var startedUtc = DateTime.UtcNow;
       OutputFile file;
@@ -550,6 +575,7 @@ public static class PlotCommands
         ["dsdPath"] = keepDsd ? dsdPath : null,
         ["durationMs"] = watch.ElapsedMilliseconds,
         ["published"] = true,
+        ["regenerated"] = regenerated,
         ["verified"] = file.PageCount != null,
         ["verification"] = file.PageCount != null ? "verified" : "unverified",
         ["warnings"] = warnings,
@@ -575,6 +601,7 @@ public static class PlotCommands
     public string? PageSetup { get; init; }
     public string? OutputPath { get; set; }
     public DateTime StartedUtc { get; set; }
+    public bool Regenerated { get; set; }
   }
 
   private sealed record PublishSheet(string LayoutName, string? DrawingPath);
@@ -872,11 +899,42 @@ public static class PlotCommands
   // stops instead of feeding the next layout's answers into a stale prompt.
   private const string CommandIncompleteCode = "CIVIL3D.COMMAND_FAILED";
 
+  // Regenerates every viewport of the drawing before it is plotted. Viewports
+  // erased and re-created without a regen left stale graphics behind, and the
+  // next DWG To PDF plot killed acad.exe (c0000005 in ntdll, issue #44);
+  // REGENALL before rendering avoided it. REGENALL takes no prompts, so it runs
+  // through the same command runner as -PLOT, inside the host command context.
+  // A failed regen stops the plot: plotting on stale graphics is the crash.
+  private static async Task RegenerateBeforePlotAsync(Document doc)
+  {
+    try
+    {
+      await RunCommandAsync(doc, "REGENALL", "_.REGENALL");
+    }
+    catch (Exception ex)
+    {
+      var failure = new JsonRpcDispatchException(
+        "CIVIL3D.API_ERROR",
+        $"REGENALL failed before plotting ({ex.Message}). Nothing was plotted: plotting on stale viewport graphics can crash Civil 3D. Run REGENALL in the drawing and retry.");
+      failure.Data[RegenFailedKey] = true;
+      throw failure;
+    }
+  }
+
+  // Marks the exception RegenerateBeforePlotAsync throws, so a batch stops
+  // instead of plotting the next layouts on the same stale graphics.
+  private const string RegenFailedKey = "RegenFailed";
+
   private static async Task<OutputFile> PlotOneAsync(Document doc, PlotJob job, bool overwrite)
   {
     // Matches lisp/plot.lsp: make the layout current first so the layout-name
     // prompt default is the target, then answer the verified chain.
     App.SetSystemVariable("CTAB", job.LayoutName);
+
+    // After CTAB, so the layout about to be plotted is the one regenerated, and
+    // before BeginExternalWrite, so a failed regen never moves an existing PDF.
+    await RegenerateBeforePlotAsync(doc);
+    job.Regenerated = true;
 
     // The plotter writes the final path itself, so the device's "open in
     // viewer when done" option opens the real PDF. BeginExternalWrite locks
@@ -1413,6 +1471,7 @@ public static class PlotCommands
       ["plotStyleTable"] = job.StyleSheetToken == "." ? null : job.StyleSheetToken,
       ["pageSetup"] = job.PageSetup,
       ["durationMs"] = durationMs,
+      ["regenerated"] = job.Regenerated,
       ["error"] = error,
     };
   }
