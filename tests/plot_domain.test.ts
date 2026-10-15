@@ -556,6 +556,19 @@ describe("civil3d_plot native implementation guards", () => {
     expect(regen).toBeGreaterThan(ctab);
     expect(regen).toBeLessThan(plotOne.indexOf("FileBoundary.BeginExternalWrite("));
     expect(regen).toBeLessThan(plotOne.indexOf("await RunCommandAsync(doc, \"PLOT\""));
+    // The batch regenerates once before its loop makes any layout switch, so the
+    // stale current layout is regenerated before CTAB touches it.
+    const batchStart = code.indexOf("public static Task<object?> PlotLayoutsToPdfAsync");
+    const batch = code.slice(batchStart, code.indexOf("private static async Task<OutputFile> PlotOneAsync"));
+    const batchRegen = batch.indexOf("await RegenerateBeforePlotAsync(doc)");
+    const batchLoop = batch.lastIndexOf("foreach (var job in jobs)");
+    expect(batchStart).toBeGreaterThan(-1);
+    expect(batchRegen).toBeGreaterThan(-1);
+    expect(batchLoop).toBeGreaterThan(batchRegen);
+    expect(batch.indexOf('App.SetSystemVariable("CTAB"')).toBe(-1);
+    expect(batch).toContain("catch (JsonRpcDispatchException ex) when (ex.Data.Contains(RegenFailedKey))");
+    // PlotOneAsync is the only CTAB change the loop reaches.
+    expect(batch).toContain("await PlotOneAsync(doc, job, overwrite)");
     // A regen failure stops the batch instead of plotting the next layouts.
     expect(code).toContain("ex.Data.Contains(RegenFailedKey)");
 
@@ -572,7 +585,7 @@ describe("civil3d_plot native implementation guards", () => {
     // Every in-session entry reports whether the regen ran.
     expect(code.match(/\["regenerated"\] =/g)?.length).toBe(3);
     // Nothing else regenerates through a different mechanism.
-    expect(code.match(/RegenerateBeforePlotAsync\(doc\)/g)?.length).toBe(2);
+    expect(code.match(/RegenerateBeforePlotAsync\(doc\)/g)?.length).toBe(3);
   });
 
   it("lets the plotter write the final path under the boundary's link checks", () => {

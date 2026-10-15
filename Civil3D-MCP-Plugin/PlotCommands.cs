@@ -272,6 +272,19 @@ public static class PlotCommands
         sysvars.Set("BACKGROUNDPLOT", 0);
         sysvars.Remember("CTAB");
 
+        // Before the first CTAB change: the layout current now is the one whose
+        // viewports may have been erased and re-created without a regen, and a
+        // layout switch would be the first thing to touch those stale graphics.
+        // The per-layout regen in PlotOneAsync still covers the layouts switched to.
+        try
+        {
+          await RegenerateBeforePlotAsync(doc);
+        }
+        catch (JsonRpcDispatchException ex) when (ex.Data.Contains(RegenFailedKey))
+        {
+          stopReason = ex.Message;
+        }
+
         foreach (var job in jobs)
         {
           if (stopReason != null)
