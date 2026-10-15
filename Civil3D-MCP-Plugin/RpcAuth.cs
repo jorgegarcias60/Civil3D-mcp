@@ -1,6 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -31,6 +32,7 @@ internal static class RpcAuth
   // The harness points it at a scratch folder.
   internal static string TokenPath { get; set; } = Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Civil3DMcpPlugin", "rpc-token");
+  internal static string LegacyTokenPath => Path.Combine(Path.GetDirectoryName(TokenPath)!, "rpc-token");
 
   // Called once the TCP server has bound the port. Writes the token through a
   // private temp file and a rename, so the server never reads half of one. On
@@ -48,10 +50,16 @@ internal static class RpcAuth
         throw new IOException("this account has no local application data folder");
       }
 
-      Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+      EnsurePrivateDirectory(Path.GetDirectoryName(path)!);
       WritePrivateFile(temp, token);
       // Same folder, so the rename keeps the file's own DACL.
       File.Move(temp, path, true);
+      if (Path.GetFileName(path) == "rpc-token-8757")
+      {
+        var legacyTemp = $"{LegacyTokenPath}.{Guid.NewGuid():N}.tmp";
+        try { WritePrivateFile(legacyTemp, token); File.Move(legacyTemp, LegacyTokenPath, true); }
+        finally { if (File.Exists(legacyTemp)) File.Delete(legacyTemp); }
+      }
     }
     catch (Exception exception)
     {
@@ -85,7 +93,7 @@ internal static class RpcAuth
   // Creates the file with its permissions already set (owner and full control
   // for this user only, nothing inherited), so it is never readable by others,
   // not even between creation and an ACL change. Throws on any failure.
-  private static void WritePrivateFile(string path, string token)
+  internal static void WritePrivateFile(string path, string token)
   {
     if (!OperatingSystem.IsWindows())
     {
@@ -99,7 +107,22 @@ internal static class RpcAuth
     security.SetAccessRuleProtection(true, false);
     security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
     using var stream = new FileInfo(path).Create(FileMode.CreateNew, FileSystemRights.FullControl, FileShare.None, 4096, FileOptions.None, security);
-    stream.Write(Encoding.ASCII.GetBytes(token));
+    stream.Write(Encoding.UTF8.GetBytes(token));
+  }
+
+  internal static void EnsurePrivateDirectory(string path)
+  {
+    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("instance folders need Windows file permissions");
+    using var identity = WindowsIdentity.GetCurrent();
+    var user = identity.User ?? throw new IOException("this account has no security identifier");
+    var security = new DirectorySecurity();
+    security.SetOwner(user);
+    security.SetAccessRuleProtection(true, false);
+    security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
+      InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+    var directory = new DirectoryInfo(path);
+    if (!directory.Exists) directory.Create(security);
+    else directory.SetAccessControl(security);
   }
 
   // Called when the listener stops. Deletes the file only while it still holds
@@ -125,6 +148,9 @@ internal static class RpcAuth
       {
         File.Delete(path);
       }
+      if (Path.GetFileName(path) == "rpc-token-8757" && File.Exists(LegacyTokenPath) &&
+          string.Equals(File.ReadAllText(LegacyTokenPath), token, StringComparison.Ordinal))
+        File.Delete(LegacyTokenPath);
     }
     catch (Exception exception)
     {

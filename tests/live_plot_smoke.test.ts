@@ -220,7 +220,7 @@ const mainRunner = new AsyncFunction("deps", `
   const { options, client, transport, results, process, console, call, result, run,
     existsSync, isAbsolute, startPublish, terminal, paths, verifyPdf,
     checkMissingTableFixture, checkUnsavedRevision, checkCancellation,
-    jobs, createdPaths, rmSync, delay, printServerStderr, setStyle, prefix } = deps;
+    jobs, createdPaths, rmSync, delay, printServerStderr, setStyle, prefix, attachScratchUserInstance } = deps;
   let document, styleRestore, cleanupFailed = false;
   ${declaration("fail")}
   ${declaration("check")}
@@ -251,6 +251,7 @@ async function runMain(fixtureEnabled: boolean, fixtureFails: boolean) {
   const rmSync = vi.fn();
   const deps = {
     options: { "expect-drawing": "scratch", "ctb-fixture": fixtureEnabled },
+    attachScratchUserInstance: vi.fn(async () => { events.push("attach"); }),
     client: { connect: vi.fn(async () => {}), close: vi.fn(async () => { events.push("close"); }) },
     transport: {}, results, process, console: { error: vi.fn() }, call,
     result: (value: unknown) => value,
@@ -277,14 +278,14 @@ describe("whole live runner with mocked tools", () => {
     const run = await runMain(false, false);
     expect(run.checkMissingTableFixture).not.toHaveBeenCalled();
     expect(run.state.results.filter((entry: Record<string, unknown>) => entry.skipped)).toHaveLength(1);
-    expect(run.events).toEqual(["health", "unsaved", "cancellation", "health", "close"]);
+    expect(run.events).toEqual(["attach", "health", "unsaved", "cancellation", "health", "close"]);
     expect(run.state.results).toContainEqual({ name: "smoke output files are gone", passed: true });
     expect(run.process.exitCode).toBe(0);
   });
 
   it("records fixture failure and still runs unsaved, cancellation, health, cleanup", async () => {
     const run = await runMain(true, true);
-    expect(run.events).toEqual(["health", "fixture", "unsaved", "cancellation", "health", "close"]);
+    expect(run.events).toEqual(["attach", "health", "fixture", "unsaved", "cancellation", "health", "close"]);
     expect(run.state.results).toContainEqual({ name: "saved missing-table fixture", passed: false,
       error: "fixture save failed" });
     expect(run.state.results).toContainEqual({ name: "smoke output files are gone", passed: true });

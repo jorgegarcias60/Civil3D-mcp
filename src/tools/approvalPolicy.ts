@@ -3,6 +3,7 @@ import { withApplicationConnection } from "../utils/ConnectionManager.js";
 import { Civil3DRpcError } from "../utils/SocketClient.js";
 import { createLogger } from "../utils/logger.js";
 import type { ToolCapability } from "./toolMetadata.js";
+import { resolveInstanceEndpoint, withPinnedEndpoint } from "../utils/instanceSession.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -19,6 +20,7 @@ interface ApprovalGrant {
   action: string;
   parametersHash: string;
   drawingFingerprint: string;
+  instanceIdentity: string;
   expiresAt: number;
 }
 
@@ -82,8 +84,7 @@ function hashParameters(parameters: JsonObject): string {
   return createHash("sha256").update(stableJson(normalized)).digest("hex");
 }
 
-// Tools whose gate CIVIL3D_APPROVAL_MODE=disabled does not lift, and that the
-// HTTP bridge refuses without MCP_HTTP_TOKEN. Client mode only applies to a
+// Tools whose gate CIVIL3D_APPROVAL_MODE=disabled does not lift. Client mode only applies to a
 // direct MCP client call; internal and HTTP handlers still require a token.
 export const ALWAYS_GATED_TOOLS: ReadonlySet<string> = new Set<string>(["civil3d_run_code"]);
 export const CLIENT_APPROVABLE_TOOLS: ReadonlySet<string> = new Set<string>(["civil3d_run_code"]);
@@ -142,6 +143,9 @@ export class ApprovalPolicyService {
   ) {}
 
   private async fingerprintFor(target: ApprovalTarget): Promise<string> {
+    // Lifecycle preparation binds stop parameters to its resolved process identity.
+    // Start needs no active instance or drawing.
+    if (target.toolName === "civil3d_instance") return "instance-lifecycle";
     try {
       return await this.drawingFingerprint();
     } catch (error) {
@@ -150,6 +154,19 @@ export class ApprovalPolicyService {
       }
       throw error;
     }
+  }
+
+  private async contextFor(target: ApprovalTarget): Promise<{ instanceIdentity: string; drawingFingerprint: () => Promise<string> }> {
+    if (target.toolName === "civil3d_instance") {
+      return { instanceIdentity: "instance-lifecycle", drawingFingerprint: () => this.fingerprintFor(target) };
+    }
+    const endpoint = await resolveInstanceEndpoint();
+    return {
+      instanceIdentity: JSON.stringify(endpoint.pid === undefined
+        ? { port: endpoint.port, legacyFallback: endpoint.legacyFallback === true }
+        : { pid: endpoint.pid, startedAtUtc: endpoint.startedAtUtc }),
+      drawingFingerprint: () => withPinnedEndpoint(endpoint, () => this.fingerprintFor(target)),
+    };
   }
 
   public async requestApproval(
@@ -163,7 +180,8 @@ export class ApprovalPolicyService {
       );
     }
 
-    const drawingFingerprint = await this.fingerprintFor(target);
+    const context = await this.contextFor(target);
+    const drawingFingerprint = await context.drawingFingerprint();
     const expiresAt = this.now() + ttlMs;
     const approvalToken = randomUUID();
     this.grants.set(approvalToken, {
@@ -171,6 +189,7 @@ export class ApprovalPolicyService {
       action: target.action,
       parametersHash: hashParameters(parameters),
       drawingFingerprint,
+      instanceIdentity: context.instanceIdentity,
       expiresAt,
     });
 
@@ -222,7 +241,11 @@ export class ApprovalPolicyService {
       throw new ApprovalValidationError("Approval token does not match this tool action and its parameters.");
     }
 
-    const activeDrawingFingerprint = await this.fingerprintFor(target);
+    const context = await this.contextFor(target);
+    if (grant.instanceIdentity !== context.instanceIdentity) {
+      throw new ApprovalValidationError("The selected Civil 3D instance changed after approval. Request approval for the current instance.");
+    }
+    const activeDrawingFingerprint = await context.drawingFingerprint();
     if (grant.drawingFingerprint !== activeDrawingFingerprint) {
       throw new ApprovalValidationError("The active drawing changed after approval. Request approval for the current drawing.");
     }

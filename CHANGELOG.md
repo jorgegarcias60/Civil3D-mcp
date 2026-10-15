@@ -2,6 +2,85 @@
 
 ## Unreleased
 
+- Capture drawing attachments before preparation and progress notifications.
+  Fixes client-approved run-code writes switching targets during concurrent attachment.
+- Mark undiscovered fixed-port requests as legacy-only unless explicitly authorized.
+  Fixes missing discovery bypassing fixed-instance authorization across accounts.
+- Complete verified orphan adoption with owner labels and server process identities.
+  Re-adopt matching labels and require `adoptOrphan` for others. Count orphans and
+  pending launches toward the cap. Fixes incomplete orphan recovery after server exit.
+
+- Refuse requests until listener identity is initialized. Fixes stale pinned
+  mutations reaching a replacement instance during startup.
+- Reserve capacity and drawing paths for unexpired pending launch claims.
+  Fixes duplicate launches and cap overflow after cancelled starts.
+- Require exactly one live instance for automatic attachment. Fixes selecting
+  an owned agent while another user or agent instance is present.
+- Remove unsupported orphan smoke mode and wait through uncertain launch expiry
+  during cleanup. Fixes unusable recovery checks and missed late processes.
+- Attach explicitly before live plugin verification. Fixes discovery-mode checks
+  refusing before their first plugin call.
+- Correct scratch smoke examples and document host HTTP authentication.
+  Fixes missing opt-in flags, incomplete filenames and unauthenticated instance calls.
+
+- Scope retry results to the selected instance and refuse retry keys for attachment
+  changes. Fixes cached results after switching instances.
+- Retain cancelled launch claims through expiry and publish process proof from the
+  plain-JSON helper. Fixes late starts losing agent ownership.
+- Reap start locks only after verifying their owning process exited. Clean taken
+  claim files after attachment or shutdown. Fixes blocked starts and claim buildup.
+- Probe only the attached instance during drawing calls and permit legacy fallback
+  when no live records remain. Fixes unrelated probes and stale discovery refusals.
+- Refuse implicit fixed-port access to user or other-session instances; expose
+  fixed routing in health. Fixes drawing requests bypassing discovery ownership.
+- Require explicit scratch user-instance attachment in live smoke scripts and
+  verify unattached drawing refusal. Fixes smoke runs depending on ambiguous
+  automatic routing.
+- Leave the Claude Desktop extension port unset for discovery and document the
+  330-second client timeout and start-claim expiry. Fixes short client waits and
+  fixed-port configuration overriding instance selection.
+
+- Retry locked launch claims on Idle before fixing user ownership.
+  Fixes transient claim-reader contention causing agent start timeouts.
+- Require and normalize fully qualified drive or UNC drawing paths before start.
+  Fixes current-drive-rooted paths launching instances that cannot claim ownership.
+- Bind ownership to a launch-only token, child pid and process creation time.
+  Refuse attachment without matching launch proof. Fixes concurrent user launches
+  being adopted by an agent session.
+
+- Mark automatic legacy fallback and reject it in discovery-capable plugins.
+  Fixes unattached requests reaching a new listener during startup or across accounts.
+- Wake both quit callbacks and expire pending shutdown work.
+  Fixes idle stop timeouts and delayed quits after failure.
+- Revoke per-port and legacy tokens before releasing the listener port.
+  Fixes shutdown deleting a replacement instance's token.
+- Bind drawing approvals to the selected pid and process creation time.
+  Fixes approval reuse across instances with no drawing open.
+- Require HTTP authentication for instance calls and nested requests naming them.
+  Fixes unauthenticated shutdown through the owning server.
+- Check process creation times before retaining discovery records.
+  Fixes reused pids blocking drawing starts or consuming the agent cap.
+- Compare user process and document snapshots and guard the smoke script's write target.
+  Fixes false reports that user instances were untouched.
+- Reconcile session-owned discovery during smoke cleanup after failed starts.
+  Fixes leaked claimed processes and reports unresolved pids.
+- Hold the launch claim's read handle through its rename.
+  Fixes a double-claim race reproduced by the offline contention check.
+
+- Freeze process ownership, reject launch claims in pre-existing processes, and
+  preserve ownership across listener restarts. Fixes multi-instance ownership races.
+- Refresh discovery after first save and Save As. Fixes stale drawing paths.
+- Bind stop approval to its resolved instance. Pin drawing requests through approval
+  and execution, and check process identity on every discovery RPC. Fixes wrong-instance writes and shutdowns.
+- Test claims in separate synchronized processes and test the production port binder.
+  Track unexpected smoke-test launches for cleanup. Fixes multi-instance coverage and cleanup gaps.
+
+- Add per-session Civil 3D instances with automatic ports, protected per-port tokens,
+  drawing claims and discovery. Add `civil3d_instance` to list, launch, attach, detach
+  and stop owned instances. Require explicit user-instance attachment, enforce the
+  agent cap and refuse unsaved shutdowns. Keep legacy single-instance routing.
+  Add offline checks and an opt-in two-session live smoke script. Fixes multi-instance port conflicts.
+
 - Harden sheet-set publishing with document selection, plot API checks, reopened layout initialization and saved-revision settings. Check CTB/STB and media before writing; verify PDF page count, size and object streams. Drain cancellations and lock job snapshots. Add a guarded live smoke check with an opt-in missing-table fixture and cleanup after failures. Fixes #21.
 
 ### Added

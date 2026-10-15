@@ -4,13 +4,13 @@
 // cases send one undo; a targeted write cleans up in its target drawing.
 //
 //   npm run build
-//   node scripts/live-run-code-smoke.mjs --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
+//   node scripts/live-run-code-smoke.mjs --user-instance --expect-drawing <name> [--side <drawing.dwg>] [--approval token|client]
 //     [--long <seconds>] [--damaged <directory>] [--other <open drawing path>] [--no-drawing] [--hardening] [--helpers]
 //     [--preview] [--other <open scratch drawing path>]
 //
-// --expect-drawing: the write cases run only when the active drawing's name contains
-//   this text (guards against testing on a real job by accident); without it, or
-//   --allow-writes, only the read cases run. --other must name a disposable open
+// --expect-drawing: attach only to the unique user process containing this scratch
+//   drawing name or full path. --no-drawing instead requires an empty user process.
+//   --other must name a disposable open
 //   drawing too when writes are enabled: the PR 4 case commits and erases text there.
 // --side: a DWG read as a side database (never opened, never changed) for the
 //   OpenSide and bulk-sampling cases; skipped when not given.
@@ -28,7 +28,7 @@ import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { drainServerStderr } from "./server-stderr.mjs";
-import { pluginTokenPath, readPluginToken } from "../build/utils/pluginAuth.js";
+import { attachScratchUserInstance } from "./live-user-instance.mjs";
 
 // Strict: an unknown option or a missing value is an error, never a silently disabled guard.
 const { values: options } = parseArgs({
@@ -44,11 +44,15 @@ const { values: options } = parseArgs({
     hardening: { type: "boolean", default: false },
     helpers: { type: "boolean", default: false },
     preview: { type: "boolean", default: false },
+    "user-instance": { type: "boolean", default: false },
   },
   strict: true,
 });
 const sidePath = options.side;
 const expectDrawing = options["expect-drawing"];
+let selectedUserInstance;
+if (!options["user-instance"]) throw new Error("Pass --user-instance to opt into the existing scratch user instance.");
+if (!expectDrawing && !options["no-drawing"]) throw new Error("--user-instance requires --expect-drawing <scratch drawing name>.");
 const approvalMode = options.approval;
 const longSeconds = options.long === undefined ? undefined : Number(options.long);
 if (longSeconds !== undefined && (!Number.isInteger(longSeconds) || longSeconds < 91 || longSeconds > 600)) {
@@ -336,7 +340,7 @@ async function hardeningChecks(hasDrawing) {
 // client closes.
 function rawRpc(method, params, timeoutMs = 120_000) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port: Number(process.env.CIVIL3D_PORT ?? 8757) });
+    const socket = net.createConnection({ host: "127.0.0.1", port: selectedUserInstance?.port ?? 8757 });
     let data = "";
     let settled = false;
     const finish = (fn, value) => {
@@ -808,6 +812,7 @@ async function check(name, fn) {
 
 try {
   await client.connect(transport);
+  selectedUserInstance = await attachScratchUserInstance(call, expectDrawing, { noDrawing: options["no-drawing"] });
   const health = await call("civil3d_health", {});
   if (health.isError) throw new Error(`civil3d_health failed: ${text(health)}`);
   const runCodeApi = health.structuredContent?.result?.runCodeApi ?? 1;
@@ -1115,7 +1120,7 @@ try {
   });
 
   await check("the plugin wrote this session's rpc-token", async () => {
-    const path = pluginTokenPath();
+    const path = selectedUserInstance?.tokenPath;
     const token = existsSync(path) ? readFileSync(path, "utf8").trim() : "";
     record("the plugin wrote this session's rpc-token", /^[0-9A-F]{64}$/i.test(token), { path, length: token.length });
   });
@@ -1131,7 +1136,7 @@ try {
   await check("start window: a run that cannot start in time fails HOST_BUSY", async () => {
     const long = run({ code: "while (Elapsed.TotalSeconds < 12) Check();\nreturn 1;", timeoutSeconds: 30 });
     await new Promise((resolve) => setTimeout(resolve, 3000));
-    const busy = await rawRpc("runCode", { code: "return 1;", mode: "read", timeoutSeconds: 10, startWithinSeconds: 3, authToken: readPluginToken() });
+    const busy = await rawRpc("runCode", { code: "return 1;", mode: "read", timeoutSeconds: 10, startWithinSeconds: 3, authToken: selectedUserInstance?.tokenPath ? readFileSync(selectedUserInstance.tokenPath, "utf8").trim() : undefined });
     const first = await long;
     record("start window: a run that cannot start in time fails HOST_BUSY",
       busy.error?.data?.code === "CIVIL3D.HOST_BUSY" && first.status === "ok",

@@ -11,8 +11,9 @@ describe("P2 security boundaries", () => {
 
     for (const fileName of readdirSync(pluginDirectory).filter((name) => name.endsWith(".cs"))) {
       // PluginLog and RunCodeLog write only the plugin's own logs, next to plugin.log;
-      // RpcAuth writes only its own %LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token file.
-      if (fileName === "FileBoundary.cs" || fileName === "PluginLog.cs" || fileName === "RunCodeLog.cs" || fileName === "RpcAuth.cs") continue;
+      // RpcAuth and InstanceDiscovery write only their own local instance protocol files
+      // (%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token*, instances/, claims/).
+      if (fileName === "FileBoundary.cs" || fileName === "PluginLog.cs" || fileName === "RunCodeLog.cs" || fileName === "RpcAuth.cs" || fileName === "InstanceDiscovery.cs") continue;
       const source = readFileSync(`${pluginDirectory}/${fileName}`, "utf8");
       source.split(/\r?\n/).forEach((line, index) => {
         if (directWritePattern.test(line)) violations.push(`${fileName}:${index + 1}`);

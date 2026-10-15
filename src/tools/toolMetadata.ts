@@ -35,6 +35,7 @@ export type ToolDomain =
   | "catchment"
   | "stm"
   | "plugin"
+  | "instance"
   | "xref"
   | "compare"
   | "code";

@@ -1,6 +1,20 @@
 import { withApplicationConnection } from "../build/utils/ConnectionManager.js";
 import { getProjectContext } from "../build/orchestration/ProjectContextService.js";
 import { createRequestId, runWithRequestId } from "../build/utils/requestContext.js";
+import { parseArgs } from "node:util";
+import { instanceManager } from "../build/utils/instanceManager.js";
+import { attachScratchUserInstance } from "./live-user-instance.mjs";
+
+const { values: options } = parseArgs({ options: {
+  "user-instance": { type: "boolean", default: false },
+  "expect-drawing": { type: "string" },
+  "no-drawing": { type: "boolean", default: false },
+}, strict: true });
+
+if (!options["user-instance"]) throw new Error("Pass --user-instance to opt into an existing scratch user instance.");
+if (options["no-drawing"] === Boolean(options["expect-drawing"])) {
+  throw new Error("Specify exactly one of --expect-drawing <scratch drawing> or --no-drawing.");
+}
 
 const NO_DRAWING_FAIL_FAST_MS = 5000;
 
@@ -50,6 +64,14 @@ async function verifyNoDrawingFailsFast(health) {
 }
 
 async function main() {
+  await attachScratchUserInstance(async (name, args) => {
+    if (name !== "civil3d_instance") throw new Error(`Unexpected tool ${name}`);
+    const result = args.action === "list" ? await instanceManager.list()
+      : args.action === "attach" ? await instanceManager.attach(args)
+      : undefined;
+    if (!result) throw new Error(`Unexpected instance action ${args.action}`);
+    return { structuredContent: { result } };
+  }, options["expect-drawing"], { noDrawing: options["no-drawing"] });
   const health = await withApplicationConnection(async (client) =>
     client.sendCommand("getCivil3DHealth", {}),
   );

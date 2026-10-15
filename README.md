@@ -51,7 +51,7 @@
 > **This is the [Joshua8-AI](https://github.com/Joshua8-AI/Civil3D-mcp) fork with working Civil 3D 2027 support.** Differences from [upstream](https://github.com/Sacred-G/Civil3D-mcp) (all credit for the project itself goes to Sacred-G):
 > - **Civil 3D 2027 (.NET 10) build**: `scripts\gather-refs-2027.ps1` stages the six reference DLLs (spread across three folders in a 2027 install), then `scripts\build-2027.ps1 -Install` builds with a command-line TFM override and deploys. 2026 builds are unaffected.
 > - **Auto-load via ApplicationPlugins bundle** (`scripts\install-bundle.ps1`) instead of NETLOAD/Startup Suite, which AutoCAD's default `SECURELOAD=1` security silently rejects.
-> - **Plugin port is 8757, not 8080** (avoids clashes with other local services). The bundled Claude launcher sets `CIVIL3D_PORT=8757` automatically; register manually with `claude mcp add civil3d --scope user -e CIVIL3D_PORT=8757 -- node <repo>\build\index.js`. Port references below (8080) describe upstream defaults.
+> - **Plugin ports are 8757–8766, not 8080.** Leave `CIVIL3D_PORT` unset for instance discovery. An explicit port keeps fixed routing. Port references below (8080) describe upstream defaults.
 > - The version-independent 2027 fixes are proposed upstream in [Sacred-G/Civil3D-mcp#7](https://github.com/Sacred-G/Civil3D-mcp/pull/7).
 
 ## What Is This?
@@ -65,6 +65,121 @@ civil3d-mcp <-- JSON-RPC/TCP :8757 --> Civil3DMcpPlugin.dll --> Civil 3D 2026 AP
 ```
 
 This is the **MCP server** (TypeScript). You also need the **Civil 3D .NET plugin** — see [Installation](#installation).
+
+## Several Civil 3D instances
+
+Each MCP server process has its own random session ID and attached Civil 3D instance.
+The stdio tools, HTTP bridge and orchestrator in that process share the attachment.
+Leave `CIVIL3D_PORT` unset. The plugin binds the first free port in 8757–8766 and
+writes protected discovery files in `%LOCALAPPDATA%\Civil3DMcpPlugin\instances`.
+`civil3d_health` reports the attached instance, or `not attached` with the instance list.
+Ownership is decided once startup drawings are available and survives listener
+restarts. Verified orphan agent instances can transfer to a new server session.
+Existing processes cannot take a new launch claim. Discovery follows first saves
+and Save As as well as open/close.
+
+- `civil3d_instance { action: "list" }` lists live pids, ports, owners, owner labels,
+  owner server pids, orphan status, drawings and responsiveness. Dead or reused pids
+  are ignored. Discovery must match
+  the process creation time. Matching unresponsive processes still count toward the cap.
+- `attach` selects `pid` or an absolute `drawing` path. Attach to Jorge's instance
+  only when he says so, with `userInstance: true`. Another agent's instance needs
+  `force: true`; the response warns that ownership is unchanged. A verified orphan
+  with the same label is re-adopted automatically. Other orphans require
+  `adoptOrphan: true`; `force` does not bypass this rule. The plugin rechecks the old
+  owner's pid and creation time before transferring ownership. User instances and
+  agents without owner-process proof cannot be adopted. Adoption preserves drawings.
+- `start` takes an existing fully qualified drive or UNC `.dwg` path. It rejects
+  current-drive-rooted paths such as `\scratch\A.dwg` and normalizes the path first.
+  It finds the newest installed
+  `Civil 3D <Year> Imperial.lnk` under the machine or user Start menu. Optional
+  `year` selects 2024–2027 and `units` accepts `Imperial` or `Metric`. It copies the
+  shortcut's target, working directory and arguments, appends the quoted drawing
+  and launches through a temporary PowerShell helper shortcut via Explorer.
+  Only the child receives a one-time launch token. Its returned pid and creation
+  time bind the claim; the plugin requires all three before taking ownership.
+  An independently started user process cannot take the claim, even for the same drawing.
+  Missing launch proof refuses attachment and leaves the process for inspection.
+  The plugin retries claim-reader contention on Idle before fixing ownership.
+  The server waits up to 300 seconds, with MCP progress heartbeats, for the plugin
+  to claim that drawing and answer health. Timeout deletes the pending claim and
+  shortcut; it reports observed instances and new acad pids. A new pid without
+  discovery means the plugin did not load. The process is left for inspection.
+- The default cap is three live agent instances, including orphans, besides user instances. Set
+  `CIVIL3D_MAX_AGENT_INSTANCES` to change it. Starts are serialized across server
+  processes. The start lock records the server pid and creation time. A later
+  start reaps it only after proving that process exited or the pid was reused.
+  Unexpired pending launch claims reserve capacity and their drawing, including
+  cancelled starts before discovery appears. Published claims count only once.
+  A drawing already open elsewhere is refused. Starting an already-open drawing
+  owned by this session reattaches it without launching another process.
+- `detach` clears this server's attachment. It leaves Civil 3D running.
+- `stop` defaults to the attached instance, or accepts `pid`. Only this session's
+  agent instances can be stopped. Unsaved documents are refused unless
+  `discardChanges: true`. The plugin closes documents and quits on its main thread.
+  Both quit stages wake the host message loop. Pending callbacks expire, so later
+  interaction cannot trigger a delayed quit after failure. The server waits 60
+  seconds for exit; it never kills the process.
+
+`start` and `stop` use the existing approval policy. Request approval with
+`civil3d_request_approval`, `toolName: "civil3d_instance"`, the action and identical
+parameters, then retry with the returned `approvalToken`. The approval is independent
+of an active drawing. Stop approval binds to the resolved process identity;
+changing attachments before execution requires a new approval. Drawing approvals
+also bind to the selected pid and process creation time, even with no drawing open.
+Each drawing tool request captures its attachment before preparation or progress
+notifications can yield, including client-approved `civil3d_run_code` writes. It
+pins that instance through approval validation and execution. Every
+discovery-routed RPC checks that process identity before dispatch, so a replacement
+listener on the same port is refused. Requests are also refused until listener
+identity initialization finishes. `list`, `attach` and `detach` need no approval token.
+Set `job` on `start` or `attach`, or set `CIVIL3D_SESSION_LABEL`, to identify the
+session. Labels use the explicit job first, then the environment label, then the
+folder after `Jobs` in the drawing path, then the drawing filename. An explicit
+job remains the session label until another job is supplied.
+
+Without attachment, automatic selection requires exactly one live instance,
+responsive and agent-owned by this session, or a verified orphan with the same label.
+A user instance alongside it prevents
+automatic attachment. Otherwise it refuses drawing operations and lists the
+instances to attach. With no live discovery records, it keeps the old single-instance
+behavior on 8757 for old plugins. Automatic legacy requests carry a marker that
+new plugins reject, including during startup races or across Windows accounts.
+Explicit `CIVIL3D_PORT` keeps fixed routing and disables `start`
+and `attach`; unset it and restart the MCP server for discovery. Fixed routing
+refuses a user or other-session instance unless
+`CIVIL3D_ALLOW_FIXED_INSTANCE=true` explicitly opts in.
+Without a discovery record, fixed requests also carry the legacy-only marker unless
+that opt-in is enabled. Old plugins remain compatible; discovery-capable plugins
+reject unapproved requests even across Windows accounts. `civil3d_health`
+reports when the server is in fixed mode. Remove `CIVIL3D_PORT` from the
+client's MCP registration, not just the current terminal, to enable discovery.
+For Codex, set the MCP registration's `tool_timeout_sec` to at least 330
+seconds so the 300-second start wait can finish. Cancelling a start keeps its
+ownership claim until expiry; inspect `civil3d_instance list` before retrying.
+The minimized launch helper reads plain JSON and publishes its process proof
+directly to the claim. A late helper can finish after the server's launch wait
+fails. Its temporary files remain until the claim expires. A full start timeout
+removes the pending claim. Successful attachment removes the taken claim.
+Attached drawing calls validate and probe only their selected instance. Listing,
+starting and attaching still inspect all live instances. Retry results are scoped
+to process identity. `attach` and `detach` do not accept `idempotencyKey`.
+
+Tokens are per port (`rpc-token-<port>`). Port 8757 also writes the legacy
+`rpc-token`, so an older server still works with one instance. Update the server
+and plugin together, with **every Civil 3D instance closed** before deployment.
+Shutdown revokes both token files before releasing the port to a replacement listener.
+The offline checks cover net8/2026 and net10/2027; the Start-menu finder also
+recognizes 2024 and 2025 shortcuts. Use a plugin build compatible with that host.
+The opt-in live check is
+`node scripts/live-multi-instance-smoke.mjs C:\scratch\A.dwg C:\scratch\B.dwg`.
+Both drawings must be disposable and closed. Existing user instances stay open.
+The script checks user process identities and document snapshots before and after,
+and verifies its target pid and drawing before editing. Cleanup discovers processes
+claimed by each test session even after a failed start, and reports unresolved pids.
+After an uncertain launch, cleanup keeps its owning server alive through claim
+expiry and stops late discoveries before closing the session. `--orphans` is unsupported.
+It preserves the temporary cap-check drawing when cleanup cannot verify its process exited.
 
 ### What Changed Recently
 
@@ -799,7 +914,7 @@ use that revision. Unsaved renames or deletions do not hide saved tabs; new
 unsaved tabs are excluded from the default sheet list.
 
 Live check on a saved scratch drawing with two configured layouts:
-`node scripts/live-plot-smoke.mjs --expect-drawing Scratch --out C:\path\inside\export-roots`.
+`node scripts/live-plot-smoke.mjs --user-instance --expect-drawing Scratch.dwg --out C:\path\inside\export-roots`.
 The output folder must exist inside both import and export roots. Disable the
 PC3's viewer option first. The script checks discovery, publishing, saved-state
 handling, cancellation and health. Add `--ctb-fixture` for missing-table refusal:
@@ -1026,7 +1141,7 @@ The plugin saves every script with a summary (`script.cs`, `run.json`) in `%LOCA
 
 The first run-code call of each plugin session schedules background cleanup. Folder age comes from the local timestamp in a valid `yyyyMMdd-HHmmss-xxxxxxxx` run ID (eight trailing hex characters). Cleanup keeps the current run, stays inside the run-code root, refuses links at or below it, and skips folders containing links. Deletion failures do not stop cleanup; linked parents do not disable it. Copy outputs elsewhere to keep them. See [retention settings](#plugin-run-code-retention) to change the default.
 
-The plugin also refuses `runCode` without this Civil 3D session's token: it writes a random token to `%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token` when it starts listening on its port (and deletes it when it stops), and the MCP server reads it for every run and sends it only to `127.0.0.1`, where the plugin listens. The file is private to your Windows account (its own access list, nothing inherited; a low-integrity process of the same user could still read it). The server and the plugin must come from the same build: an older server gets `CIVIL3D.AUTH_REQUIRED` on this tool only. Over the HTTP bridge, any request that names the tool (directly, nested in orchestrate or docs, or in a request text) is refused until `MCP_HTTP_TOKEN` is set.
+The plugin also refuses `runCode` without this Civil 3D instance's token: it writes a random token to `%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token-<port>` when it starts listening (and deletes it when it stops). Port 8757 also writes the legacy `rpc-token`. The MCP server reads the selected instance's token for every run and sends it only to `127.0.0.1`, where the plugin listens. The file is private to your Windows account (its own access list, nothing inherited; a low-integrity process of the same user could still read it). Update the server and plugin together. Over the HTTP bridge, any request that names the tool (directly, nested in orchestrate or docs, or in a request text) is refused until `MCP_HTTP_TOKEN` is set.
 
 Before reading the token or calling the plugin, `civil3d_run_code` requires the effective startup `CIVIL3D_HOST` to be `127.0.0.1`. `localhost` (case and whitespace ignored) and empty hosts map to it. Other values, including `::1` and `localhost.`, get `CIVIL3D.INVALID_INPUT` naming `CIVIL3D_HOST`: "Nothing ran." Other tools keep using the configured host.
 
@@ -1192,10 +1307,13 @@ The Node MCP server reads these variables at startup, except for the plugin rete
 | Variable | Default | Purpose |
 |---|---|---|
 | `CIVIL3D_HOST` | `127.0.0.1` | Plugin RPC host, captured at server startup. The plugin listens on IPv4 loopback. `localhost` (case and whitespace ignored) and empty hosts map to `127.0.0.1`. `civil3d_run_code` requires this effective host. |
-| `CIVIL3D_PORT` | `8757` | TCP port the plugin listens on (see `PluginRuntime.Port`). |
+| `CIVIL3D_PORT` | unset | Explicit fixed-port routing. Leave unset for per-session discovery; no discovery files falls back to 8757. |
+| `CIVIL3D_ALLOW_FIXED_INSTANCE` | unset | Set to `true` only to permit deliberate fixed routing to a user or other-session instance. |
+| `CIVIL3D_MAX_AGENT_INSTANCES` | `3` | Maximum live agent instances plus unexpired pending launches, besides user instances. |
+| `CIVIL3D_SESSION_LABEL` | unset | Optional label for this MCP session and its launched instances. |
 | `CIVIL3D_CONNECT_TIMEOUT` | `5000` | Milliseconds the server waits for a TCP connection to the plugin before giving up. |
 | `CIVIL3D_COMMAND_TIMEOUT` | `120000` | Milliseconds any single JSON-RPC command may run before the Node side rejects the call. Increase for heavy corridor rebuilds. `civil3d_run_code` waits for the larger of this and its budget plus 60 s. |
-| `CIVIL3D_RPC_TOKEN_FILE` | `%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token` | Where the server reads the plugin's per-session token for `civil3d_run_code` (the plugin always writes the default path; override only for tests). |
+| `CIVIL3D_RPC_TOKEN_FILE` | selected instance's token | Override for legacy or explicit fixed-port routing, mainly for tests. Attached instances always use their discovery token path. |
 | `CIVIL3D_MAX_RESPONSE_BYTES` | `8388608` | Maximum buffered response size accepted from the Civil 3D plugin. |
 | `CIVIL3D_LOG_LEVEL` | `info` | One of `debug`, `info`, `warn`, `error`. Logs are written to stderr. |
 
@@ -1250,7 +1368,7 @@ Example calls:
 |---|---|---|
 | `MCP_HTTP_HOST` | `127.0.0.1` | Interface the HTTP bridge binds to. Keep this on loopback unless you know what you're doing. |
 | `MCP_HTTP_PORT` | `3000` | Port the HTTP bridge listens on. |
-| `MCP_HTTP_TOKEN` | *(unset)* | Optional shared secret. When set, every request to the bridge must include `Authorization: Bearer <token>` or `X-MCP-Token: <token>`. Leave unset to keep the loopback-only open mode, in which the bridge refuses, with 403, any request that names `civil3d_run_code` anywhere in its parameters (approving, previewing or orchestrating it, nested or not): any local process could otherwise run code through it. |
+| `MCP_HTTP_TOKEN` | *(unset)* | Optional shared secret. When set, every request to the bridge must include `Authorization: Bearer <token>` or `X-MCP-Token: <token>`. Leave unset to keep the loopback-only open mode, in which the bridge refuses, with 403, any request naming `civil3d_run_code` or `civil3d_instance`, including nested approval, preview and orchestration requests. Any local account could otherwise use the server's code or instance credentials. Direct MCP approval rules are unchanged. |
 | `MCP_HTTP_MAX_BODY_BYTES` | `1048576` | Maximum accepted `POST /execute` body size in bytes. Requests exceeding this receive `413 Payload Too Large`. |
 | `MCP_HTTP_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to call the bridge. Requests without an `Origin` header, such as native clients, are unaffected. |
 | `MCP_HTTP_ALLOWED_HOSTS` | Loopback hostnames | Comma-separated HTTP `Host` names accepted by the bridge. Required with `MCP_HTTP_TOKEN` for non-loopback binds. Ports are ignored during comparison. |
@@ -1326,29 +1444,33 @@ Content-Type: application/json
 
 ### Verify the live Civil 3D plugin
 
-With Civil 3D open, a drawing active, and `C3DMCPSTART` echoing port 8757,
-run this read-only P0 smoke check:
+With exactly one user instance containing the saved disposable drawing
+`RUNCODE-SMOKE.dwg`, leave `CIVIL3D_PORT` unset and run this read-only check.
+It explicitly attaches before calling the plugin:
 
 ```powershell
-npm run test:live-plugin
+npm run test:live-plugin -- --user-instance --expect-drawing RUNCODE-SMOKE.dwg
 ```
 
 The full opt-in host suite creates disposable drawings and covers query,
 concurrency, document switching, create/undo, temporary volume-surface
 rollback, delete, job completion, and cancellation. It is guarded to prevent
-accidental mutations:
+accidental mutations. Configure `MCP_HTTP_TOKEN` on the HTTP server before
+starting it, then supply the same token to the smoke process. Instance list and
+attach calls require HTTP authentication even on loopback:
 
 ```powershell
+$env:MCP_HTTP_TOKEN = "<same token configured on the running HTTP server>"
 $env:CIVIL3D_LIVE_SMOKE_CONFIRM = "DISPOSABLE_DRAWING"
 $env:CIVIL3D_LIVE_SMOKE_QC_PATH = "$env:USERPROFILE\Documents\civil3d-mcp-live-qc.txt"
-npm run test:live-host
+npm run test:live-host -- --user-instance --expect-drawing RUNCODE-SMOKE.dwg
 ```
 
 To validate the richer contracts through a spawned production stdio MCP client
 (typed tools, annotations, progress, resources, health, and drawing context), run:
 
 ```powershell
-npm run test:live-mcp-client
+npm run test:live-mcp-client -- --user-instance --expect-drawing RUNCODE-SMOKE.dwg
 ```
 
 For safe-to-retry actions, clients may provide an `idempotencyKey` (maximum 128
@@ -1356,8 +1478,14 @@ characters). Identical calls share the in-flight or recent result for two
 minutes; reusing the key with different parameters returns `CIVIL3D.CONFLICT`.
 
 It calls `getCivil3DHealth` and retrieves drawing context without mutating the
-open drawing. Set `CIVIL3D_HOST` and `CIVIL3D_PORT` first if the plugin does not
-use the default loopback endpoint.
+open drawing. The single-instance live scripts explicitly attach only when
+`--user-instance` is passed and exactly one user instance has the named scratch
+drawing. `--expect-drawing` matches the complete filename, including `.dwg`,
+case-insensitively, or an exact absolute path. Leave `CIVIL3D_PORT` unset for discovery.
+For the verifier's empty-document check, use
+`npm run test:live-plugin -- --user-instance --no-drawing` with exactly one empty
+scratch user instance. Run the three commands above separately; the legacy
+`test:live-all` chain does not forward these selection flags to each script.
 
 ---
 
@@ -1367,7 +1495,7 @@ use the default loopback endpoint.
 - Civil 3D must be open with a drawing loaded
 - Type `C3DMCPSTART` in Civil 3D — it echoes the listening port (8757); `C3DMCPSTATUS` shows running state but not the port
 - Check Windows Firewall is not blocking `127.0.0.1:8757`
-- If you moved the plugin to a non-default port, set `CIVIL3D_PORT` on the Node side to match
+- Remove `CIVIL3D_PORT` from the MCP client registration and restart the client for instance discovery; `civil3d_health` reports fixed routing when it is set
 
 **"No active document"**
 - Open a `.dwg` file in Civil 3D before making any tool calls

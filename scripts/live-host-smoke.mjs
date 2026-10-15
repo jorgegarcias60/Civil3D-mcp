@@ -1,3 +1,10 @@
+import { parseArgs } from "node:util";
+import { basename, resolve } from "node:path";
+
+const { values: options } = parseArgs({ options: { "expect-drawing": { type: "string" }, "user-instance": { type: "boolean", default: false } }, strict: true });
+if (!options["user-instance"] || !options["expect-drawing"]?.trim()) {
+  throw new Error("Pass --user-instance --expect-drawing <scratch drawing name> to opt into the existing user instance.");
+}
 const confirmation = "DISPOSABLE_DRAWING";
 if (process.env.CIVIL3D_LIVE_SMOKE_CONFIRM !== confirmation) {
   throw new Error(`Refusing to mutate Civil 3D. Set CIVIL3D_LIVE_SMOKE_CONFIRM=${confirmation} and use a disposable session.`);
@@ -26,6 +33,16 @@ async function approved(toolName, action, parameters) {
   const receipt = await execute("civil3d_request_approval", { toolName, action, parameters });
   return execute(toolName, { ...parameters, approvalToken: receipt.approvalToken });
 }
+
+const listing = await execute("civil3d_instance", { action: "list" });
+const users = listing.instances?.filter(instance => instance.owner === "user") ?? [];
+if (users.length !== 1) throw new Error(`Expected exactly one user instance; found ${users.length}.`);
+const expected = options["expect-drawing"];
+const matches = drawing => expected.includes("\\") || expected.includes("/")
+  ? resolve(drawing).toLowerCase() === resolve(expected).toLowerCase()
+  : basename(drawing).toLowerCase() === expected.toLowerCase();
+if (!users[0].documents?.some(matches)) throw new Error("User instance does not contain the expected scratch drawing.");
+await execute("civil3d_instance", { action: "attach", pid: users[0].pid, userInstance: true });
 
 const ready = await request("/health/ready");
 if (!ready.ready) throw new Error(`Civil 3D host is not ready: ${JSON.stringify(ready)}`);

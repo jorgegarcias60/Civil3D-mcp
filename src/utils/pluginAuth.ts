@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { activeEndpoint } from "./instanceSession.js";
 
 // The plugin writes a new random token to this file each time its RPC server
 // starts and requires it for runCode, so a process running as another account
 // cannot run code in this user's Civil 3D through the loopback port.
 export function pluginTokenPath(): string {
-  return process.env.CIVIL3D_RPC_TOKEN_FILE
+  return activeEndpoint()?.tokenPath ?? process.env.CIVIL3D_RPC_TOKEN_FILE
     ?? join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Civil3DMcpPlugin", "rpc-token");
 }
 

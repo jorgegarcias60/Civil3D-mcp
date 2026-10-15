@@ -15,14 +15,16 @@ public sealed class RpcTcpServer
 
   private readonly int _port;
   private readonly Func<string, CancellationToken, Task<string>> _handler;
+  private readonly Action<string, string, bool>? _afterResponse;
   private readonly CancellationTokenSource _cts = new();
   private TcpListener? _listener;
   private Task? _acceptLoop;
 
-  public RpcTcpServer(int port, Func<string, CancellationToken, Task<string>> handler)
+  public RpcTcpServer(int port, Func<string, CancellationToken, Task<string>> handler, Action<string, string, bool>? afterResponse = null)
   {
     _port = port;
     _handler = handler;
+    _afterResponse = afterResponse;
   }
 
   public void Start()
@@ -87,17 +89,23 @@ public sealed class RpcTcpServer
           disconnectMonitorCancellation.Token);
 
         var response = await _handler(request, requestCancellation.Token);
-        disconnectMonitorCancellation.Cancel();
-        var clientDisconnected = await disconnectMonitor;
-        if (clientDisconnected)
+        var delivered = false;
+        try
         {
-          PluginLog.Debug("RpcTcpServer", "Skipped response write because the client disconnected.");
-          return;
-        }
+          disconnectMonitorCancellation.Cancel();
+          var clientDisconnected = await disconnectMonitor;
+          if (clientDisconnected)
+          {
+            PluginLog.Debug("RpcTcpServer", "Skipped response write because the client disconnected.");
+            return;
+          }
 
-        var responseBytes = Encoding.UTF8.GetBytes(response);
-        await stream.WriteAsync(responseBytes, cancellationToken);
-        await stream.FlushAsync(cancellationToken);
+          var responseBytes = Encoding.UTF8.GetBytes(response);
+          await stream.WriteAsync(responseBytes, cancellationToken);
+          await stream.FlushAsync(cancellationToken);
+          delivered = true;
+        }
+        finally { _afterResponse?.Invoke(request, response, delivered); }
       }
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

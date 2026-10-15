@@ -5,6 +5,195 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Latest orphan policy and routing blockers (2026-10-15)
+
+Changes remain uncommitted in `c3d-multi-instance`. No Autodesk process was
+started or driven. No real installer target or client registration was changed.
+
+| Command | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0. 859 tests passed in 60 files (85.28 seconds). |
+| `npm run docs:check` | Exit 0. Generated reference current, 212 entries. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 -p:NuGetAudit=false --source C:\Users\jorge\.nuget\packages` | Exit 0. 0 warnings, 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows -p:NuGetAudit=false --source C:\Users\jorge\.nuget\packages` | Exit 0. 0 warnings, 0 errors. |
+| Net8 build above, repeated after net10 with `--restore` | Exit 0. 0 warnings, 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:NuGetAudit=false -p:RestoreSources=C:\Users\jorge\.nuget\packages` | Exit 0. PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:NuGetAudit=false -p:RestoreSources=C:\Users\jorge\.nuget\packages` | Exit 0. PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0. 0 failures. Fake roots only. |
+| `node --check scripts/live-multi-instance-smoke.mjs` | Exit 0. |
+| `npx vitest run tests/instance_routing.test.ts --configLoader runner --cache=false` | Exit 0. 21 tests passed. |
+| `npx vitest run tests/instance_manager.test.ts --configLoader runner --cache=false` | Exit 0. 58 tests passed, including the final orphan cap assertion. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File C:\CAD-Tools\core\tools\Find-CaseCollisions.ps1 scripts\claude-bootstrap-and-run.ps1` | Exit 0. no case collisions. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-multi-instance diff --check` | Exit 0. Line-ending notices only. |
+
+NuGet restore used the local cache with auditing disabled because network access
+is restricted. The initial net8 build exited 0 with two NU1900 audit warnings;
+the cache-only rebuilds had zero warnings. The new routing fixture initially
+failed response-schema validation, then passed after its mock reply was corrected.
+The full suite needed no PowerShell environment retry.
+
+Production-handler TCP tests switch attachments during initial and execution
+progress for client-approved write-mode run-code. Only the original instance
+receives the write and token. Fixed routing without discovery sends the legacy-only
+marker unless explicitly authorized. The harness executes the production plugin
+guard and verifies that a discovered user plugin rejects that marker before dispatch.
+
+Orphan checks cover dead and reused owner pids, live or unknown owners, authenticated
+same-label re-adoption, explicit cross-label adoption, owner metadata in claims and
+discovery, listener restart and the agent cap. The plugin rechecks both process
+identities before adoption. Pending and taken claim reservations remain covered.
+Live Autodesk and Civil 3D 2024/2025 host checks were not run.
+
+### Current live smoke invocation (not run in this review)
+
+Leave `CIVIL3D_PORT` unset in the MCP registration. The existing user-instance
+smokes require exactly one user instance with the named disposable drawing and
+explicitly attach to its pid:
+
+```powershell
+npm run test:live-plugin -- --user-instance --expect-drawing RUNCODE-SMOKE.dwg
+node scripts/live-run-code-smoke.mjs --user-instance --expect-drawing RUNCODE-SMOKE.dwg
+node scripts/live-label-smoke.mjs --user-instance --expect-drawing RUNCODE-SMOKE.dwg
+node scripts/live-plot-smoke.mjs --user-instance --expect-drawing RUNCODE-SMOKE.dwg --out <existing-export-folder>
+npm run test:live-mcp-client -- --user-instance --expect-drawing RUNCODE-SMOKE.dwg
+npm run test:live-host -- --user-instance --expect-drawing RUNCODE-SMOKE.dwg
+node scripts/live-multi-instance-smoke.mjs C:\scratch\A.dwg C:\scratch\B.dwg
+```
+
+`--expect-drawing` matches the complete filename including `.dwg`, ignoring
+case, or an exact absolute path. For the host smoke, configure `MCP_HTTP_TOKEN`
+before starting the HTTP server and give the smoke process the same token.
+Keep its `CIVIL3D_LIVE_SMOKE_CONFIRM=DISPOSABLE_DRAWING` opt-in as well.
+The plugin verifier also supports `--user-instance --no-drawing` with exactly
+one empty scratch user instance. Run the commands separately; `test:live-all`
+does not forward selection flags to every script.
+
+The multi-instance smoke reports `SKIPPED` for its user-attachment guard when
+no user instance exists. `civil3d_instance start` can wait 300 seconds; the
+MCP registration needs `tool_timeout_sec` at least 330. A cancelled start
+retains its ownership claim through expiry. External registration edits remain
+pending: remove `CIVIL3D_PORT` and set that timeout before a live run.
+
+### Launch-claim review follow-up (2026-10-15)
+
+Checked in `c3d-multi-instance`. Nothing installed. Civil 3D was not started.
+
+| Command | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0. 815 tests passed in 59 files (91.76 seconds). |
+| `npm run docs:check` | Exit 0. Generated reference current, 212 entries. No regeneration needed. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` plus offline flags below | Exit 0. 0 warnings, 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` plus offline flags | Exit 0. 0 warnings, 0 errors. |
+| Net8 build above, repeated after net10 with `--restore` | Exit 0. 0 warnings, 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` plus offline flags and explicit paths below | Exit 0. PASS (230 references). |
+| Same harness command with `-f net10.0` and its explicit paths | Exit 0. PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0. 0 failures. Fake roots only. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File C:\CAD-Tools\core\tools\Find-CaseCollisions.ps1 scripts\claude-bootstrap-and-run.ps1` | Exit 0. No case collisions. That existing script was not edited in this follow-up. |
+| `node --check scripts/live-multi-instance-smoke.mjs` | Exit 0. Live script not run. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-multi-instance diff --check` | Exit 0. Line-ending notices only. |
+
+Offline flags: `-p:RestoreSources=C:\Users\CodexSandboxOffline\.nuget\packages -p:NuGetAudit=false`.
+Net8 harness arguments: `-- C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 Civil3D-MCP-Plugin\bin\Release\net8.0-windows\Civil3DMcpPlugin.dll`.
+Net10 harness arguments: `-- C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References Civil3D-MCP-Plugin\bin\Release\net10.0-windows\Civil3DMcpPlugin.dll`.
+The harness skipped file-symlink checks because this account lacks the privilege.
+
+The harness proves same-instance recovery after a claim-reader lock, pending-proof
+and drawing-load retries, exact launch-token/pid/start matching, and one atomic
+winner across processes. Node regressions cover rooted drive-relative paths,
+normalization through launch, missing proof and concurrent unrelated discoveries.
+Focused runs passed those manager assertions and all six lifecycle source checks.
+The harmless PowerShell child check passed and its temporary script passed the
+case-collision scan. Grouped runs exceeded the five-second default on two Windows
+process checks; they now allow 20 seconds and passed in the final suite. Earlier
+attempts hit `spawn EPERM` when embedding child-launch code in an encoded command;
+the check now uses a temporary script, like the production helper. Later attempts
+hit `Access is denied` starting Node or lost the runner pipe (exit -1), including
+a failed docs check during prebuild. A build also passed with bundled Node 24.21.0
+and temporary npm wrappers. The final sequential verification above passed with
+the ordinary commands and no environment changes. Actual Explorer and Civil 3D
+launch remain live-only. Civil 3D 2024/2025 were not run.
+
+### Multi-instance review fixes (2026-10-15)
+
+Checked in `c3d-multi-instance`. No installation or live Autodesk execution.
+
+| Command | Result |
+|---|---|
+| `npm run build` | Exit 0. |
+| `npx vitest run --configLoader runner --cache=false` | Exit 0. 806 tests passed in 59 files. |
+| `npm run docs:check` | Exit 0. Generated reference current, 212 entries. No regeneration needed. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026` | Exit 0. Initial build: 2 NU1900 warnings, 0 errors. NuGet audit could not reach nuget.org. |
+| Same net8 command with the offline flags below | Exit 0. 0 warnings, 0 errors. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows` plus offline flags | Exit 0. 0 warnings, 0 errors. |
+| Net8 command with offline flags, repeated after net10 | Exit 0. 0 warnings, 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` plus offline flags and `-- C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 Civil3D-MCP-Plugin\bin\Release\net8.0-windows\Civil3DMcpPlugin.dll` | Exit 0. PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0` plus offline flags and `-- C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References Civil3D-MCP-Plugin\bin\Release\net10.0-windows\Civil3DMcpPlugin.dll` | Exit 0. PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0. 0 failures. Fake roots only. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File C:\CAD-Tools\core\tools\Find-CaseCollisions.ps1 scripts\claude-bootstrap-and-run.ps1` | Exit 0. No case collisions. The existing PowerShell change was not edited during this review. |
+| `node --check scripts/live-multi-instance-smoke.mjs` | Exit 0. Live script not run. |
+| `git -c safe.directory=C:/Users/jorge/PycharmProjects/c3d-multi-instance diff --check` | Exit 0. Only line-ending notices. |
+
+Offline flags: `-p:RestoreSources=C:\Users\CodexSandboxOffline\.nuget\packages -p:NuGetAudit=false`.
+Harness paths were supplied explicitly to avoid the sandbox account's different
+LocalAppData. File-symlink checks skipped for missing privilege.
+
+New tests cover legacy fallback markers over TCP, approval refusal after switching
+empty instances or reusing a pid, HTTP instance authentication, real process creation
+times, stale-pid cap and drawing checks, quit deadlines, token-revocation order,
+user snapshots and cleanup after failed starts. Both harnesses compile the smoke
+script's actual pid and drawing guard. Plugin dispatch and wake wiring use
+source checks; the harness tests monotonic expiry. Host wake and actual quit remain
+live-only. Civil 3D 2024/2025 were not run.
+
+Focused attempts before the final checks:
+
+- `npx vitest run tests/instance_plugin_lifecycle.test.ts` exited 1 before tests.
+  The default loader tried to write to the read-only `node_modules/.vite-temp`.
+  The runner loader passed all 6 lifecycle tests without that write.
+- `dotnet build Civil3D-MCP-Plugin/Civil3DMcpPlugin.csproj --no-restore -v:q`
+  exited 1 because the default `../C_References` directory is absent in this
+  worktree. The explicit reference paths above passed.
+- `dotnet run --project tests/RunCodeHarness -f net10.0 --no-restore -- --instance-only`
+  first exited 1 on the existing cross-process claim check with `(agent,agent)`.
+  An immediate identical rerun passed with `(agent,user)`. A bounded 20-run loop
+  reproduced 3 double claims. The fix holds an exclusive claim read handle through
+  validation and rename. The same command passed all 27 instance checks afterward;
+  20 sequential runs with `--no-build` added passed with no double claims. A new
+  check proves reader exclusion and rename with the source handle still open.
+
+### Several Civil 3D instances (2026-10-15)
+
+Checked in `c3d-multi-instance`. Nothing was installed and Civil 3D was not started.
+
+| Check | Result |
+|---|---|
+| `npm run build` | Pass. |
+| `npx vitest run --configLoader runner --cache=false` | 783 tests passed in 59 files after review fixes. |
+| `npm run docs:generate`, then `npm run docs:check` | Pass. 212 entries. |
+| Plugin Release net8, net10, then net8 rebuild with `--restore` | Final builds: 0 warnings, 0 errors. First net8 build had two NU1900 audit warnings. Offline reruns used `-p:RestoreSources=C:\Users\CodexSandboxOffline\.nuget\packages -p:NuGetAudit=false`. net8 used `-p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026`; net10 used `-p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows`. |
+| RunCodeHarness, net8 and net10 | PASS (230 and 238 references). File-symlink checks skipped because this account lacks the required privilege. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | 0 failures, fake roots only. |
+| Case-collision check on `scripts\claude-bootstrap-and-run.ps1` | No case collisions. |
+| `node --check scripts/live-multi-instance-smoke.mjs` | Pass. Live script not run. |
+
+New checks cover stale discovery, attachment and token routing, ownership rules,
+claims, launch cleanup, the cap, stop guards, Unicode helper input and atomic claim
+contention. Host launch, document events and shutdown still need the live smoke test.
+Civil 3D 2024/2025 shortcut selection is covered; those hosts were not run.
+
+Review checks also cover fixed user ownership (including unsaved startup drawings),
+process-age claim rejection, listener restart ownership, separate synchronized claim
+processes, the production port binder, Save As snapshots and save-event source guards.
+Real TCP checks prove request routing stays pinned across an attachment change during
+approval progress and that each RPC carries its process identity. Stop checks reject
+changed approval targets and replacement processes. The smoke script is run in memory
+with mocked clients to prove cleanup includes an unexpected third successful start.
+Both full harness commands used the same offline restore flags above:
+`dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0` and `-f net10.0`.
+Live save events and port replacement in Civil 3D remain untested.
+
 ### Run-code preview and drawing helpers: issues #20 and #22 (2026-10-12)
 
 Offline results for `jorgegarcias60/run-code-helpers-preview`, measured outside any
@@ -78,7 +267,7 @@ that integration build installed through `install-trusted.ps1`: **20/20 passed**
 The run followed a Civil 3D restart; layout tabs had not been activated in that
 session. To repeat it on a saved scratch drawing with two configured layouts:
 
-`node scripts/live-plot-smoke.mjs --expect-drawing RUNCODE-SMOKE --out <temporary folder in the export root> --ctb-fixture`
+`node scripts/live-plot-smoke.mjs --expect-drawing RUNCODE-SMOKE.dwg --out <temporary folder in the export root> --ctb-fixture`
 
 The output folder must exist inside both import and export roots. Disable the
 PC3's viewer option first. The live check groups passed:
