@@ -1,0 +1,275 @@
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile, mkdtemp } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { isAbsolute, join, win32 } from "node:path";
+import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
+import { readInstanceRegistry, processAlive, pluginDataRoot, describeInstances, sameDrawing, type CivilInstance } from "./instanceRegistry.js";
+import { attachedInstance, setAttachedInstance, sessionId, sessionLabel, configureSessionLabel, serverIdentity, adoptInstanceOwnership, withPinnedEndpoint } from "./instanceSession.js";
+import { acadPids, findCivilShortcut, launchCivilShortcut, protectInstanceFolders, acquireStartLock, releaseStartLock } from "./instanceLauncher.js";
+import { effectivePluginHost, withApplicationConnection } from "./ConnectionManager.js";
+import { readPluginToken } from "./pluginAuth.js";
+import { currentAbortSignal } from "./requestContext.js";
+
+export const defaultInstanceDependencies = {
+  registry: readInstanceRegistry, alive: processAlive, protect: protectInstanceFolders,
+  shortcut: findCivilShortcut, launch: launchCivilShortcut, acadPids,
+  serverIdentity, adopt: adoptInstanceOwnership,
+  acquireLock: acquireStartLock, releaseLock: releaseStartLock,
+  now: () => Date.now(), wait: async (ms: number) => { await delay(ms, undefined, { signal: currentAbortSignal() }); },
+  quit: async (instance: CivilInstance, discardChanges: boolean) => await withPinnedEndpoint(instance, () =>
+    withApplicationConnection(client => client.sendCommand("quitInstance", {
+      authToken: readPluginToken(), ownerSession: sessionId, claimId: instance.claimId, discardChanges,
+    }))),
+};
+
+export class InstanceManager {
+  constructor(private readonly deps = defaultInstanceDependencies, private readonly root = pluginDataRoot()) {}
+
+  async list() {
+    const snapshot = await this.deps.registry({ root: this.root });
+    return { sessionId, label: sessionLabel, instances: snapshot.instances.map(i => ({
+      ...i, label: i.label ?? null,
+      attachedToThisSession: attachedInstance()?.pid === i.pid && attachedInstance()?.startedAtUtc === i.startedAtUtc,
+    })) };
+  }
+
+  async attach(args: { pid?: number; drawing?: string; job?: string; userInstance?: boolean; force?: boolean; adoptOrphan?: boolean }) {
+    this.requireAutomaticMode();
+    if ((args.pid === undefined) === (args.drawing === undefined)) throw new Error("Specify exactly one of pid or drawing.");
+    if (args.drawing && !isAbsolute(args.drawing)) throw new Error("drawing must be an absolute path.");
+    const { instances } = await this.deps.registry({ root: this.root });
+    const matches = instances.filter(i => args.pid !== undefined ? i.pid === args.pid : i.documents.some(d => sameDrawing(d, args.drawing!)));
+    if (matches.length !== 1) throw new Error(`Expected one live instance. Instances: ${describeInstances(instances)}`);
+    const instance = matches[0];
+    if (!instance.responsive) throw new Error(`Civil 3D instance ${instance.pid} is not responsive.`);
+    if (instance.owner === "user" && args.userInstance !== true) throw new Error("User-owned instance requires userInstance: true, only when Jorge says so.");
+    configureSessionLabel(args.job, args.drawing ?? instance.documents[0]);
+    if (instance.owner === "agent" && instance.orphan === true) {
+      const sameLabel = !!sessionLabel && (instance.ownerLabel ?? instance.label) === sessionLabel;
+      if (!sameLabel && args.adoptOrphan !== true) {
+        throw new Error("Orphaned agent instance has a different or unknown label. Pass adoptOrphan: true to take ownership; force does not adopt it.");
+      }
+      const adopted = await this.deps.adopt(instance, sessionLabel ?? `session-${sessionId}`);
+      setAttachedInstance(adopted);
+      return { instance: adopted, adopted: true };
+    }
+    const other = instance.owner === "agent" && instance.ownerSession !== sessionId;
+    if (other && args.force !== true) throw new Error("Instance belongs to another agent session. Refused; force: true is required to attach.");
+    setAttachedInstance(instance);
+    return { instance, ...(other ? { warning: "Forced attachment to another agent session's instance. Ownership is unchanged; this session cannot stop it." } : {}) };
+  }
+
+  detach() { setAttachedInstance(); return { attached: false, sessionId }; }
+
+  private requireAutomaticMode() {
+    this.requireLocalHost();
+    if (process.env.CIVIL3D_PORT?.trim()) throw new Error("Unset CIVIL3D_PORT and restart this MCP server to use instance attachment or start. Explicit CIVIL3D_PORT uses fixed routing.");
+  }
+
+  private requireLocalHost() {
+    if (effectivePluginHost !== "127.0.0.1") throw new Error("Instance lifecycle requires CIVIL3D_HOST to dial exactly 127.0.0.1. Nothing ran.");
+  }
+
+  async start(args: { drawing: string; job?: string; year?: number; units?: string }, timeoutMs = 300_000) {
+    this.requireAutomaticMode();
+    // win32.isAbsolute also accepts current-drive-rooted paths, unlike .NET's
+    // IsPathFullyQualified. Require a drive root or a complete UNC share.
+    if (!/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/])/i.test(args.drawing)
+      || !/\.dwg$/i.test(args.drawing) || /["\r\n\0]/.test(args.drawing)) {
+      throw new Error("drawing must be an existing absolute, fully qualified drive or UNC .dwg path.");
+    }
+    const drawing = win32.normalize(args.drawing);
+    if (!(await stat(drawing)).isFile()) throw new Error("drawing must be an existing absolute .dwg path.");
+    configureSessionLabel(args.job, drawing);
+    const cap = Number(process.env.CIVIL3D_MAX_AGENT_INSTANCES ?? "3");
+    if (!Number.isInteger(cap) || cap < 1) throw new Error("CIVIL3D_MAX_AGENT_INSTANCES must be a positive integer.");
+    await this.deps.protect(this.root);
+    // Serialize starts across MCP server processes, including the discovery wait.
+    const lockPath = join(this.root, "instance-start.lock");
+    await this.deps.acquireLock(lockPath);
+    let claimPath: string | undefined;
+    let takenClaimPath: string | undefined;
+    let temp: string | undefined;
+    let dispatched = false;
+    let attached = false;
+    let timedOut = false;
+    let launchPid: number | undefined;
+    let claimExpiresAt: number | undefined;
+    try {
+      const { instances } = await this.deps.registry({ root: this.root });
+      const already = instances.find(i => i.documents.some(d => sameDrawing(d, drawing)));
+      if (already) {
+        if (already.owner === "agent" && already.ownerSession === sessionId && already.responsive) {
+          setAttachedInstance(already); return { instance: already, alreadyOpen: true };
+        }
+        throw new Error(`Drawing is already open; a DWG cannot be open twice. Instances: ${describeInstances([already])}`);
+      }
+      const agents = instances.filter(i => i.owner === "agent");
+      // Cancelled or uncertain starts release the lock but keep their claims.
+      // Reserve their drawing and capacity until discovery represents them or
+      // their claims expire, including claims already taken before publication.
+      const pendingLaunches = await this.pendingLaunches(instances);
+      if (pendingLaunches.some(claim => sameDrawing(claim.drawing, drawing))) {
+        throw new Error("Drawing has a pending Civil 3D launch; wait for discovery or claim expiry before retrying.");
+      }
+      if (agents.length + pendingLaunches.length >= cap) throw new Error(`Agent instance cap (${cap}) reached. Instances: ${describeInstances(agents)}. Pending launches: ${JSON.stringify(pendingLaunches)}`);
+      const shortcut = await this.deps.shortcut(args.year, args.units ?? "Imperial");
+      const claimId = randomUUID();
+      const beforePids = await this.deps.acadPids();
+      const beforeInstancePids = new Set(instances.map(i => i.pid));
+      const created = this.deps.now();
+      claimExpiresAt = created + timeoutMs;
+      const launchToken = randomUUID();
+      const server = await this.deps.serverIdentity();
+      const claim = { claimId, drawing, ownerSession: sessionId, label: sessionLabel, ownerLabel: sessionLabel,
+        ownerServerPid: server.serverPid, ownerServerStartedAtUtc: server.serverStartedAtUtc, launchToken,
+        createdAtUtc: new Date(created).toISOString(), expiresAtUtc: new Date(claimExpiresAt).toISOString() };
+      const claimsFolder = join(this.root, "claims");
+      await mkdir(claimsFolder, { recursive: true });
+      claimPath = join(claimsFolder, `${claimId}.json`);
+      const pending = `${claimPath}.tmp`;
+      try { await writeFile(pending, JSON.stringify(claim), { flag: "wx" }); await rename(pending, claimPath); }
+      finally { await rm(pending, { force: true }); }
+      temp = await mkdtemp(join(tmpdir(), "civil3d-instance-"));
+      dispatched = true;
+      const proof = await this.deps.launch(shortcut.path, join(temp, "start.lnk"), drawing, launchToken, claimPath);
+      if (!proof || !Number.isInteger(proof.pid) || proof.pid <= 0 || !Number.isFinite(Date.parse(proof.startedAtUtc))) {
+        throw new Error("Missing or invalid process launch proof. Refused attachment; inspect civil3d_instance list.");
+      }
+      launchPid = proof.pid;
+      if (beforePids.includes(proof.pid) || beforeInstancePids.has(proof.pid) || Date.parse(proof.startedAtUtc) <= created) {
+        throw new Error("Launch proof identifies a pre-existing process. Refused attachment; inspect civil3d_instance list.");
+      }
+      // The detached helper publishes proof before replying. The fallback also
+      // permits injected launchers in tests to return proof directly.
+      let onDisk: { launchPid?: number; launchStartedAtUtc?: string } | undefined;
+      try { onDisk = JSON.parse(await readFile(claimPath, "utf8")); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (onDisk && onDisk.launchPid === undefined) {
+        try {
+          await writeFile(pending, JSON.stringify({ ...claim, launchPid: proof.pid, launchStartedAtUtc: proof.startedAtUtc }), { flag: "wx" });
+          await rename(pending, claimPath);
+        } finally { await rm(pending, { force: true }); }
+      } else if (onDisk && (onDisk.launchPid !== proof.pid
+        || Date.parse(onDisk.launchStartedAtUtc ?? "") !== Date.parse(proof.startedAtUtc))) {
+        throw new Error("Launch claim proof differs from process proof. Refused attachment; inspect civil3d_instance list.");
+      }
+      let seen: CivilInstance[] = [];
+      while (this.deps.now() - created < timeoutMs) {
+        if (currentAbortSignal()?.aborted) throw new Error("Civil 3D instance start cancelled. Check civil3d_instance list before retrying.");
+        seen = (await this.deps.registry({ root: this.root })).instances;
+        const instance = seen.find(i => i.claimId === claimId && i.owner === "agent" && i.ownerSession === sessionId && i.responsive);
+        if (instance) {
+          if (instance.pid !== proof.pid || Date.parse(instance.startedAtUtc) !== Date.parse(proof.startedAtUtc)) {
+            throw new Error("Start claim does not match the launched process proof. Refused attachment; inspect civil3d_instance list.");
+          }
+          if (beforePids.includes(instance.pid) || beforeInstancePids.has(instance.pid)
+            || Date.parse(instance.startedAtUtc) <= created) {
+            throw new Error("Start claim was taken by a pre-existing process. Refused attachment; inspect civil3d_instance list.");
+          }
+          takenClaimPath = join(claimsFolder, `${claimId}.taken-${instance.pid}.json`);
+          attached = true;
+          setAttachedInstance(instance); return { instance };
+        }
+        await this.deps.wait(1000);
+      }
+      timedOut = true;
+      const newPids = (await this.deps.acadPids()).filter(pid => !beforePids.includes(pid));
+      throw new Error(`Civil 3D start timed out. Instances seen: ${describeInstances(seen)}. New acad pids: ${JSON.stringify(newPids)}. `
+        + "A new acad pid without discovery means the plugin is not loaded. Check the Civil 3D window and plugin installation.");
+    } finally {
+      try {
+        const removeClaim = attached || !dispatched || timedOut || (launchPid !== undefined && !this.deps.alive(launchPid));
+        if (claimPath && removeClaim) {
+          await rm(claimPath, { force: true });
+        }
+        if (takenClaimPath) await rm(takenClaimPath, { force: true });
+        if (temp) {
+          if (removeClaim) await rm(temp, { recursive: true, force: true });
+          else {
+            const folder = temp;
+            const remaining = Math.max(0, (claimExpiresAt ?? this.deps.now()) - this.deps.now());
+            const expiredClaim = claimPath;
+            setTimeout(() => {
+              void (async () => {
+                if (expiredClaim) await rm(expiredClaim, { force: true });
+                await rm(folder, { recursive: true, force: true });
+              })().catch(error => console.warn("Could not clean expired Civil 3D launch files:", (error as Error).message));
+            }, remaining).unref();
+          }
+        }
+      } finally {
+        await this.deps.releaseLock(lockPath);
+      }
+    }
+  }
+
+  private async pendingLaunches(instances: CivilInstance[]): Promise<{ claimId: string; drawing: string }[]> {
+    const folder = join(this.root, "claims");
+    let names: string[];
+    try { names = await readdir(folder); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const represented = new Set(instances.map(instance => instance.claimId));
+    const pending = new Map<string, { claimId: string; drawing: string }>();
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      let claim;
+      try { claim = JSON.parse(await readFile(join(folder, name), "utf8")); }
+      catch (error) {
+        if (error instanceof SyntaxError) continue;
+        // The plugin can take a claim between enumeration and reading. Do not
+        // mistake that rename (before discovery publication) for free capacity.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new Error("Launch reservations changed during start checks. Retry start after discovery settles.");
+        }
+        throw error;
+      }
+      if (!claim || typeof claim.claimId !== "string" || typeof claim.drawing !== "string"
+        || typeof claim.ownerSession !== "string" || !claim.ownerSession
+        || !isAbsolute(claim.drawing) || !/\.dwg$/i.test(claim.drawing)
+        || !Number.isFinite(Date.parse(claim.expiresAtUtc)) || Date.parse(claim.expiresAtUtc) <= this.deps.now()
+        || (name !== `${claim.claimId}.json` && !name.startsWith(`${claim.claimId}.taken-`))
+        || represented.has(claim.claimId)) continue;
+      pending.set(claim.claimId, { claimId: claim.claimId, drawing: claim.drawing });
+    }
+    return [...pending.values()];
+  }
+
+  async resolveStopTarget(args: { pid?: number }) {
+    this.requireLocalHost();
+    const pid = args.pid ?? attachedInstance()?.pid;
+    if (!pid) throw new Error("No attached instance; supply pid or attach first.");
+    const { instances } = await this.deps.registry({ root: this.root });
+    const instance = instances.find(i => i.pid === pid);
+    if (!instance || instance.owner !== "agent" || instance.ownerSession !== sessionId) throw new Error("Only an agent-owned instance owned by THIS session can be stopped.");
+    if (!instance.responsive) throw new Error(`Civil 3D instance ${pid} is not responsive.`);
+    if (args.pid === undefined && attachedInstance()?.startedAtUtc !== instance.startedAtUtc) {
+      throw new Error("Attached instance identity changed. Attach again before stopping.");
+    }
+    return instance;
+  }
+
+  async stop(args: { pid?: number; discardChanges?: boolean; targetIdentity?: string }, timeoutMs = 60_000) {
+    const instance = await this.resolveStopTarget(args);
+    const pid = instance.pid;
+    if (args.targetIdentity !== undefined && args.targetIdentity !== stopTargetIdentity(instance)) {
+      throw new Error("Stop target instance changed after approval. Request a new approval.");
+    }
+    await this.deps.quit(instance, args.discardChanges === true);
+    const started = this.deps.now();
+    while (this.deps.alive(pid) && this.deps.now() - started < timeoutMs) await this.deps.wait(500);
+    if (this.deps.alive(pid)) throw new Error(`Civil 3D instance ${pid} did not exit within 60 seconds. It was not killed.`);
+    await rm(join(this.root, "instances", `${pid}.json`), { force: true });
+    if (attachedInstance()?.pid === pid) setAttachedInstance();
+    return { stopped: true, pid };
+  }
+}
+
+export function stopTargetIdentity(instance: CivilInstance): string {
+  return JSON.stringify([instance.pid, instance.port, instance.startedAtUtc, instance.ownerSession, instance.claimId]);
+}
+
+export const instanceManager = new InstanceManager();

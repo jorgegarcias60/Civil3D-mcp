@@ -9,7 +9,24 @@ using Civil3DMcpPlugin;
 
 try
 {
+if (args.Length == 6 && args[0] == "--instance-contender")
+  return InstanceDiscoveryChecks.RunContender(args[1], args[2], args[3], args[4], DateTimeOffset.Parse(args[5]));
 var repoRoot = FindRepoRoot();
+InstanceRequestChecks.Run(repoRoot, (condition, name) =>
+{
+  Console.WriteLine($"{(condition ? "ok  " : "FAIL")} {name}");
+  if (!condition) throw new InvalidOperationException(name);
+});
+if (args.Contains("--instance-only"))
+{
+  var instanceFailures = 0;
+  InstanceDiscoveryChecks.Run((condition, name) =>
+  {
+    Console.WriteLine($"{(condition ? "ok  " : "FAIL")} {name}");
+    if (!condition) instanceFailures++;
+  });
+  return instanceFailures == 0 ? 0 : 1;
+}
 if (args.Contains("--layout-initialization-only"))
 {
   var layoutFailures = 0;
@@ -493,6 +510,7 @@ var again = Compile("return 1;");
 Expect(unique.Succeeded && again.Succeeded && unique.TypeName != again.TypeName, "each run gets its own class and assembly name");
 
 RuntimeChecks.Run((condition, name) => Expect(condition, name));
+InstanceDiscoveryChecks.Run((condition, name) => Expect(condition, name));
 PdfChecks.Run((condition, name) => Expect(condition, name));
 PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
@@ -537,6 +555,17 @@ if (fixtureCode.Success)
 {
   var savedFixture = Compile(fixtureCode.Groups[1].Value, write: true);
   Expect(savedFixture.Succeeded, "live plot smoke's side database edit, commit and SaveAs compile", savedFixture);
+}
+var instanceSmokeSource = File.ReadAllText(Path.Combine(repoRoot, "scripts", "live-multi-instance-smoke.mjs"));
+var instanceWriteCode = System.Text.RegularExpressions.Regex.Match(instanceSmokeSource,
+  @"const writeCode = `([\s\S]*?)`;");
+Expect(instanceWriteCode.Success, "multi-instance smoke declares its guarded mutation");
+if (instanceWriteCode.Success)
+{
+  var snippet = instanceWriteCode.Groups[1].Value.Replace("${i1.pid}", "12345")
+    .Replace("${JSON.stringify(a)}", "\"C:\\\\scratch\\\\A.dwg\"");
+  var guardedMutation = Compile(snippet, write: true);
+  Expect(guardedMutation.Succeeded, "multi-instance smoke's pid and drawing guard compiles before mutation", guardedMutation);
 }
 Console.WriteLine(failures == 0 ? $"PASS ({references.Count} references)" : $"{failures} FAILED");
 return failures == 0 ? 0 : 1;

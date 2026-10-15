@@ -9,6 +9,7 @@ import { maybeStoreReportResource } from "./reportResourceStore.js";
 import { idempotencyStore } from "./idempotencyStore.js";
 import { createLogger } from "../utils/logger.js";
 import { createRequestId, runWithRequestId } from "../utils/requestContext.js";
+import { withInstanceRequest, resolveInstanceEndpoint, activeEndpoint } from "../utils/instanceSession.js";
 import type { ToolCapability, ToolCatalogEntry, ToolDomain } from "./toolMetadata.js";
 
 type JsonObject = Record<string, unknown>;
@@ -195,7 +196,7 @@ async function executeExposure(
         const progress = 50 + 50 * heartbeatSeconds / (heartbeatSeconds + 60);
         heartbeatPending = heartbeatPending.then(() => emitProgress(
           progressExtra, progress, 100,
-          `${exposure.displayName}: Civil 3D is still running the script.`,
+          `${exposure.displayName}: Civil 3D is still executing '${actionName}'.`,
         ));
       }, 15_000)
       : undefined;
@@ -236,8 +237,20 @@ async function executeExposure(
   const drawingScope = actionDefinition.requiresActiveDrawing
     ? await getActiveDrawingFingerprint()
     : "drawing-independent";
+  let endpoint = activeEndpoint();
+  if (actionDefinition.pluginMethods?.length) {
+    try { endpoint = await resolveInstanceEndpoint(); }
+    catch (error) {
+      // Health must still report its unattached status, without caching that status.
+      if ((error as { code?: string }).code === "CIVIL3D.NOT_ATTACHED") return executeOnce();
+      throw error;
+    }
+  }
+  const instanceScope = endpoint
+    ? JSON.stringify([endpoint.pid ?? null, endpoint.startedAtUtc ?? null, endpoint.port, endpoint.legacyFallback === true])
+    : "local";
   return idempotencyStore.execute(
-    `${exposure.toolName}:${actionName}:${drawingScope}`,
+    `${exposure.toolName}:${actionName}:${instanceScope}:${drawingScope}`,
     idempotencyKey,
     signature,
     executeOnce,
@@ -326,7 +339,7 @@ function createExposureHandler(
       : undefined;
     const requestId = createRequestId();
     const startedAt = performance.now();
-    return runWithRequestId(requestId, async () => {
+    return withInstanceRequest(() => runWithRequestId(requestId, async () => {
       try {
         await emitProgress(progressExtra, 0, 100, `${exposure.displayName}: request received.`);
         const result = await executeExposure(definition, exposure, rawArgs, options, progressExtra);
@@ -366,7 +379,7 @@ function createExposureHandler(
         const result = { ...buildToolErrorResult(exposure.toolName, actionName, error), _meta: { requestId } };
         return approvalRefusal || alreadyLogged ? markLoggedApprovalRefusal(result) : result;
       }
-    }, progressExtra?.signal);
+    }, progressExtra?.signal));
   };
 }
 

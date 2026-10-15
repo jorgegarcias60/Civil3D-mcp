@@ -6,7 +6,7 @@
 // does not remove them.
 //
 //   npm run build
-//   node scripts/live-label-smoke.mjs --expect-drawing <name>
+//   node scripts/live-label-smoke.mjs --user-instance --expect-drawing <name>
 //
 // --expect-drawing (required): runs only when the active drawing's name contains this
 //   text, so it never writes into a real job by accident.
@@ -14,13 +14,15 @@ import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { drainServerStderr } from "./server-stderr.mjs";
+import { attachScratchUserInstance } from "./live-user-instance.mjs";
 
-const { values: options } = parseArgs({ options: { "expect-drawing": { type: "string" } }, strict: true });
+const { values: options } = parseArgs({ options: { "expect-drawing": { type: "string" }, "user-instance": { type: "boolean", default: false } }, strict: true });
 const expectDrawing = options["expect-drawing"];
 if (!expectDrawing) {
-  console.error("usage: node scripts/live-label-smoke.mjs --expect-drawing <scratch drawing name>");
+  console.error("usage: node scripts/live-label-smoke.mjs --user-instance --expect-drawing <scratch drawing name>");
   process.exit(2);
 }
+if (!options["user-instance"]) throw new Error("Pass --user-instance to opt into the existing scratch user instance.");
 
 const prefix = `LBLSMOKE-${process.pid}`;
 const transport = new StdioClientTransport({
@@ -159,6 +161,7 @@ return new
 
 try {
   await client.connect(transport);
+  await attachScratchUserInstance(call, expectDrawing);
   const drawing = await runCode("return Doc.Name;");
   if (!String(drawing).toLowerCase().includes(expectDrawing.toLowerCase())) {
     throw new Error(`Active drawing '${drawing}' does not contain '${expectDrawing}'; stopping before any write.`);

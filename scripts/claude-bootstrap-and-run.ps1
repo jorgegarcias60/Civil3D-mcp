@@ -118,12 +118,8 @@ if ((Test-InstallNeeded (Get-DependencyHash)) -or (Test-BuildNeeded (Get-BuildIn
   }
 }
 
-# This fork's plugin listens on 8757 (see PluginRuntime.Port), not the
-# upstream 8080 default the Node side would otherwise assume. Respect an
-# explicit override from the environment.
-if (-not $env:CIVIL3D_PORT) {
-  $env:CIVIL3D_PORT = "8757"
-}
+# Leave CIVIL3D_PORT unset for per-session instance discovery.
+# An explicit environment override still selects fixed-port routing.
 
 & $nodeCommand $buildEntryPath
 exit $LASTEXITCODE

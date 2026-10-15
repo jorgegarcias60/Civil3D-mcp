@@ -1,6 +1,7 @@
 import { ApplicationClientConnection, Civil3DRpcError, pluginConnectHost, type SendCommandOptions } from "./SocketClient.js";
 import { createLogger } from "./logger.js";
 import { currentAbortSignal } from "./requestContext.js";
+import { resolveInstanceEndpoint, withPinnedEndpoint } from "./instanceSession.js";
 
 const log = createLogger("ConnectionManager");
 
@@ -8,8 +9,6 @@ const log = createLogger("ConnectionManager");
 const CIVIL3D_HOST = process.env.CIVIL3D_HOST ?? "127.0.0.1";
 // Use the same startup value and mapping as the socket, even if env changes later.
 export const effectivePluginHost = pluginConnectHost(CIVIL3D_HOST);
-// This fork's plugin listens on 8757 (PluginRuntime.Port); upstream uses 8080.
-const CIVIL3D_PORT = parseInt(process.env.CIVIL3D_PORT ?? "8757", 10);
 const CONNECT_TIMEOUT_MS = parseInt(process.env.CIVIL3D_CONNECT_TIMEOUT ?? "5000", 10);
 
 export interface ApplicationCommandClient {
@@ -25,14 +24,20 @@ export interface ApplicationCommandClient {
 export async function withApplicationConnection<T>(
   operation: (client: ApplicationCommandClient) => Promise<T>
 ): Promise<T> {
+  const endpoint = await resolveInstanceEndpoint();
   const client: ApplicationCommandClient = {
-    sendCommand: async (command, params = {}, options = {}) => await sendSingleCommand(command, params, options),
+    sendCommand: async (command, params = {}, options = {}) => await sendSingleCommand(command, params, {
+      ...options,
+      legacyFallback: endpoint.legacyFallback === true,
+      instanceIdentity: endpoint.pid !== undefined && endpoint.startedAtUtc
+        ? { pid: endpoint.pid, startedAtUtc: endpoint.startedAtUtc } : undefined,
+    }, endpoint.port),
   };
 
-  return await operation(client);
+  return await withPinnedEndpoint(endpoint, () => operation(client));
 }
 
-async function sendSingleCommand(command: string, params: unknown, options: SendCommandOptions): Promise<any> {
+async function sendSingleCommand(command: string, params: unknown, options: SendCommandOptions, CIVIL3D_PORT: number): Promise<any> {
   const appClient = new ApplicationClientConnection(CIVIL3D_HOST, CIVIL3D_PORT);
   const signal = currentAbortSignal();
   const cancellationError = new Civil3DRpcError(

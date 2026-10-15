@@ -41,6 +41,7 @@ import { WORKFLOW_DOMAIN_DEFINITION } from "./domains/workflowDomain.js";
 import { XREF_DOMAIN_DEFINITION } from "./domains/xrefDomain.js";
 import { COMPARE_DOMAIN_DEFINITION } from "./domains/compareDomain.js";
 import { CODE_DOMAIN_DEFINITION } from "./domains/codeDomain.js";
+import { INSTANCE_DOMAIN_DEFINITION } from "./domains/instanceDomain.js";
 import type { ToolCatalogEntry } from "./toolMetadata.js";
 
 export const MIGRATED_DOMAIN_DEFINITIONS = [
@@ -78,6 +79,7 @@ export const MIGRATED_DOMAIN_DEFINITIONS = [
   XREF_DOMAIN_DEFINITION,
   COMPARE_DOMAIN_DEFINITION,
   CODE_DOMAIN_DEFINITION,
+  INSTANCE_DOMAIN_DEFINITION,
 ];
 
 export const GENERATED_TOOL_CATALOG_ENTRIES: ToolCatalogEntry[] = MIGRATED_DOMAIN_DEFINITIONS.flatMap(

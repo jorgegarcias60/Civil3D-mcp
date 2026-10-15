@@ -493,6 +493,35 @@ describe("httpBridge", () => {
   });
 
   describe("code execution over the bridge", () => {
+    const instanceCalls: Array<[string, Record<string, unknown>]> = [
+      ["civil3d_instance", { action: "list" }],
+      ["civil3d_instance", { action: "stop", discardChanges: true, approvalToken: "t" }],
+      ["civil3d_request_approval", { toolName: "civil3d_instance", action: "stop", parameters: { action: "stop", discardChanges: true } }],
+      ["civil3d_orchestrate", { toolName: "civil3d_docs", toolParameters: {
+        action: "orchestrate", toolName: "CIVIL3D_INSTANCE", toolParameters: { action: "stop", discardChanges: true },
+      } }],
+    ];
+    it.each(instanceCalls)("refuses unauthenticated instance calls through %s before dispatch", async (tool, parameters) => {
+      hasToolHandlerMock.mockReturnValue(true);
+      handle = await launchBridge({ authToken: "" });
+      const res = await request("POST", `${handle.baseUrl}/execute`, {
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool, parameters }),
+      });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ error: { code: "CIVIL3D.FORBIDDEN", message: expect.stringContaining("civil3d_instance") } });
+      expect(executeRegisteredToolMock).not.toHaveBeenCalled();
+    });
+    it.each(instanceCalls)("routes authenticated instance calls through %s", async (tool, parameters) => {
+      hasToolHandlerMock.mockReturnValue(true);
+      executeRegisteredToolMock.mockResolvedValue({ ok: true });
+      handle = await launchBridge({ authToken: "secret-token" });
+      const res = await request("POST", `${handle.baseUrl}/execute`, {
+        headers: { "Content-Type": "application/json", Authorization: "Bearer secret-token" },
+        body: JSON.stringify({ tool, parameters }),
+      });
+      expect(res.status).toBe(200);
+      expect(executeRegisteredToolMock).toHaveBeenCalledWith(tool, parameters);
+    });
     const runCodeCalls: Array<[string, Record<string, unknown>]> = [
       ["civil3d_run_code", { code: "return 1;", approvalToken: "t" }],
       ["civil3d_request_approval", { toolName: "civil3d_run_code", action: "run", parameters: { code: "return 1;" } }],

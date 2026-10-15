@@ -6,7 +6,6 @@ import {
   listRegisteredToolNames,
 } from "./tools/toolHandlerRegistry.js";
 import { executeToolCallViaOrchestrator } from "./tools/civil3d_orchestrate.js";
-import { ALWAYS_GATED_TOOLS } from "./tools/approvalPolicy.js";
 import { createLogger } from "./utils/logger.js";
 import { Civil3DRpcError } from "./utils/SocketClient.js";
 import { createRequestId, runWithRequestId } from "./utils/requestContext.js";
@@ -322,9 +321,12 @@ function unauthenticatedRefusal(toolName: string, parameters: unknown): string |
     "Set MCP_HTTP_TOKEN for the server and send it as 'Authorization: Bearer <token>' or X-MCP-Token.";
 }
 
+// Transport authentication is separate from the direct MCP approval policy.
+const HTTP_AUTH_REQUIRED_TOOLS = ["civil3d_run_code", "civil3d_instance"];
+
 function gatedToolNamedIn(text: string): string | undefined {
   const lower = text.toLowerCase();
-  return [...ALWAYS_GATED_TOOLS].find((name) => lower.includes(name.toLowerCase()));
+  return HTTP_AUTH_REQUIRED_TOOLS.find((name) => lower.includes(name.toLowerCase()));
 }
 
 // Every string and key at any depth. Iterative, so a deeply nested body cannot

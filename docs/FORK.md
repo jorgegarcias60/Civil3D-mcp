@@ -93,8 +93,14 @@ for an agent) and opens a drawing so the plugin comes up. A machine without that
 the bundle and answers Load Once at each start. The installer refuses before changing anything while
 Civil 3D holds the bundle or a changed build: close Civil 3D completely and run it again.
 
+**Close every Civil 3D instance before deploying the plugin.** Each instance loads its own
+copy. Deploy matching plugin builds for each installed release, then restart the instances.
+Leave `CIVIL3D_PORT` unset for multi-instance discovery. `civil3d_instance` starts and
+attaches agent sessions without selecting Jorge's instance automatically.
+
 **Update the plugin and the Node server together.** `civil3d_run_code` sends the plugin's
-per-session token (`%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token`, private to the user, sent only to
+per-instance token (`%LOCALAPPDATA%\Civil3DMcpPlugin\rpc-token-<port>`, with legacy `rpc-token`
+also written at 8757; private to the user, sent only to
 127.0.0.1). `civil3d_run_code` checks the effective startup `CIVIL3D_HOST`
 before reading the token or calling the plugin. `localhost` and empty hosts
 map to `127.0.0.1`. Other hosts get `CIVIL3D.INVALID_INPUT`: "Nothing ran."

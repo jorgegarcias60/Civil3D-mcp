@@ -2,8 +2,8 @@
 
 Generated from the runtime manifest for civil3d-mcp 1.2.1. Do not edit by hand.
 
-- Catalog entries: 211
-- Domains: 33
+- Catalog entries: 212
+- Domains: 34
 
 | Tool | Domain | Operations | Plugin methods | Safe retry |
 |---|---|---|---|---|
@@ -82,6 +82,7 @@ Generated from the runtime manifest for civil3d-mcp 1.2.1. Do not edit by hand.
 | `civil3d_hydrology_watershed_runoff_workflow` | hydrology | — | watershedRunoffWorkflow | yes |
 | `civil3d_stm` | hydrology | list_ssa_capabilities, export_stm, import_stm, open_storm_sanitary_analysis | listSsaCapabilities, exportStm, importStm, openStormSanitaryAnalysis | no |
 | `civil3d_time_of_concentration` | hydrology | list_tc_methods, calculate_tc, generate_hydrograph | listTcMethods, calculateTimeOfConcentration, generateHydrograph | yes |
+| `civil3d_instance` | instance | list, start, attach, detach, stop | quitInstance | no |
 | `civil3d_job` | job | start, status, cancel | startJob, getJobStatus, cancelJob | no |
 | `civil3d_parcel` | parcel | list_sites, list, get, get_geometry, create, edit, lot_line_adjust, report | listParcelSites, listParcels, getParcel, getParcelGeometry, createParcel, editParcel, adjustParcelLotLine, reportParcels | no |
 | `civil3d_parcel_create` | parcel | — | createParcel | no |

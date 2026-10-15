@@ -10,8 +10,12 @@ const MAX_RESPONSE_BYTES = parseInt(process.env.CIVIL3D_MAX_RESPONSE_BYTES ?? "8
 export const MAX_REQUEST_BYTES = 1024 * 1024;
 
 export interface SendCommandOptions {
+  /** Automatic routing for old plugins only; discovery-capable plugins refuse it. */
+  legacyFallback?: boolean;
   /** Overrides CIVIL3D_COMMAND_TIMEOUT for this command. */
   timeoutMs?: number;
+  /** Process identity required for discovery-routed requests. */
+  instanceIdentity?: { pid: number; startedAtUtc: string };
 }
 
 interface PendingRequest {
@@ -166,6 +170,8 @@ export class ApplicationClientConnection {
         method: command,
         params,
         id: requestId,
+        ...(options.instanceIdentity ? { instanceIdentity: options.instanceIdentity } : {}),
+        ...(options.legacyFallback ? { legacyFallback: true } : {}),
       };
       const commandString = JSON.stringify(commandObj);
 

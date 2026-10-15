@@ -3,6 +3,7 @@ import { z } from "zod";
 import { approvalPolicy, isApprovalRequired, runCodeApprovalMode } from "./approvalPolicy.js";
 import { captureToolHandler } from "./toolHandlerRegistry.js";
 import { findManifestAction } from "./toolManifest.js";
+import { withInstanceRequest } from "../utils/instanceSession.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -68,7 +69,7 @@ function errorResult(toolName: string, error: unknown) {
 }
 
 export function registerApprovalTool(server: McpServer) {
-  const previewHandler = async (rawArgs: JsonObject) => {
+  const previewHandler = async (rawArgs: JsonObject) => withInstanceRequest(async () => {
     try {
       const args = rawArgs as { toolName: string; action: string; parameters: JsonObject };
       const { target, parsed } = resolveApprovalTarget(args);
@@ -95,9 +96,9 @@ export function registerApprovalTool(server: McpServer) {
     } catch (error) {
       return errorResult("civil3d_preview_action", error);
     }
-  };
+  });
 
-  const requestHandler = async (rawArgs: JsonObject) => {
+  const requestHandler = async (rawArgs: JsonObject) => withInstanceRequest(async () => {
     try {
       const args = rawArgs as {
         toolName: string;
@@ -131,7 +132,7 @@ export function registerApprovalTool(server: McpServer) {
     } catch (error) {
       return errorResult("civil3d_request_approval", error);
     }
-  };
+  });
 
   captureToolHandler("civil3d_preview_action", previewHandler);
   captureToolHandler("civil3d_request_approval", requestHandler);

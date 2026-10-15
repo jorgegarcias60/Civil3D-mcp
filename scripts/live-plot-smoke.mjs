@@ -1,7 +1,7 @@
 // Run only against a saved SCRATCH drawing with two initialized PDF layouts.
 // Disable the PC3's open-in-viewer option before running this live check.
 //   npm run build
-//   node scripts/live-plot-smoke.mjs --expect-drawing <scratch-name> --out <export-folder>
+//   node scripts/live-plot-smoke.mjs --user-instance --expect-drawing <scratch-name> --out <export-folder>
 // --out must be inside both import and export roots for the disposable DWG.
 // No open drawing is saved; only the disposable side database is saved.
 // --ctb-fixture temporarily copies a table into the profile's plot style folder.
@@ -12,11 +12,13 @@ import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { drainServerStderr } from "./server-stderr.mjs";
+import { attachScratchUserInstance } from "./live-user-instance.mjs";
 
 const { values: options } = parseArgs({
-  options: { "expect-drawing": { type: "string" }, out: { type: "string" }, "ctb-fixture": { type: "boolean", default: false } },
+  options: { "expect-drawing": { type: "string" }, out: { type: "string" }, "ctb-fixture": { type: "boolean", default: false }, "user-instance": { type: "boolean", default: false } },
   strict: true,
 });
+if (!options["user-instance"]) throw new Error("Pass --user-instance to opt into the existing scratch user instance.");
 if (!options["expect-drawing"]?.trim() || !options.out || !isAbsolute(options.out)
     || !existsSync(options.out) || !statSync(options.out).isDirectory()) {
   console.error("Requires --expect-drawing <scratch-name> and --out <existing absolute folder inside export roots>.");
@@ -309,6 +311,7 @@ if (!options["ctb-fixture"]) {
 }
 try {
   await client.connect(transport);
+  await attachScratchUserInstance(call, options["expect-drawing"]);
   await attempt("plot API health", async () => {
     const health = result(await call("civil3d_health", {}, 30_000));
     check("loaded plugin supports plot API 2", health.plotApi >= 2, { plotApi: health.plotApi });

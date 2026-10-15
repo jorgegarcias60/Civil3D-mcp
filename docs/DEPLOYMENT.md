@@ -66,8 +66,9 @@ npm run package:claude:validate
 1. Open **Settings > Extensions**.
 2. Open **Advanced settings** and select **Install Extension**.
 3. Select `civil3d-mcp-<version>.mcpb`.
-4. For a standard local setup, keep Civil 3D at `127.0.0.1:8757` and the HTTP
-   bridge at `127.0.0.1:3000`.
+4. For a standard local setup, keep the Civil 3D host at `127.0.0.1`, leave
+   the Civil 3D port blank for instance discovery, and keep the HTTP bridge
+   at `127.0.0.1:3000`.
 5. Open Civil 3D with `Civil3DMcpPlugin.dll` loaded, then ask Claude to run
    `civil3d_health`.
 
@@ -141,7 +142,7 @@ node build/index.js
 
 The process reads from `stdin` and writes to `stdout` (MCP stdio transport). It
 also starts an HTTP bridge on `127.0.0.1:3000` for local HTTP clients. Node.js
-connects separately to the Civil 3D plugin's JSON-RPC TCP listener on port 8757.
+connects separately to the discovered Civil 3D plugin's JSON-RPC TCP listener.
 
 ---
 
@@ -245,7 +246,8 @@ All variables are optional; defaults work for a standard local setup.
 | Variable | Default | Description |
 |---|---|---|
 | `CIVIL3D_HOST` | `127.0.0.1` | Host where Civil 3D plugin RPC server is listening (IPv4 loopback only; `localhost` is dialed as `127.0.0.1`) |
-| `CIVIL3D_PORT` | `8757` | TCP port for the Civil 3D plugin RPC server |
+| `CIVIL3D_PORT` | unset | Leave unset for per-instance discovery. Set only for deliberate fixed routing; fixed mode refuses user or other-session ownership unless `CIVIL3D_ALLOW_FIXED_INSTANCE=true`. |
+| `CIVIL3D_ALLOW_FIXED_INSTANCE` | unset | Explicit opt-in to fixed routing into a user or other-session instance. |
 | `CIVIL3D_CONNECT_TIMEOUT` | `5000` | Connection timeout in milliseconds |
 | `CIVIL3D_COMMAND_TIMEOUT` | `120000` | Timeout for individual command execution (ms) |
 | `CIVIL3D_MAX_RESPONSE_BYTES` | `8388608` | Maximum plugin response buffered by Node.js |
@@ -286,7 +288,6 @@ connection, MCP, and HTTP variables belong to the Node.js server environment.
       "args": ["C:/path/to/civil3d-mcp/build/index.js"],
       "env": {
         "CIVIL3D_HOST": "127.0.0.1",
-        "CIVIL3D_PORT": "8757",
         "CIVIL3D_ENABLE_TOOL_ALIASES": "true",
         "CIVIL3D_LOG_LEVEL": "debug"
       }
@@ -342,6 +343,13 @@ This mounts `src/` into the container and runs `tsc --watch` so changes recompil
 ---
 
 ## Verifying the Connection
+
+If `civil3d_health` reports fixed routing, remove `CIVIL3D_PORT` from the
+client's MCP registration and restart that client to enable discovery. For
+Codex, also give `civil3d_instance start` at least 330 seconds by setting
+`tool_timeout_sec` to 330 or higher in the MCP registration. Start waits up to
+300 seconds and sends progress; cancelling a start retains its ownership claim
+until the claim expires, so inspect `civil3d_instance list` before retrying.
 
 ### Quick smoke test
 

@@ -1,6 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { drainServerStderr } from "./server-stderr.mjs";
+import { attachScratchUserInstance } from "./live-user-instance.mjs";
+import { parseArgs } from "node:util";
+
+const { values: options } = parseArgs({ options: { "expect-drawing": { type: "string" }, "user-instance": { type: "boolean", default: false } }, strict: true });
+if (!options["user-instance"]) throw new Error("Pass --user-instance to opt into the existing scratch user instance.");
 
 const transport = new StdioClientTransport({
   command: process.execPath,
@@ -14,6 +19,7 @@ const client = new Client({ name: "civil3d-live-smoke", version: "1.0.0" });
 
 try {
   await client.connect(transport);
+  await attachScratchUserInstance((name, args) => client.callTool({ name, arguments: args }), options["expect-drawing"]);
   const tools = await client.listTools();
   const healthTool = tools.tools.find((tool) => tool.name === "civil3d_health");
   if (!healthTool?.outputSchema || healthTool.annotations?.readOnlyHint !== true) {

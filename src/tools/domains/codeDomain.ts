@@ -276,7 +276,6 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
         const timeoutSeconds = args.timeoutSeconds ?? 30;
         // Added here, after approval and idempotency hashed the caller's
         // arguments, so the token never enters a hash or a log.
-        const authToken = readPluginToken();
         const timeoutMs = Math.max(
           COMMAND_TIMEOUT_MS,
           (timeoutSeconds + RUN_CODE_START_WINDOW_SECONDS + RUN_CODE_REPLY_MARGIN_SECONDS) * 1000,
@@ -284,6 +283,7 @@ export const CODE_DOMAIN_DEFINITION: DomainToolDefinition = {
         try {
           const response = await withApplicationConnection(
             async (appClient) => {
+              const authToken = readPluginToken();
               if (args.mode === "preview" || args.document !== undefined || args.copyOutputsTo !== undefined || args.keepOutputs !== undefined || timeoutSeconds > 90) {
                 const health = await appClient.sendCommand("getCivil3DHealth", {}) as Record<string, unknown>;
                 const api = typeof health?.runCodeApi === "number" ? health.runCodeApi : 1;

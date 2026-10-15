@@ -5,6 +5,7 @@ describe("plugin runtime domain", () => {
   it("preserves queue, job, and file-log observability fields", () => {
     const health = PLUGIN_DOMAIN_DEFINITION.actions.health;
     const response = health.responseSchema.parse({
+      routing: "fixed",
       connected: true,
       civil3dVersion: "24.3s",
       pluginVersion: "1.2.1.0",
@@ -33,6 +34,7 @@ describe("plugin runtime domain", () => {
     });
 
     expect(response.fileLoggingHealthy).toBe(true);
+    expect(response.routing).toBe("fixed");
     expect(response.logFilePath).toContain("plugin.log");
     expect(response.queueCapacity).toBe(64);
     expect(response.plotApi).toBe(2);

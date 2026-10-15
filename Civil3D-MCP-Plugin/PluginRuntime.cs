@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using App = Autodesk.AutoCAD.ApplicationServices.Application;
+using CoreApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace Civil3DMcpPlugin;
 
@@ -26,10 +27,15 @@ public sealed class JsonRpcDispatchException : Exception
 
 public static class PluginRuntime
 {
-  public const int Port = 8757;
+  public static int Port { get; private set; } = InstanceDiscovery.FirstPort;
 
   private static readonly object Sync = new();
   private static RpcTcpServer? _server;
+  private static InstanceDiscovery? _discovery;
+  private static InstanceOwnership? _ownership;
+  private static readonly Dictionary<Autodesk.AutoCAD.DatabaseServices.Database,
+    Autodesk.AutoCAD.DatabaseServices.DatabaseIOEventHandler> SaveHandlers = new();
+  private static readonly HashSet<EventHandler> PendingDiscoveryRefreshes = new();
   private static readonly AsyncLocal<string?> CurrentRequestOperation = new();
   private static readonly AsyncLocal<string?> CurrentRequestId = new();
   private static readonly AsyncLocal<CancellationToken> CurrentRequestCancellation = new();
@@ -50,10 +56,29 @@ public static class PluginRuntime
         return;
       }
 
-      _server = new RpcTcpServer(Port, HandleRawRequestAsync);
-      _server.Start();
-      // Only the instance that bound the port issues the token runCode checks.
-      RpcAuth.Issue();
+      Port = InstancePortBinder.Bind(port =>
+      {
+        var candidate = new RpcTcpServer(port, HandleRawRequestAsync, InstanceCommands.AfterResponse);
+        try { candidate.Start(); }
+        catch (System.Net.Sockets.SocketException) { candidate.Stop(); return false; }
+        _server = candidate;
+        return true;
+      });
+      try
+      {
+        RpcAuth.TokenPath = InstanceDiscovery.TokenPathForPort(Port);
+        RpcAuth.Issue();
+        _discovery = new InstanceDiscovery(Environment.ProcessId, Port, ownership: _ownership);
+        App.DocumentManager.DocumentCreated += OnDocumentCreated;
+        App.DocumentManager.DocumentToBeDestroyed += OnDocumentClosing;
+        RefreshDiscovery();
+        ScheduleDiscoveryRefresh();
+      }
+      catch
+      {
+        StopServer();
+        throw;
+      }
     }
   }
 
@@ -61,15 +86,113 @@ public static class PluginRuntime
   {
     lock (Sync)
     {
+      if (_server != null)
+      {
+        App.DocumentManager.DocumentCreated -= OnDocumentCreated;
+        App.DocumentManager.DocumentToBeDestroyed -= OnDocumentClosing;
+      }
+      foreach (var (database, handler) in SaveHandlers) database.SaveComplete -= handler;
+      SaveHandlers.Clear();
+      foreach (var handler in PendingDiscoveryRefreshes) CoreApp.Idle -= handler;
+      PendingDiscoveryRefreshes.Clear();
+      InstanceCommands.CancelPendingQuit();
+      if (_discovery != null) _ownership = _discovery.Ownership;
+      // Invalidate the credential before the listener releases its port to another instance.
+      RpcAuth.Revoke();
       _server?.Stop();
       _server = null;
-      RpcAuth.Revoke();
+      _discovery?.Delete();
+      _discovery = null;
       _currentOperation = null;
       _activeOperations = 0;
       _queueDepth = 0;
       _currentRequestId = null;
       _currentOperationStartedAtUnixMs = null;
     }
+  }
+
+  public static string Owner => _discovery?.Owner ?? "user";
+  public static string? OwnerSession => _discovery?.OwnerSession;
+  public static string? ClaimId => _discovery?.ClaimId;
+  public static string? Label => _discovery?.Label;
+
+  internal static bool TryAdoptInstance(string expectedOwnerSession, int expectedOwnerServerPid,
+    DateTimeOffset expectedOwnerServerStartedAtUtc, string ownerSession, string? ownerLabel,
+    int ownerServerPid, DateTimeOffset ownerServerStartedAtUtc) =>
+    _discovery?.TryAdopt(expectedOwnerSession, expectedOwnerServerPid, expectedOwnerServerStartedAtUtc,
+      ownerSession, ownerLabel, ownerServerPid, ownerServerStartedAtUtc) == true;
+
+  private static void OnDocumentCreated(object sender, Autodesk.AutoCAD.ApplicationServices.DocumentCollectionEventArgs args)
+  {
+    try { RefreshDiscovery(); ScheduleDiscoveryRefresh(); }
+    catch (Exception error) { PluginLog.Warn("Discovery", "Could not refresh instance discovery.", error); }
+  }
+
+  private static void OnDocumentClosing(object sender, Autodesk.AutoCAD.ApplicationServices.DocumentCollectionEventArgs args)
+  {
+    try
+    {
+      DetachSaveHandler(args.Document.Database);
+      var documents = App.DocumentManager.Cast<Autodesk.AutoCAD.ApplicationServices.Document>()
+        .Where(doc => !ReferenceEquals(doc, args.Document))
+        .Select(doc => doc.Database.Filename);
+      _discovery?.UpdateDocuments(documents, App.GetSystemVariable("ACADVER")?.ToString());
+      ScheduleDiscoveryRefresh();
+    }
+    catch (Exception error) { PluginLog.Warn("Discovery", "Could not refresh closing document.", error); }
+  }
+
+  private static void ScheduleDiscoveryRefresh()
+  {
+    lock (Sync)
+    {
+      if (_discovery == null || PendingDiscoveryRefreshes.Count != 0) return;
+      var scheduledFor = _discovery;
+      EventHandler? idle = null;
+      idle = (_, _) =>
+      {
+        CoreApp.Idle -= idle;
+        lock (Sync) PendingDiscoveryRefreshes.Remove(idle!);
+        try
+        {
+          if (_server == null || !ReferenceEquals(_discovery, scheduledFor)) return;
+          RefreshDiscovery();
+          if (!scheduledFor.OwnershipFinalized &&
+              App.DocumentManager.Cast<Autodesk.AutoCAD.ApplicationServices.Document>().Any())
+            ScheduleDiscoveryRefresh();
+        }
+        catch (Exception error) { PluginLog.Warn("Discovery", "Could not refresh instance discovery on Idle.", error); }
+      };
+      PendingDiscoveryRefreshes.Add(idle);
+      CoreApp.Idle += idle;
+    }
+  }
+
+  internal static void RefreshDiscovery()
+  {
+    var openDocuments = App.DocumentManager.Cast<Autodesk.AutoCAD.ApplicationServices.Document>().ToArray();
+    foreach (var document in openDocuments) AttachSaveHandler(document.Database);
+    var documents = openDocuments
+      .Select(doc => doc.Database.Filename);
+    _discovery?.UpdateDocuments(documents, App.GetSystemVariable("ACADVER")?.ToString());
+  }
+
+  private static void AttachSaveHandler(Autodesk.AutoCAD.DatabaseServices.Database database)
+  {
+    if (SaveHandlers.ContainsKey(database)) return;
+    Autodesk.AutoCAD.DatabaseServices.DatabaseIOEventHandler handler = (_, _) =>
+    {
+      try { ScheduleDiscoveryRefresh(); }
+      catch (Exception error) { PluginLog.Warn("Discovery", "Could not schedule discovery after save.", error); }
+    };
+    database.SaveComplete += handler;
+    SaveHandlers.Add(database, handler);
+  }
+
+  private static void DetachSaveHandler(Autodesk.AutoCAD.DatabaseServices.Database database)
+  {
+    if (!SaveHandlers.Remove(database, out var handler)) return;
+    database.SaveComplete -= handler;
   }
 
   public static PluginStatus GetStatus()
@@ -127,6 +250,19 @@ public static class PluginRuntime
       return JsonRpcProtocol.SerializeError(id, -32602, "CIVIL3D.INVALID_INPUT", "JSON-RPC params must be an object when provided.");
     }
     var parameters = request["params"] as JsonObject;
+
+    // A discovery-capable listener must never silently receive traffic from the
+    // client's automatic legacy fallback, even if that request has no identity.
+    if (request["legacyFallback"] is JsonValue fallbackValue &&
+        fallbackValue.TryGetValue<bool>(out var legacyFallback) && legacyFallback)
+      return JsonRpcProtocol.SerializeError(id, -32011, "CIVIL3D.STALE_INSTANCE",
+        "Automatic legacy fallback cannot target a discovery-capable Civil 3D instance. Refresh instance discovery and retry.");
+
+    // The listener is bound before token/discovery initialization finishes.
+    // Fail closed here so a stale request cannot wait for startup and then run.
+    if (_discovery?.AllowsRequestIdentity(request["instanceIdentity"]) != true)
+      return JsonRpcProtocol.SerializeError(id, -32011, "CIVIL3D.STALE_INSTANCE",
+        "The selected Civil 3D instance changed. Refresh instance discovery and retry.");
 
     var previousOperation = CurrentRequestOperation.Value;
     var previousRequestId = CurrentRequestId.Value;

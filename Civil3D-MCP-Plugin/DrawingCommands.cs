@@ -21,6 +21,12 @@ public static class DrawingCommands
     object response = new Dictionary<string, object?>
     {
       ["connected"] = true,
+      ["instanceApi"] = InstanceDiscovery.Api,
+      ["pid"] = Environment.ProcessId,
+      ["port"] = PluginRuntime.Port,
+      ["owner"] = PluginRuntime.Owner,
+      ["ownerSession"] = PluginRuntime.OwnerSession,
+      ["label"] = PluginRuntime.Label,
       ["civil3dVersion"] = App.GetSystemVariable("ACADVER")?.ToString(),
       ["pluginVersion"] = typeof(PluginEntry).Assembly.GetName().Version?.ToString(),
       ["runCodeApi"] = RunCodeCommands.ApiVersion,
