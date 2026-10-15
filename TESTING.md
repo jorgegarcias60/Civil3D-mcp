@@ -5,6 +5,55 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Instance follow-ups #36, #37, #38 and #40 (2026-10-15)
+
+Offline checks first (implementation round, before the live fixes below), then the live results on Civil 3D
+2026. The installer check used temporary fake roots.
+
+| Command | Result |
+|---|---|
+| `npm run build` | Exit 0. Includes the packaged UI Automation helper. |
+| `npm run docs:check` | Exit 0. Generated reference current, 212 entries. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\AppData\Local\Civil3D-mcp\refs-2026 -p:NuGetAudit=false --source C:\Users\jorge\.nuget\packages` | Exit 0. 0 warnings, 0 errors. Repeated after net10 with the same result. |
+| `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore -p:Civil3DReferencesPath=C:\Users\jorge\PycharmProjects\Civil3D-mcp\C_References -p:TargetFramework=net10.0-windows -p:NuGetAudit=false --source C:\Users\jorge\.nuget\packages` | Exit 0. 0 warnings, 0 errors. |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net8.0 -p:NuGetAudit=false -p:RestoreSources=C:\Users\jorge\.nuget\packages` | Exit 0. PASS (230 references). |
+| `dotnet run --project tests\RunCodeHarness\RunCodeHarness.csproj -f net10.0 -p:NuGetAudit=false -p:RestoreSources=C:\Users\jorge\.nuget\packages` | Exit 0. PASS (238 references). |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File tests\powershell\install-trusted.check.ps1` | Exit 0. 0 failures. |
+| `node --check scripts/live-multi-instance-smoke.mjs` | Exit 0. |
+| `node --check scripts/copy-static-assets.mjs` | Exit 0. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File C:\CAD-Tools\core\tools\Find-CaseCollisions.ps1 scripts\scan-instance-dialogs.ps1` | Exit 0. No case collisions. |
+| `$env:LOCALAPPDATA = Join-Path $env:TEMP 'c3d-instance-followups-offline'; npx vitest run --configLoader runner --cache=false tests/instance_manager.test.ts tests/instance_dialogs.test.ts tests/multi_instance_smoke.test.ts` | Exit 0. 90 tests passed in 3 files. |
+| `$env:LOCALAPPDATA = Join-Path $env:TEMP 'c3d-instance-followups-offline'; npx vitest run --configLoader runner --cache=false` | Final run: exit 0. 872 tests passed in 61 files (84.94 seconds). |
+
+The initial full Vitest run had 32 failures (839 passed) because existing tests
+read the real plugin discovery folder, which the sandbox cannot access. The
+isolated rerun used the temporary `LOCALAPPDATA` above. It had 870 passes and
+one transient HTTP test failure: Node rejected a random listening port as a
+"bad port". The final full run passed. The initial net8 build without offline flags exited 0 with two
+NU1900 audit warnings; cache-only builds had zero warnings. Harness file-symlink
+checks were skipped because this account lacks the required privilege.
+
+Coverage includes Ignore diagnostics and unknown dialogs, helper rejection of
+stale process identities, timeout ownership and capacity, late attachment,
+process exit, grace expiry, pending stop rules, plugin claims after seven
+minutes and rejection after fifteen, orphan re-adoption, and read-only Design
+Master file validation. Civil 3D 2024/2025/2027 hosts remain untested.
+
+Live, Civil 3D 2026, scratch copies only, next to Jorge's own instance (2026-10-15):
+
+| Check | Result |
+|---|---|
+| `node scripts/live-multi-instance-smoke.mjs A.dwg B.dwg --orphan` | Exit 0: independent ports/tokens/drawings, cap 2 refusal, fixed-port refusal, user-instance guard, stop refuses unsaved changes, user instance untouched, orphan discovery, cross-label refusal, cap 1, same-label re-adoption and discovery cleanup. A first run failed only because Jorge restarted his own Civil 3D mid-run; the smoke now re-reads user instances just before the guard. |
+| Start on a copy with dead xrefs (#36), first try | The dialog was found but its command links expose no UIA pattern (Pane, class Button). Nothing was clicked; #37 returned `status: "starting"` at the 300 s timeout; stopping the pending launch killed only its own process. |
+| #36, after the fixes | "References - Not Found Files" answered with Ignore through the button's BN_CLICKED notification (`method: "button_notify"`); start completed in about 25 s with the missing-references warning and no human click. |
+| #40 | `designMaster: { pipe: "dm-mcp-117008" }` listed on Jorge's instance with the Design Master plugin loaded. |
+| Full vitest with Civil 3D running | 874 passed; tests now use an empty temporary LOCALAPPDATA (previously 24 approval tests failed whenever Civil 3D was open, also on d1a0035). |
+
+Findings fixed during the live run: TDM_CLICK_BUTTON cannot target command links (they have no control id);
+the scanner script became too long for `-EncodedCommand` (spawn ENAMETOOLONG) and now runs with `-File`;
+the result keeps every dialog seen during the start; windows are found by Win32 enumeration of the launched pid,
+so UI Automation never queries another process.
+
 ### Latest orphan policy and routing blockers (2026-10-15)
 
 Changes remain uncommitted in `c3d-multi-instance`. No Autodesk process was

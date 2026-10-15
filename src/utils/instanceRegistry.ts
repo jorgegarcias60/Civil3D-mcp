@@ -23,6 +23,24 @@ export interface CivilInstance {
   documents: string[];
   updatedAtUtc: string;
   responsive?: boolean;
+  designMaster?: { pipe: string; pluginVersion: string };
+  status?: "starting";
+}
+
+// Read-only interoperability with Design Master's PID-based discovery protocol.
+export async function readDesignMasterInstance(pid: number, options: {
+  root?: string; alive?: (pid: number) => boolean; processStartedAtUtc?: string;
+} = {}): Promise<CivilInstance["designMaster"]> {
+  try {
+    const folder = options.root ?? join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "dm-mcp", "instances");
+    const value = JSON.parse(await readFile(join(folder, `${pid}.json`), "utf8"));
+    if (value?.pid !== pid || !Number.isInteger(pid) || pid <= 0 || value.pipe !== `dm-mcp-${pid}`
+      || typeof value.pluginVersion !== "string" || !(options.alive ?? processAlive)(pid)) return undefined;
+    // Design Master writes "started" when its plugin loads; a file older than the process belongs to a reused pid.
+    if (options.processStartedAtUtc !== undefined
+      && !(Date.parse(value.started) >= Date.parse(options.processStartedAtUtc) - 5000)) return undefined;
+    return { pipe: value.pipe, pluginVersion: value.pluginVersion };
+  } catch { return undefined; }
 }
 
 export function pluginDataRoot(): string {
@@ -151,6 +169,7 @@ export async function readInstanceRegistry(options: {
     && Date.parse(starts[i.pid]) === Date.parse(i.startedAtUtc));
   const instances = await Promise.all(matching.map(async instance => ({
     ...instance, ownerLabel: instance.ownerLabel ?? instance.label ?? null,
+    designMaster: await readDesignMasterInstance(instance.pid, { alive: options.alive, processStartedAtUtc: instance.startedAtUtc }),
     orphan: isOrphan(instance, options.alive ?? processAlive, starts),
     responsive: await (options.probe ?? probeInstance)(instance),
   })));

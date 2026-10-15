@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InstanceManager, defaultInstanceDependencies } from "../src/utils/instanceManager.js";
+import { InstanceManager, defaultInstanceDependencies, LAUNCH_GRACE_MS, mergeDialogs } from "../src/utils/instanceManager.js";
 import { sessionId, sessionLabel, setAttachedInstance, attachedInstance, selectDefault, withPinnedEndpoint } from "../src/utils/instanceSession.js";
-import { isOrphan, parseInstance, pluginDataRoot, processStartTimes, readInstanceRegistry, type CivilInstance } from "../src/utils/instanceRegistry.js";
-import { findCivilShortcut, shortcutArguments, windowsScript, launchProcessScript, acquireStartLock, releaseStartLock, type CivilLaunchProof } from "../src/utils/instanceLauncher.js";
+import { isOrphan, parseInstance, pluginDataRoot, processStartTimes, readInstanceRegistry, readDesignMasterInstance, type CivilInstance } from "../src/utils/instanceRegistry.js";
+import { findCivilShortcut, shortcutArguments, windowsScript, launchProcessScript, acquireStartLock, releaseStartLock, launchedProcessAlive, stopLaunchedProcess, type CivilLaunchProof } from "../src/utils/instanceLauncher.js";
 import { readPluginToken } from "../src/utils/pluginAuth.js";
 import { ApprovalPolicyService, isApprovalRequired } from "../src/tools/approvalPolicy.js";
 import { INSTANCE_DOMAIN_DEFINITION } from "../src/tools/domains/instanceDomain.js";
@@ -54,6 +54,8 @@ function manager() {
       label, ownerServerPid: 777, ownerServerStartedAtUtc: "2026-10-15T11:00:00Z", orphan: false })),
     acadPids: vi.fn(async () => [123]),
     alive: vi.fn(() => false), quit: vi.fn(async () => ({})),
+    identityAlive: vi.fn(async () => true), killPending: vi.fn(async () => {}),
+    scanDialogs: vi.fn(async () => ({ dialogs: [], missingXrefs: [] })),
     acquireLock: vi.fn(async (path: string) => {
       try { await writeFile(path, JSON.stringify({ pid: process.pid }), { flag: "wx" }); }
       catch (error) {
@@ -68,6 +70,39 @@ function manager() {
 }
 
 describe("instance registry and selection", () => {
+  it("reads Design Master identity only from the matching live PID file, without changing files", async () => {
+    const folder = join(temp, "dm-mcp", "instances");
+    expect(await readDesignMasterInstance(101)).toBeUndefined();
+    await mkdir(folder, { recursive: true });
+    const file = join(folder, "101.json");
+    const valid = { pid: 101, pipe: "dm-mcp-101", pluginVersion: "1.2", drawing, product: "Civil 3D",
+      started: new Date(Date.parse(own().startedAtUtc) + 10_000).toISOString() };
+    for (const value of ["{", "null", JSON.stringify({ ...valid, pid: 102 }),
+      JSON.stringify({ ...valid, pipe: "dm-mcp-102" }), JSON.stringify({ ...valid, pluginVersion: 2 })]) {
+      await writeFile(file, value);
+      expect(await readDesignMasterInstance(101, { alive: () => true })).toBeUndefined();
+      expect(await readFile(file, "utf8")).toBe(value);
+    }
+    await writeFile(file, JSON.stringify(valid));
+    expect(await readDesignMasterInstance(101, { alive: () => false })).toBeUndefined();
+    await rename(file, join(folder, "102.json"));
+    expect(await readDesignMasterInstance(101, { alive: () => true })).toBeUndefined();
+    await rename(join(folder, "102.json"), file);
+    await writeFile(join(root, "instances", "101.json"), JSON.stringify(own()));
+    const snapshot = await readInstanceRegistry({ root, alive: () => true,
+      startTimes: async () => ({ 101: own().startedAtUtc }), probe: async () => true });
+    expect(snapshot.instances[0].designMaster).toEqual({ pipe: "dm-mcp-101", pluginVersion: "1.2" });
+    // A Design Master file written before this process started belongs to a reused pid.
+    await writeFile(file, JSON.stringify({ ...valid, started: new Date(Date.parse(own().startedAtUtc) - 3_600_000).toISOString() }));
+    expect((await readInstanceRegistry({ root, alive: () => true,
+      startTimes: async () => ({ 101: own().startedAtUtc }), probe: async () => true })).instances[0].designMaster).toBeUndefined();
+    await writeFile(file, JSON.stringify(valid));
+    const { service, deps } = manager(); deps.registry.mockResolvedValue(snapshot);
+    expect((await service.list()).instances[0].designMaster).toEqual(snapshot.instances[0].designMaster);
+    expect((await service.attach({ pid: 101 })).instance?.designMaster).toEqual(snapshot.instances[0].designMaster);
+    expect((await service.start({ drawing })).instance?.designMaster).toEqual(snapshot.instances[0].designMaster);
+    expect(await readFile(file, "utf8")).toBe(JSON.stringify(valid));
+  });
   it("validates the discovery version, pid, port, token path and ownership", () => {
     expect(parseInstance(own(), "101.json")).toBeDefined();
     for (const change of [{ pid: -1 }, { instanceApi: 2 }, { port: 8080 }, { tokenPath: drawing },
@@ -195,6 +230,92 @@ describe("attachment", () => {
 });
 
 describe("start lifecycle", () => {
+  it("returns starting with diagnostics, retains the claim and attaches after late registration", async () => {
+    const { service, deps } = manager();
+    deps.scanDialogs.mockResolvedValue({ dialogs: [
+      { title: "References - Not Found Files", className: "#32770", buttons: ["Ignore"], action: "ignore_invoked" },
+      { title: "Security", className: "#32770", buttons: ["Load", "Cancel"] },
+    ], missingXrefs: ["missing-site.dwg"] } as any);
+    const result = await service.start({ drawing }, 3000);
+    expect(result).toMatchObject({ status: "starting", pid: 101, missingXrefs: ["missing-site.dwg"],
+      warning: expect.stringContaining("missing external references"), dialogs: expect.arrayContaining([
+        expect.objectContaining({ title: "References - Not Found Files", action: "ignore_invoked" }),
+        expect.objectContaining({ title: "Security", buttons: ["Load", "Cancel"] }),
+      ]) });
+    expect(deps.scanDialogs).toHaveBeenCalledTimes(2);
+    const [name] = await readdir(join(root, "claims"));
+    const claim = JSON.parse(await readFile(join(root, "claims", name), "utf8"));
+    expect(Date.parse(claim.expiresAtUtc) - Date.parse(claim.createdAtUtc)).toBe(LAUNCH_GRACE_MS);
+    expect(await service.list()).toMatchObject({ instances: [expect.objectContaining({ pid: 101, status: "starting" })] });
+    expect(await service.attach({})).toMatchObject({ status: "starting", pid: 101 });
+    vi.stubEnv("CIVIL3D_MAX_AGENT_INSTANCES", "1");
+    const other = join(temp, "other.dwg"); await writeFile(other, "fake");
+    await expect(service.start({ drawing: other })).rejects.toThrow("cap (1) reached");
+    instances = [own({ claimId: claim.claimId, startedAtUtc: claim.launchStartedAtUtc })];
+    // Listing may consume the pending reservation before the default attach.
+    expect((await service.list()).instances).toHaveLength(1);
+    expect(await service.attach({})).toMatchObject({ instance: { ownerSession: sessionId, pid: 101 } });
+    expect(attachedInstance()?.pid).toBe(101);
+    expect(await readdir(join(root, "claims"))).toEqual([]);
+  });
+
+  it("keeps a dialog answered with Ignore in the result after it disappears", async () => {
+    const { service, deps } = manager();
+    deps.scanDialogs
+      .mockResolvedValueOnce({ dialogs: [{ title: "Dialog scan failed", className: "", buttons: [], error: "busy" }], missingXrefs: [] } as any)
+      .mockResolvedValueOnce({ dialogs: [{ title: "References - Not Found Files", className: "#32770",
+        buttons: ["Open the External References palette", "Ignore unresolved reference files"],
+        action: "ignore_invoked", method: "button_notify" }], missingXrefs: [] } as any)
+      .mockResolvedValue({ dialogs: [], missingXrefs: [] });
+    const result = await service.start({ drawing }, 7000) as any;
+    expect(result.status).toBe("starting");
+    expect(result.dialogs).toEqual([expect.objectContaining({ title: "References - Not Found Files", action: "ignore_invoked" })]);
+    expect(result.warning).toMatch(/missing external references/);
+  });
+
+  it("merges dialogs by title and class; a newer sighting replaces the older one", () => {
+    const a = { title: "A", className: "#32770", buttons: ["Ignore"], action: "ignore_invoked" as const };
+    const b = { title: "B", className: "#32770", buttons: ["OK"] };
+    expect(mergeDialogs([a], [b])).toEqual([a, b]);
+    expect(mergeDialogs([a, b], [{ ...a, action: "ignore_unavailable" as const }])).toEqual([{ ...a, action: "ignore_unavailable" }, b]);
+  });
+
+  it.each(["process exit", "PID reuse", "grace expiry"])("withdraws a pending launch on %s", async kind => {
+    const { service, deps } = manager();
+    await service.start({ drawing }, 1000);
+    if (kind === "grace expiry") await deps.wait(LAUNCH_GRACE_MS);
+    else deps.identityAlive.mockResolvedValue(false);
+    expect((await service.list()).instances).toEqual([]);
+    expect(await readdir(join(root, "claims"))).toEqual([]);
+    expect(deps.killPending).not.toHaveBeenCalled();
+  });
+
+  it("stops pending launches only with discard and a verified process identity", async () => {
+    const { service, deps } = manager();
+    await service.start({ drawing }, 1000);
+    await expect(service.stop({})).rejects.toThrow("discardChanges: true");
+    expect(deps.killPending).not.toHaveBeenCalled();
+    const target = await service.resolveStopTarget({});
+    await expect(service.stop({ discardChanges: true, targetIdentity: "changed" })).rejects.toThrow("changed after approval");
+    expect(await service.stop({ discardChanges: true, targetIdentity: JSON.stringify([
+      target.pid, target.port, target.startedAtUtc, target.ownerSession, target.claimId,
+    ]) })).toEqual({ stopped: true, pid: 101 });
+    expect(deps.killPending).toHaveBeenCalledExactlyOnceWith(101, target.startedAtUtc);
+    expect(deps.quit).not.toHaveBeenCalled();
+    expect(await readdir(join(root, "claims"))).toEqual([]);
+  });
+
+  it("never kills a pending PID after identity changes or after the helper rejects it", async () => {
+    const { service, deps } = manager();
+    await service.start({ drawing }, 1000);
+    deps.killPending.mockRejectedValue(new Error("process identity changed"));
+    await expect(service.stop({ pid: 101, discardChanges: true })).rejects.toThrow("process identity changed");
+    expect(await readdir(join(root, "claims"))).toHaveLength(1);
+    deps.identityAlive.mockResolvedValue(false);
+    await expect(service.stop({ pid: 101, discardChanges: true })).rejects.toThrow("THIS session");
+    expect(deps.killPending).toHaveBeenCalledOnce();
+  });
+
   it("refuses launch when a claim is renamed between enumeration and reading", async () => {
     const { service, deps } = manager();
     const claimId = "moving-claim";
@@ -309,7 +430,7 @@ describe("start lifecycle", () => {
       expect(claim.launchToken).toBe(launchToken);
       expect(launchToken).toMatch(/^[0-9a-f-]{36}$/);
       expect(claim.launchPid).toBeUndefined();
-      expect(Date.parse(claim.expiresAtUtc) - Date.parse(claim.createdAtUtc)).toBe(300_000);
+      expect(Date.parse(claim.expiresAtUtc) - Date.parse(claim.createdAtUtc)).toBe(LAUNCH_GRACE_MS);
       expect(path).toBe(drawing);
       instances = [own({ claimId: claim.claimId, startedAtUtc: new Date(Date.parse(claim.createdAtUtc) + 1).toISOString() })];
       return { pid: instances[0].pid, startedAtUtc: instances[0].startedAtUtc };
@@ -396,14 +517,15 @@ describe("start lifecycle", () => {
     expect(deps.launch).toHaveBeenCalledOnce();
   });
 
-  it("cleans the claim and shortcut on timeout and reports new acad pids", async () => {
+  it("cleans the claim and shortcut when the launched process exits", async () => {
     const { service, deps } = manager(); let link = "";
     deps.acadPids.mockResolvedValueOnce([]).mockResolvedValueOnce([123]);
     deps.launch.mockImplementation(async (_source, destination) => {
       link = destination; await writeFile(destination, "fake lnk");
       return { pid: 101, startedAtUtc: new Date(deps.now() + 1).toISOString() };
     });
-    await expect(service.start({ drawing }, 2000)).rejects.toThrow("New acad pids: [123]");
+    deps.identityAlive.mockResolvedValue(false);
+    await expect(service.start({ drawing }, 2000)).rejects.toThrow("exited or its identity changed");
     expect(await readdir(join(root, "claims"))).toEqual([]);
     await expect(readFile(link)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -507,6 +629,12 @@ describe("start lifecycle", () => {
 });
 
 describe("stop lifecycle", () => {
+  it.skipIf(process.platform !== "win32")("refuses to kill a live PID with a different creation time", async () => {
+    const starts = await processStartTimes([process.pid]);
+    expect(await launchedProcessAlive(process.pid, starts[process.pid])).toBe(true);
+    expect(await launchedProcessAlive(process.pid, "2000-01-01T00:00:00Z")).toBe(false);
+    await expect(stopLaunchedProcess(process.pid, "2000-01-01T00:00:00Z")).rejects.toThrow("Nothing was killed");
+  }, 20_000);
   it.each(["user", "other"])("never stops a %s instance", async kind => {
     const { service, deps } = manager();
     instances = [own(kind === "user" ? { owner: "user", ownerSession: null, claimId: null } : { ownerSession: "other" })];
