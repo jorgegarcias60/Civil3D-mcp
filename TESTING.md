@@ -5,6 +5,16 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Offline (no Civil 3D needed)
 
+### Per-process COM registration (2026-10-15)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10 (`ComRegistrationChecks`, real Running Object Table, stand-in object) | Pass: display name `!Civil3DMcp.AcadApplication:<pid>`, registration found by that name, second Register a no-op, Revoke removes it, non-positive pid refused. |
+| Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+| `npm run build`, full vitest, `docs:check`, installer check | Pass (874 tests). |
+
+Live test pending: needs a plugin install with Civil 3D closed.
+
 ### Instance follow-ups #36, #37, #38 and #40 (2026-10-15)
 
 Offline checks first (implementation round, before the live fixes below), then the live results on Civil 3D

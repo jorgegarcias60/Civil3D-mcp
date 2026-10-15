@@ -212,6 +212,17 @@ the Design Master plugin has a valid discovery file for that live pid.
 The same field appears in attach and start results. Reading it does not
 change Design Master's files or transfer Civil3D-mcp ownership.
 
+### COM clients and several instances
+
+AutoCAD registers its COM `Application` under one name, and with several
+instances COM hands every client the earliest-started one still running. So
+the plugin also registers its own instance's `Application` in the Running Object
+Table as `!Civil3DMcp.AcadApplication:<pid>` (same user only, removed when the
+plugin stops). A COM client enumerates the ROT, takes that name for the process
+it wants, and still checks the process through `Application.HWND`. CAD-Tools'
+`Civil3D-Instance.ps1` does this. The plugin loads with the first drawing, so an
+instance on the Start tab has no such name yet.
+
 ### What Changed Recently
 
 - Production-ready host execution now includes bounded queues and jobs,

@@ -69,6 +69,7 @@ public static class PluginRuntime
         RpcAuth.TokenPath = InstanceDiscovery.TokenPathForPort(Port);
         RpcAuth.Issue();
         _discovery = new InstanceDiscovery(Environment.ProcessId, Port, ownership: _ownership);
+        RegisterForCom();
         App.DocumentManager.DocumentCreated += OnDocumentCreated;
         App.DocumentManager.DocumentToBeDestroyed += OnDocumentClosing;
         RefreshDiscovery();
@@ -96,6 +97,8 @@ public static class PluginRuntime
       foreach (var handler in PendingDiscoveryRefreshes) CoreApp.Idle -= handler;
       PendingDiscoveryRefreshes.Clear();
       InstanceCommands.CancelPendingQuit();
+      try { ComRegistration.Revoke(); }
+      catch (Exception error) { PluginLog.Warn("ComRegistration", "Could not revoke the per-process COM registration.", error); }
       if (_discovery != null) _ownership = _discovery.Ownership;
       // Invalidate the credential before the listener releases its port to another instance.
       RpcAuth.Revoke();
@@ -109,6 +112,18 @@ public static class PluginRuntime
       _currentRequestId = null;
       _currentOperationStartedAtUnixMs = null;
     }
+  }
+
+  // Lets COM clients (CAD-Tools PowerShell) reach this instance by process id; see ComRegistration. A failure
+  // only costs that reachability, so the plugin keeps running.
+  private static void RegisterForCom()
+  {
+    try
+    {
+      ComRegistration.Register(App.AcadApplication, Environment.ProcessId);
+      PluginLog.Info("ComRegistration", $"Registered {ComRegistration.DisplayName(Environment.ProcessId)} in the Running Object Table.");
+    }
+    catch (Exception error) { PluginLog.Warn("ComRegistration", "Could not register the per-process COM name.", error); }
   }
 
   public static string Owner => _discovery?.Owner ?? "user";

@@ -511,6 +511,7 @@ Expect(unique.Succeeded && again.Succeeded && unique.TypeName != again.TypeName,
 
 RuntimeChecks.Run((condition, name) => Expect(condition, name));
 InstanceDiscoveryChecks.Run((condition, name) => Expect(condition, name));
+ComRegistrationChecks.Run((condition, name) => Expect(condition, name));
 PdfChecks.Run((condition, name) => Expect(condition, name));
 PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));

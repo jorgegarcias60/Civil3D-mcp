@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The plugin registers its instance's AutoCAD `Application` in the Running
+  Object Table as `!Civil3DMcp.AcadApplication:<pid>`, so COM clients (CAD-Tools
+  PowerShell) can reach any instance by process id, not only the earliest-started
+  one. Revoked when the plugin stops; a registration failure only logs a warning.
+
 - Scan dialogs only in the verified agent launch, found by Win32 enumeration of
   its pid. Press Ignore on "References - Not Found Files" (UIA Invoke, else the
   button's BN_CLICKED notification, then BM_CLICK) and report every dialog seen
