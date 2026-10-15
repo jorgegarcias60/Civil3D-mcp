@@ -460,6 +460,13 @@ internal static class ScriptCompiler
       }
     }
 
+    // Preview already refuses every layout change above and rolls back anyway.
+    if (writeMode && !previewMode
+        && FindLayoutViewportViolation(tree, model) is { } layoutViewport)
+    {
+      yield return layoutViewport;
+    }
+
     if (writeMode)
     {
       yield break;
@@ -484,6 +491,54 @@ internal static class ScriptCompiler
           $"Read mode opens objects for read only: {display} is not allowed. Use mode 'write' to change the drawing.");
       }
     }
+  }
+
+  // Issue #43: one write run that created a layout, switched to it and created
+  // and erased viewports crashed AutoCAD at commit (AccessViolation in
+  // FlushGraphics, live, 2026-10-15). Each part alone ran fine in its own run,
+  // so only the combination is refused. SetViewport edits an existing viewport
+  // and neither creates nor erases one, so it is not counted.
+  private const string LayoutManagerTypeName = "Autodesk.AutoCAD.DatabaseServices.LayoutManager";
+  private const string ViewportTypeName = "Autodesk.AutoCAD.DatabaseServices.Viewport";
+
+  private static ScriptDiagnostic? FindLayoutViewportViolation(SyntaxTree tree, SemanticModel model)
+  {
+    var layoutChange = false;
+    SyntaxNode? firstViewport = null;
+    void NoteViewport(SyntaxNode node)
+    {
+      if (MapToScript(node.GetLocation()).Line != 0 && (firstViewport == null || node.SpanStart < firstViewport.SpanStart))
+        firstViewport = node;
+    }
+
+    foreach (var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
+    {
+      if (MapToScript(node.GetLocation()).Line == 0) continue;
+      var info = model.GetSymbolInfo(node);
+      var symbol = info.Symbol ?? info.CandidateSymbols.FirstOrDefault();
+      if (symbol == null) continue;
+      if (InheritsFrom(symbol.ContainingType, LayoutManagerTypeName)
+          && (symbol is IMethodSymbol && symbol.Name is "CreateLayout" or "SetCurrentLayoutId"
+              || symbol is IPropertySymbol && symbol.Name == "CurrentLayout" && IsAssignmentTarget(node)))
+        layoutChange = true;
+      // Erase is declared on DBObject, so the receiver's static type decides.
+      else if (symbol is IMethodSymbol && symbol.Name == "Erase" && MethodReceiver(node) is { } receiver
+          && InheritsFrom(model.GetTypeInfo(receiver).Type as INamedTypeSymbol, ViewportTypeName))
+        NoteViewport(node);
+    }
+
+    foreach (var creation in tree.GetRoot().DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
+    {
+      if (model.GetOperation(creation) is IObjectCreationOperation { Constructor.ContainingType: { } created }
+          && InheritsFrom(created, ViewportTypeName))
+        NoteViewport(creation);
+    }
+
+    if (!layoutChange || firstViewport == null) return null;
+    var (line, column) = MapToScript(firstViewport.GetLocation());
+    return new ScriptDiagnostic(line, column, GuardDiagnosticId,
+      "Changing or creating a layout and creating/erasing viewports in one write run crashed AutoCAD at commit (AccessViolation in FlushGraphics, 2026-10-15). "
+      + "Split it into separate write runs: (1) layout, title block and table without switching layouts, (2) only the CurrentLayout switch, (3) the viewports. See issue #43.");
   }
 
   // Require explicit constant mode/access and constant sharing/options for
