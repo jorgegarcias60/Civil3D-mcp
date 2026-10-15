@@ -4,10 +4,18 @@ import { join } from "node:path";
 
 // Pass data over stdin, never interpolate paths into PowerShell source.
 export async function windowsScript(script: string, input: unknown): Promise<string> {
+  return await runPowerShell(["-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(`$ErrorActionPreference = 'Stop'\n[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\ntry {\n${script}\n} catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }`, "utf16le").toString("base64")], input);
+}
+
+// A script too long for the command line (-EncodedCommand, 32767 characters) runs as a file; it reads stdin itself.
+export async function windowsScriptFile(path: string, input: unknown): Promise<string> {
+  return await runPowerShell(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path], input);
+}
+
+async function runPowerShell(args: string[], input: unknown): Promise<string> {
   return await new Promise((resolve, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-      Buffer.from(`$ErrorActionPreference = 'Stop'\n[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\ntry {\n${script}\n} catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }`, "utf16le").toString("base64")],
-    { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("powershell.exe", args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     let errors = "";
     const timeout = setTimeout(() => { child.kill(); reject(new Error("Windows instance helper timed out.")); }, 20_000);
@@ -76,6 +84,32 @@ export function shortcutArguments(original: string, drawing: string): string {
 }
 
 export interface CivilLaunchProof { pid: number; startedAtUtc: string }
+
+export async function launchedProcessAlive(pid: number, startedAtUtc: string): Promise<boolean> {
+  return JSON.parse(await windowsScript(`
+$data = [Console]::In.ReadToEnd() | ConvertFrom-Json
+try {
+  $target = Get-Process -Id $data.pid -ErrorAction Stop
+  ($target.StartTime.ToUniversalTime() -eq [DateTime]::Parse($data.startedAtUtc).ToUniversalTime()) | ConvertTo-Json
+} catch { 'false' }
+`, { pid, startedAtUtc }));
+}
+
+export async function stopLaunchedProcess(pid: number, startedAtUtc: string): Promise<void> {
+  await windowsScript(`
+$data = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$target = Get-Process -Id $data.pid -ErrorAction Stop
+try {
+  # Reading Handle opens and keeps one process handle: the pid cannot be reused while it is open,
+  # and StartTime and Kill() below both use that same handle.
+  $null = $target.Handle
+  if ($target.StartTime.ToUniversalTime() -ne [DateTime]::Parse($data.startedAtUtc).ToUniversalTime()) {
+    throw 'Pending launch process identity changed. Nothing was killed.'
+  }
+  $target.Kill()
+} finally { $target.Dispose() }
+`, { pid, startedAtUtc });
+}
 
 // Also exercised with a harmless PowerShell child by the offline tests.
 export const launchProcessScript = `

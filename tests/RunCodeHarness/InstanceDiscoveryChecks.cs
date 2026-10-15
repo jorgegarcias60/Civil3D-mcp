@@ -9,6 +9,7 @@ internal static class InstanceDiscoveryChecks
 {
   internal static void Run(Action<bool, string> expect)
   {
+    CheckGraceClaims(expect);
     var now = Stopwatch.GetTimestamp();
     var deadline = new IdleDeadline(TimeSpan.FromSeconds(10), now);
     expect(!deadline.IsExpired(now) &&
@@ -145,6 +146,35 @@ internal static class InstanceDiscoveryChecks
     CheckLaunchProof(expect);
     CheckAdoption(expect);
     CheckIsolatedProcessContention(expect);
+  }
+
+  private static void CheckGraceClaims(Action<bool, string> expect)
+  {
+    var root = Path.Combine(Path.GetTempPath(), "c3d-grace-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(Path.Combine(root, "claims"));
+    try
+    {
+      foreach (var expired in new[] { false, true })
+      {
+        var claimId = Guid.NewGuid().ToString("D");
+        var token = Guid.NewGuid().ToString("D");
+        var started = DateTimeOffset.UtcNow.AddMinutes(expired ? -16 : -7);
+        var drawing = Path.Combine(root, expired ? "expired.dwg" : "late.dwg");
+        File.WriteAllText(Path.Combine(root, "claims", claimId + ".json"), JsonSerializer.Serialize(new
+        {
+          claimId, drawing, ownerSession = "grace-session", launchToken = token,
+          launchPid = 28001, launchStartedAtUtc = started,
+          createdAtUtc = started.AddSeconds(-1), expiresAtUtc = started.AddMinutes(15),
+        }));
+        var discovery = new InstanceDiscovery(28001, 8757, root, privateFiles: false,
+          startedAtUtc: started, launchToken: token);
+        discovery.UpdateDocuments(new[] { drawing }, "25.1");
+        expect(discovery.Owner == (expired ? "user" : "agent"), expired
+          ? "plugin refuses claim after the fifteen-minute grace period"
+          : "plugin claims a seven-minute-old launch within the fifteen-minute grace period");
+      }
+    }
+    finally { Directory.Delete(root, true); }
   }
 
   private static void CheckAdoption(Action<bool, string> expect)

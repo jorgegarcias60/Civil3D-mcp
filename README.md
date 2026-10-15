@@ -102,9 +102,25 @@ and Save As as well as open/close.
   Missing launch proof refuses attachment and leaves the process for inspection.
   The plugin retries claim-reader contention on Idle before fixing ownership.
   The server waits up to 300 seconds, with MCP progress heartbeats, for the plugin
-  to claim that drawing and answer health. Timeout deletes the pending claim and
-  shortcut; it reports observed instances and new acad pids. A new pid without
-  discovery means the plugin did not load. The process is left for inspection.
+  to claim that drawing and answer health. While waiting, it scans only the
+  verified launched process's dialogs about every two seconds. It finds that
+  process's windows by Win32 enumeration of its pid, so no other process is queried.
+  For the English "References - Not Found Files" dialog, it presses the button
+  whose text starts with "Ignore": through UI Automation Invoke when available,
+  otherwise (task dialog command links in Civil 3D 2026 expose no pattern) by
+  sending the button's own BN_CLICKED notification to its host window, then
+  BM_CLICK to that button. Each message is sent only after the process, dialog
+  title and class, and button text are checked again. It returns a warning,
+  `missingXrefs` (dialog lines that look like file names, when the dialog
+  exposes them) and every dialog seen during the start, with `action` and `method`.
+  Other standard or modal dialogs are reported with their title, class and
+  buttons; they are never clicked. The main window and palettes are not reported.
+  No keyboard, mouse, focus or profile changes are used.
+  If the process is still alive at timeout, start returns `status: "starting"`
+  and its `pid`. Its claim remains reserved for fifteen minutes total from launch.
+  `list` shows the pending launch. Once the plugin registers, `attach` by pid
+  or this session's default selection attaches with agent ownership. Exited
+  processes and expired claims release their reservation.
 - The default cap is three live agent instances, including orphans, besides user instances. Set
   `CIVIL3D_MAX_AGENT_INSTANCES` to change it. Starts are serialized across server
   processes. The start lock records the server pid and creation time. A later
@@ -119,7 +135,10 @@ and Save As as well as open/close.
   `discardChanges: true`. The plugin closes documents and quits on its main thread.
   Both quit stages wake the host message loop. Pending callbacks expire, so later
   interaction cannot trigger a delayed quit after failure. The server waits 60
-  seconds for exit; it never kills the process.
+  seconds for exit. A pending launch without a registered plugin can only be
+  stopped with `discardChanges: true`, since unsaved state cannot be checked.
+  That stop kills only the process whose pid and creation time still match the
+  launch proof. Registered instances use the plugin's normal quit path.
 
 `start` and `stop` use the existing approval policy. Request approval with
 `civil3d_request_approval`, `toolName: "civil3d_instance"`, the action and identical
@@ -159,8 +178,9 @@ seconds so the 300-second start wait can finish. Cancelling a start keeps its
 ownership claim until expiry; inspect `civil3d_instance list` before retrying.
 The minimized launch helper reads plain JSON and publishes its process proof
 directly to the claim. A late helper can finish after the server's launch wait
-fails. Its temporary files remain until the claim expires. A full start timeout
-removes the pending claim. Successful attachment removes the taken claim.
+fails. Its temporary files remain until the claim expires. A live process keeps
+its pending claim through the fifteen-minute grace period after a start timeout.
+Successful attachment removes the taken claim.
 Attached drawing calls validate and probe only their selected instance. Listing,
 starting and attaching still inspect all live instances. Retry results are scoped
 to process identity. `attach` and `detach` do not accept `idempotencyKey`.
@@ -174,12 +194,23 @@ recognizes 2024 and 2025 shortcuts. Use a plugin build compatible with that host
 The opt-in live check is
 `node scripts/live-multi-instance-smoke.mjs C:\scratch\A.dwg C:\scratch\B.dwg`.
 Both drawings must be disposable and closed. Existing user instances stay open.
+Add `--orphan` to check recovery after killing a smoke session's MCP server.
+It uses a scratch copy, checks cross-label refusal and the cap, then re-adopts
+with the original job label, reads the drawing and stops the instance.
 The script checks user process identities and document snapshots before and after,
 and verifies its target pid and drawing before editing. Cleanup discovers processes
 claimed by each test session even after a failed start, and reports unresolved pids.
 After an uncertain launch, cleanup keeps its owning server alive through claim
 expiry and stops late discoveries before closing the session. `--orphans` is unsupported.
 It preserves the temporary cap-check drawing when cleanup cannot verify its process exited.
+
+### Same instance as the Design Master MCP
+
+Attach by `pid` in both MCP servers to use the same Civil 3D process.
+`civil3d_instance list` shows `designMaster: { pipe, pluginVersion }` when
+the Design Master plugin has a valid discovery file for that live pid.
+The same field appears in attach and start results. Reading it does not
+change Design Master's files or transfer Civil3D-mcp ownership.
 
 ### What Changed Recently
 

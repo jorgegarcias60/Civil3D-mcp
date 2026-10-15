@@ -1,9 +1,10 @@
 // Opt-in LIVE check. Both arguments must be disposable, saved scratch DWGs.
 // Starts two Civil 3D processes, edits A in memory and discards their changes.
 //   node scripts/live-multi-instance-smoke.mjs C:\scratch\A.dwg C:\scratch\B.dwg
+// Add --orphan to exercise server loss and same-label readoption on a third copy.
 import assert from "node:assert/strict";
 import { copyFile, mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,15 +12,21 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { drainServerStderr } from "./server-stderr.mjs";
 
 const sessions = [];
+const deadServers = new Set();
 const started = new Map();
 const uncertainStarts = new Map();
-// InstanceManager keeps a launch claim for up to five minutes. Start the
-// cleanup window when the failed response arrives, then allow a brief interval
-// for a claim taken just before expiry to finish publishing discovery.
-const CLAIM_WINDOW_MS = 330_000;
+// The start claim can survive for fifteen minutes. Allow discovery to publish
+// just before expiry, including when a start response was lost.
+const CLAIM_WINDOW_MS = 900_000;
 const DISCOVERY_GRACE_MS = 2_000;
 let temp;
 let capDrawing;
+let orphanDrawing;
+let orphanOwner;
+let orphanRescuer;
+let orphanPid;
+const discoveryPath = pid => join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"),
+  "Civil3DMcpPlugin", "instances", `${pid}.json`);
 const text = reply => (reply.content ?? []).map(c => c.text ?? "").join("\n");
 const same = (a, b) => resolve(a).toLowerCase() === resolve(b).toLowerCase();
 
@@ -60,9 +67,75 @@ async function start(s, drawing) {
   let r;
   try { r = result(await approved(s, "civil3d_instance", { action: "start", drawing })); }
   catch (error) { uncertainStarts.set(s, Date.now() + CLAIM_WINDOW_MS + DISCOVERY_GRACE_MS); throw error; }
-  started.set(s, r.instance);
+  if (r.status === "starting") {
+    uncertainStarts.set(s, Date.now() + CLAIM_WINDOW_MS + DISCOVERY_GRACE_MS);
+    const deadline = Date.now() + CLAIM_WINDOW_MS;
+    while (Date.now() < deadline) {
+      const listed = result(await call(s, "civil3d_instance", { action: "list" }));
+      const found = listed.instances.find(i => i.owner === "agent" && i.ownerSession === s.sessionId
+        && i.responsive && i.documents.some(d => same(d, drawing)));
+      if (found) {
+        r = { instance: found };
+        if (!found.attachedToThisSession) r = result(await call(s, "civil3d_instance", { action: "attach", pid: found.pid }));
+        break;
+      }
+      await delay(1000);
+    }
+    assert(r.instance, `Pending start for ${drawing} did not register within fifteen minutes.`);
+  }
   assert.equal(r.instance.owner, "agent");
+  started.set(s, r.instance);
+  uncertainStarts.delete(s);
   return r.instance;
+}
+
+async function waitForInstance(s, predicate, description) {
+  const deadline = Date.now() + 30_000;
+  do {
+    const instances = result(await call(s, "civil3d_instance", { action: "list" })).instances;
+    const found = instances.find(predicate);
+    if (found) return found;
+    await delay(500);
+  } while (Date.now() < deadline);
+  throw new Error(`Timed out waiting for ${description}.`);
+}
+
+async function orphanPhase(source, capDrawing) {
+  orphanDrawing = join(temp, "orphan-check.dwg");
+  await copyFile(source, orphanDrawing);
+  const a = orphanOwner = await session("smoke-orphan-a");
+  const b = await session("smoke-orphan-b", "1");
+  const c = orphanRescuer = await session("smoke-orphan-a");
+  const owned = await start(a, orphanDrawing);
+  orphanPid = owned.pid;
+  assert(Number.isInteger(a.transport.pid) && a.transport.pid > 0, "Missing session A MCP server pid.");
+  process.kill(a.transport.pid);
+  deadServers.add(a);
+  const orphan = await waitForInstance(b, i => i.pid === owned.pid && i.orphan === true
+    && i.responsive && i.owner === "agent", "orphan discovery");
+  assert.equal(orphan.ownerLabel ?? orphan.label, "smoke-orphan-a");
+  refused(await call(b, "civil3d_instance", { action: "attach", pid: owned.pid }), /adoptOrphan: true/i);
+  let capReply;
+  try { capReply = await approved(b, "civil3d_instance", { action: "start", drawing: capDrawing }); }
+  catch (error) { uncertainStarts.set(b, Date.now() + CLAIM_WINDOW_MS + DISCOVERY_GRACE_MS); throw error; }
+  if (!capReply.isError && result(capReply).instance) started.set(b, result(capReply).instance);
+  else if (!/cap \(1\) reached/i.test(text(capReply))) uncertainStarts.set(b, Date.now() + CLAIM_WINDOW_MS + DISCOVERY_GRACE_MS);
+  refused(capReply, /cap \(1\) reached/i);
+  // Same-label attach readopts the orphan without adoptOrphan: true, even if
+  // unrelated user instances are also present.
+  const attachment = result(await call(c, "civil3d_instance", { action: "attach", pid: owned.pid }));
+  assert.equal(attachment.adopted, true);
+  const read = await run(c, "return new { drawing = Doc.Name };", "read");
+  assert(same(read.drawing, orphanDrawing), "Same-label session reached the wrong drawing.");
+  const adopted = await waitForInstance(c, i => i.pid === owned.pid && i.ownerSession === c.sessionId
+    && i.orphan === false, "same-label readoption");
+  assert.equal(adopted.startedAtUtc, owned.startedAtUtc);
+  result(await approved(c, "civil3d_instance", { action: "stop", pid: owned.pid, discardChanges: true }));
+  started.delete(a);
+  orphanPid = undefined;
+  try { await stat(discoveryPath(owned.pid)); throw new Error(`Discovery file remains for stopped pid ${owned.pid}.`); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  console.error("PASS orphan discovery, cross-label refusal, cap 1, same-label readoption and discovery cleanup");
 }
 
 async function run(s, code, mode = "read") {
@@ -73,8 +146,9 @@ async function run(s, code, mode = "read") {
 
 async function main() {
   assert(!process.env.CIVIL3D_PORT?.trim(), "Unset CIVIL3D_PORT before the multi-instance smoke; fixed routing disables discovery.");
-  assert(!process.argv.includes("--orphans"), "--orphans is unsupported; no Civil 3D processes were launched.");
-  const args = process.argv.slice(2);
+  assert(!process.argv.includes("--orphans"), "--orphans is unsupported; use --orphan for the opt-in orphan check.");
+  const orphanMode = process.argv.includes("--orphan");
+  const args = process.argv.slice(2).filter(arg => arg !== "--orphan");
   assert.equal(args.length, 2, "Supply exactly two disposable scratch DWG paths.");
   for (const path of args) {
     assert(isAbsolute(path) && /\.dwg$/i.test(path) && (await stat(path)).isFile(), "Supply absolute existing .dwg paths.");
@@ -89,7 +163,7 @@ async function main() {
   const before = result(await call(s1, "civil3d_instance", { action: "list" }));
   assert(!before.instances.some(i => i.documents.some(d => same(d, a) || same(d, b))), "Scratch DWGs are already open. Close them before this test.");
   assert.equal(before.instances.filter(i => i.owner === "agent").length, 0, "Stop existing agent instances before this test; user instances may stay open.");
-  const users = before.instances.filter(i => i.owner === "user");
+  let users = before.instances.filter(i => i.owner === "user");
   const i1 = await start(s1, a);
   const i2 = await start(s2, b);
   assert.notEqual(i1.pid, i2.pid);
@@ -121,6 +195,8 @@ async function main() {
   assert.equal(fixedHealth.status, "not attached");
   console.error("PASS explicit CIVIL3D_PORT refuses another session's agent instance and health reports fixed routing");
   refused(await call(s1, "civil3d_instance", { action: "attach", pid: i2.pid }), /force: true/i);
+  // Jorge may restart his own Civil 3D while the smoke runs: check the user instances that are live now.
+  users = result(await call(s3, "civil3d_instance", { action: "list" })).instances.filter(i => i.owner === "user");
   for (const user of users) {
     refused(await call(s3, "civil3d_instance", { action: "attach", pid: user.pid }), /userInstance: true/i);
     // No successful user attachment and no plugin operations against user pids.
@@ -151,6 +227,7 @@ async function main() {
       user.documents.map(d => resolve(d).toLowerCase()).sort(), `User instance ${user.pid} documents changed.`);
   }
   console.error("PASS both owned instances stopped; user instances untouched");
+  if (orphanMode) await orphanPhase(a, c);
 }
 
 try { await main(); }
@@ -162,8 +239,33 @@ catch (error) {
   // A start may claim a process and fail before discovery. Keep its owning
   // server alive until that claim expires, stopping any late discoveries.
   let preserveTemp = false;
+  if (orphanPid) {
+    // The owner server is gone. Only the live same-label server can acquire
+    // ownership and stop this process during cleanup.
+    try {
+      if (!orphanRescuer) orphanRescuer = await session("smoke-orphan-a");
+      const found = result(await call(orphanRescuer, "civil3d_instance", { action: "list" })).instances
+        .find(i => i.pid === orphanPid);
+      if (found?.ownerSession !== orphanRescuer.sessionId) {
+        assert(found?.orphan === true, `Pid ${orphanPid} is not an adoptable orphan.`);
+        result(await call(orphanRescuer, "civil3d_instance", { action: "attach", pid: orphanPid }));
+      }
+      if (found) {
+        result(await approved(orphanRescuer, "civil3d_instance", { action: "stop", pid: orphanPid, discardChanges: true }));
+        started.delete(orphanOwner);
+        orphanPid = undefined;
+      } else {
+        try { await stat(discoveryPath(orphanPid)); preserveTemp = true; }
+        catch (error) { if (error.code !== "ENOENT") throw error; orphanPid = undefined; }
+      }
+    } catch (error) {
+      console.error(`UNRESOLVED orphan pid ${orphanPid}, drawing ${orphanDrawing}:`, error);
+      preserveTemp = true;
+      process.exitCode = 1;
+    }
+  }
   for (const s of sessions) {
-    if (!s.sessionId) continue;
+    if (!s.sessionId || deadServers.has(s)) continue;
     const deadline = uncertainStarts.get(s) ?? 0;
     const failedStops = new Set();
     do {
@@ -171,7 +273,7 @@ catch (error) {
       try { instances = result(await call(s, "civil3d_instance", { action: "list" })).instances; }
       catch (error) {
         console.error(`Cleanup could not list session ${s.sessionId}:`, error);
-        if (capDrawing) preserveTemp = true;
+        if (capDrawing || orphanDrawing) preserveTemp = true;
         process.exitCode = 1;
         instances = started.has(s) ? [started.get(s)] : [];
       }
@@ -182,7 +284,8 @@ catch (error) {
           failedStops.add(instance.pid);
           console.error(`Cleanup failed for session-owned pid ${instance.pid} (${instance.startedAtUtc}):`, error);
           console.error(`UNRESOLVED session ${s.sessionId} pid ${instance.pid}, drawing(s) ${JSON.stringify(instance.documents)}`);
-          if (instance.documents?.some(d => capDrawing && same(d, capDrawing))) preserveTemp = true;
+          if (instance.documents?.some(d => (capDrawing && same(d, capDrawing))
+            || (orphanDrawing && same(d, orphanDrawing)))) preserveTemp = true;
           process.exitCode = 1;
         }
       }
@@ -194,20 +297,22 @@ catch (error) {
         .filter(i => i.owner === "agent" && i.ownerSession === s.sessionId && i.claimId);
       for (const i of remaining) {
         console.error(`UNRESOLVED session ${s.sessionId} pid ${i.pid}, drawing(s) ${JSON.stringify(i.documents)}`);
-        if (i.documents?.some(d => capDrawing && same(d, capDrawing))) preserveTemp = true;
+        if (i.documents?.some(d => (capDrawing && same(d, capDrawing))
+          || (orphanDrawing && same(d, orphanDrawing)))) preserveTemp = true;
         process.exitCode = 1;
       }
     } catch (error) {
       console.error(`Cleanup could not verify session ${s.sessionId}:`, error);
-      if (capDrawing) preserveTemp = true;
+      if (capDrawing || orphanDrawing) preserveTemp = true;
       process.exitCode = 1;
     }
   }
   for (const s of sessions) {
+    if (deadServers.has(s)) continue;
     try { await s.client.close(); } catch (error) { console.error(error); process.exitCode = 1; }
   }
   if (temp) {
-    if (preserveTemp) console.error(`Preserved temporary drawing for unresolved process: ${capDrawing}`);
+    if (preserveTemp) console.error(`Preserved temporary drawings for unresolved process: ${temp}`);
     else {
       try { await rm(temp, { recursive: true, force: true }); }
       catch (error) { console.error(error); process.exitCode = 1; }

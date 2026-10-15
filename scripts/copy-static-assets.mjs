@@ -13,3 +13,6 @@ const videoCatalogSource = path.join(repositoryRoot, "autodesk_videos.json");
 const videoCatalogOutput = path.join(repositoryRoot, "build", "help", "data", "autodesk_videos.json");
 await mkdir(path.dirname(videoCatalogOutput), { recursive: true });
 await copyFile(videoCatalogSource, videoCatalogOutput);
+
+await copyFile(path.join(repositoryRoot, "scripts", "scan-instance-dialogs.ps1"),
+  path.join(repositoryRoot, "build", "utils", "scan-instance-dialogs.ps1"));

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Scan dialogs only in the verified agent launch, found by Win32 enumeration of
+  its pid. Press Ignore on "References - Not Found Files" (UIA Invoke, else the
+  button's BN_CLICKED notification, then BM_CLICK) and report every dialog seen
+  during the start. Only standard and modal dialogs are reported, not the main
+  window or palettes. Verified live on Civil 3D 2026. Fixes #36.
+- Keep timed-out launches agent-owned for a fifteen-minute grace period. List
+  pending launches, attach after registration and require discard to stop them.
+  Stopping a pending launch holds the process handle from the identity check to
+  the kill, so a reused pid is never killed. Fixes #37.
+- Add the opt-in `--orphan` live smoke phase for re-adoption after server exit.
+  Fixes #38.
+- Show the Design Master pipe and plugin version for the same live pid. A Design
+  Master file older than the process (a reused pid) is ignored. Fixes #40.
+- Tests use an empty temporary LOCALAPPDATA, so a running Civil 3D no longer
+  fails 24 approval tests.
+
 - Capture drawing attachments before preparation and progress notifications.
   Fixes client-approved run-code writes switching targets during concurrent attachment.
 - Mark undiscovered fixed-port requests as legacy-only unless explicitly authorized.

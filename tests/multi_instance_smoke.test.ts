@@ -12,13 +12,15 @@ const source = readFileSync(new URL("../scripts/live-multi-instance-smoke.mjs", 
 async function smoke(options: { thirdSucceeds?: boolean; userChange?: "documents" | "startedAtUtc" | "added";
   failedStartClaim?: boolean; lateStartClaim?: boolean; capLateStartClaim?: boolean;
   lateDiscoveryAt?: number; failedReplyDelayMs?: number; refuseCleanup?: boolean; noUser?: boolean;
-  fixedPort?: boolean; orphans?: boolean } = {}) {
+  fixedPort?: boolean; orphans?: boolean; orphan?: boolean } = {}) {
   const stopped: number[] = [];
   const closed: number[] = [];
   const errors: string[] = [];
   const writes: string[] = [];
   const removed: string[] = [];
   const events: string[] = [];
+  const killed: number[] = [];
+  const copies: string[] = [];
   const instances = new Map<number, any>();
   let nextSession = 0;
   let afterStops = false;
@@ -30,6 +32,8 @@ async function smoke(options: { thirdSucceeds?: boolean; userChange?: "documents
   const error = (message: string) => ({ isError: true, content: [{ text: message }] });
   class Client {
     id = ++nextSession;
+    label: string;
+    constructor({ name }: { name: string }) { this.label = name; }
     async connect() {}
     async close() { closed.push(this.id); events.push(`close:${this.id}`); }
     async callTool({ name, arguments: args }: any) {
@@ -39,7 +43,7 @@ async function smoke(options: { thirdSucceeds?: boolean; userChange?: "documents
           writes.push(args.code);
           return ok({ status: "ok", result: "line" });
         }
-        const drawing = this.id === 1 ? A : B;
+        const drawing = this.id === 1 ? A : this.id === 2 ? B : win32.join("C:\\temp\\smoke", "orphan-check.dwg");
         return ok({ status: "ok", result: { drawing, documents: [drawing] } });
       }
       if (name === "civil3d_drawing" && args.action === "info") {
@@ -56,12 +60,15 @@ async function smoke(options: { thirdSucceeds?: boolean; userChange?: "documents
         if (afterStops && options.userChange === "startedAtUtc") currentUser.startedAtUtc = "2026-01-02T00:00:00Z";
         const added = afterStops && options.userChange === "added"
           ? [{ ...currentUser, pid: 100 }] : [];
-        return ok({ sessionId: `s${this.id}`, instances: [...(options.noUser ? [] : [currentUser]), ...added, ...instances.values()] });
+        return ok({ sessionId: `s${this.id}`, instances: [...(options.noUser ? [] : [currentUser]), ...added,
+          ...[...instances.values()].map(i => ({ ...i, attachedToThisSession: i.ownerSession === `s${this.id}` }))] });
       }
       if (args.action === "start") {
+        if (this.id === 6 && options.orphan) return error("Agent instance cap (1) reached");
         if (this.id === 3 && !options.thirdSucceeds && !options.capLateStartClaim) return error("Agent instance cap (2) reached");
         const instance = { pid: this.id, port: 8756 + this.id, owner: "agent", ownerSession: `s${this.id}`,
-          claimId: `claim${this.id}`, startedAtUtc: `2026-01-0${this.id}T00:00:00Z`, documents: [args.drawing] };
+          claimId: `claim${this.id}`, startedAtUtc: `2026-01-0${this.id}T00:00:00Z`, documents: [args.drawing],
+          ownerLabel: this.label, orphan: false, responsive: true };
         if ((this.id === 1 && options.lateStartClaim) || (this.id === 3 && options.capLateStartClaim)) lateInstance = instance;
         else instances.set(instance.pid, instance);
         if ((this.id === 1 && options.lateStartClaim) || (this.id === 3 && options.capLateStartClaim)) {
@@ -71,7 +78,18 @@ async function smoke(options: { thirdSucceeds?: boolean; userChange?: "documents
         if (this.id === 1 && options.failedStartClaim) return error("Civil 3D start timed out after claim");
         return ok({ instance });
       }
-      if (args.action === "attach") return error(args.pid === 99 ? "userInstance: true required" : "force: true required");
+      if (args.action === "attach") {
+        if (args.pid === 99) return error("userInstance: true required");
+        const found = instances.get(args.pid);
+        if (found?.orphan) {
+          if (this.label !== found.ownerLabel) return error("adoptOrphan: true required");
+          found.ownerSession = `s${this.id}`;
+          found.orphan = false;
+          events.push(`adopt:${args.pid}:${this.id}`);
+          return ok({ instance: found, adopted: true });
+        }
+        return error("force: true required");
+      }
       if (args.action === "stop") {
         if (!args.discardChanges) return error("unsaved changes");
         if (options.refuseCleanup) return error("instance not responsive");
@@ -85,17 +103,32 @@ async function smoke(options: { thirdSucceeds?: boolean; userChange?: "documents
       throw new Error(`Unexpected action ${args.action}`);
     }
   }
-  const processMock = { argv: ["node", "smoke", A, B, ...(options.orphans ? ["--orphans"] : [])],
-    env: options.fixedPort ? { CIVIL3D_PORT: "8757" } : {}, execPath: "node", cwd: () => ".", exitCode: 0 };
+  const processMock = { argv: ["node", "smoke", A, B, ...(options.orphans ? ["--orphans"] : []),
+      ...(options.orphan ? ["--orphan"] : [])],
+    env: options.fixedPort ? { CIVIL3D_PORT: "8757" } : { LOCALAPPDATA: "C:\\local" },
+    execPath: "node", cwd: () => ".", exitCode: 0,
+    kill: (pid: number) => {
+      killed.push(pid);
+      const found = instances.get(pid - 1000);
+      if (found) found.orphan = true;
+      events.push(`kill:${pid}`);
+    } };
   await runInNewContext(`(async () => { ${source}\n })()`, {
-    assert, Client, StdioClientTransport: class { stderr = null; }, drainServerStderr: () => () => {},
-    copyFile: async () => {}, mkdtemp: async () => "C:\\temp\\smoke", rm: async (path: string) => { removed.push(path); },
-    stat: async () => ({ isFile: () => true }), tmpdir: () => "C:\\temp",
+    assert, Client, StdioClientTransport: class { stderr = null; pid = nextSession + 1001; }, drainServerStderr: () => () => {},
+    copyFile: async (_from: string, to: string) => { copies.push(to); },
+    mkdtemp: async () => "C:\\temp\\smoke", rm: async (path: string) => { removed.push(path); },
+    stat: async (path: string) => {
+      if (options.orphan && /\\instances\\5\.json$/i.test(path) && !instances.has(5)) {
+        const error: any = new Error("not found"); error.code = "ENOENT"; throw error;
+      }
+      return { isFile: () => true };
+    },
+    homedir: () => "C:\\home", tmpdir: () => "C:\\temp",
     Date: { now: () => now }, delay: async (ms: number) => { now += ms; },
     isAbsolute: win32.isAbsolute, join: win32.join, resolve: win32.resolve,
     process: processMock, console: { error: (...args: any[]) => errors.push(args.map(String).join(" ")) },
   });
-  return { stopped, closed, events, errors: errors.join("\n"), exitCode: processMock.exitCode, writes, removed, now };
+  return { stopped, closed, events, killed, copies, errors: errors.join("\n"), exitCode: processMock.exitCode, writes, removed, now };
 }
 
 it("passes when user processes and drawings are unchanged", async () => {
@@ -132,6 +165,20 @@ it("refuses unsupported orphan mode before creating sessions or scratch files", 
   expect(run.errors).toMatch(/--orphans is unsupported/);
   expect(run.closed).toEqual([]);
   expect(run.removed).toEqual([]);
+});
+
+it("runs opt-in orphan recovery through a live same-label server", async () => {
+  const run = await smoke({ orphan: true });
+  expect(run.exitCode).toBe(0);
+  expect(run.copies).toEqual(["C:\\temp\\smoke\\cap-check.dwg", "C:\\temp\\smoke\\orphan-check.dwg"]);
+  expect(run.killed).toEqual([1005]);
+  expect(run.events).toContain("adopt:5:7");
+  expect(run.events.indexOf("kill:1005")).toBeLessThan(run.events.indexOf("adopt:5:7"));
+  expect(run.events.indexOf("adopt:5:7")).toBeLessThan(run.events.indexOf("stop:5"));
+  expect(run.stopped).toEqual([1, 2, 5]);
+  expect(run.closed).toEqual([1, 2, 3, 4, 6, 7]);
+  expect(run.errors).toContain("PASS orphan discovery, cross-label refusal, cap 1, same-label readoption and discovery cleanup");
+  expect(run.removed).toContain("C:\\temp\\smoke");
 });
 
 it("cleans up an unexpectedly successful third start before closing sessions", async () => {
@@ -185,7 +232,7 @@ it("reports a claimed process that cleanup cannot stop", async () => {
 it("retains the cap-check drawing when its process cannot be stopped", async () => {
   const run = await smoke({ thirdSucceeds: true, refuseCleanup: true });
   expect(run.exitCode).toBe(1);
-  expect(run.errors).toMatch(/Preserved temporary drawing for unresolved process: C:\\temp\\smoke\\cap-check.dwg/);
+  expect(run.errors).toMatch(/Preserved temporary drawings for unresolved process: C:\\temp\\smoke/);
   expect(run.removed).not.toContain("C:\\temp\\smoke");
 });
 
