@@ -10,8 +10,9 @@ using App = Autodesk.AutoCAD.ApplicationServices.Application;
 namespace Civil3DMcpPlugin;
 
 /// <summary>
-/// Handlers for the civil3d_plot domain: layout/page-setup/plotter discovery
-/// and PDF output of paper-space layouts.
+/// Handlers for the civil3d_plot domain: layout/page-setup/plotter discovery,
+/// PDF output of paper-space layouts, and the PNG review render of them
+/// (plotLayoutsToPng: the same -PLOT driver on "PublishToWeb PNG.pc3").
 ///
 /// Implementation choice (why commands, not PlotEngine):
 ///   Live testing against Civil 3D 2027 (civil3d-automation docs/FINDINGS.md)
@@ -260,99 +261,185 @@ public static class PlotCommands
       }
 
       // 3. Plot, one -PLOT per layout, with sysvars saved and restored.
-      var results = new List<Dictionary<string, object?>>();
+      return await RunPlotBatchAsync(doc, jobs, overwrite, continueOnError, cancellationToken);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // plotLayoutsToPng
+  // -------------------------------------------------------------------------
+
+  // Review render of paper-space layouts (issue #45): one PNG per layout on
+  // "PublishToWeb PNG.pc3", always overwritten, so a layout can be looked at
+  // before the one PDF is plotted. Same -PLOT driver, regen, batch loop and
+  // output boundary as plotLayoutsToPdf; the layout and its page setup are
+  // never changed ("Save changes to page setup? No").
+  public static Task<object?> PlotLayoutsToPngAsync(JsonObject? parameters)
+  {
+    var requestedLayouts = GetOptionalStringArray(parameters, "layoutNames");
+    var allLayouts = PluginRuntime.GetOptionalBool(parameters, "allLayouts") ?? false;
+    var outputDirectory = PluginRuntime.GetRequiredString(parameters, "outputDirectory");
+    var fileNamePrefix = PluginRuntime.GetOptionalString(parameters, "fileNamePrefix");
+    var paperSize = PluginRuntime.GetOptionalString(parameters, "paperSize");
+    var plotStyleTable = PluginRuntime.GetOptionalString(parameters, "plotStyleTable");
+    var plotArea = PluginRuntime.GetOptionalString(parameters, "plotArea");
+    var windowCorners = GetOptionalDoubleArray(parameters, "windowCorners");
+    var pixelWidth = PluginRuntime.GetOptionalInt(parameters, "pixelWidth") ?? RasterPlot.DefaultPixelWidth;
+    var continueOnError = PluginRuntime.GetOptionalBool(parameters, "continueOnError") ?? true;
+
+    if (allLayouts == (requestedLayouts.Count > 0))
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Provide either a non-empty 'layoutNames' array or allLayouts=true (not both).");
+    }
+    if (!Path.IsPathFullyQualified(outputDirectory))
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'outputDirectory' must be an absolute folder path.");
+    }
+    if (plotArea != null && plotArea is not ("layout" or "window"))
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Parameter 'plotArea' must be 'layout' or 'window'.");
+    }
+    if ((plotArea == "window") != (windowCorners != null))
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "plotArea 'window' needs 'windowCorners' [x1, y1, x2, y2], and 'windowCorners' needs plotArea 'window'.");
+    }
+    if (windowCorners != null && (windowCorners.Length != 4 || windowCorners[0] == windowCorners[2] || windowCorners[1] == windowCorners[3]))
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "'windowCorners' must be [x1, y1, x2, y2] with two distinct x and two distinct y values.");
+    }
+    if (pixelWidth is < RasterPlot.MinPixelWidth or > RasterPlot.MaxPixelWidth)
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"'pixelWidth' must be between {RasterPlot.MinPixelWidth} and {RasterPlot.MaxPixelWidth}.");
+    }
+
+    return CivilExecution.ExecuteCommandSequenceAsync<object?>(async (doc, cancellationToken) =>
+    {
+      // 1. Resolve and validate every job up front (read-only).
       var warnings = new List<string>();
-      var stopReason = (string?)null;
-      var overall = Stopwatch.StartNew();
+      var jobs = PrepareRenderJobs(doc, requestedLayouts, allLayouts, paperSize, plotStyleTable, plotArea, windowCorners, pixelWidth, warnings);
 
-      using (var sysvars = new SystemVariableScope())
+      // 2. Resolve every output path through the filesystem boundary before
+      //    anything is rendered. A review PNG is always replaced.
+      var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      var drawingBase = SanitizeFileName(Path.GetFileNameWithoutExtension(doc.Name));
+      foreach (var job in jobs)
       {
-        sysvars.Set("FILEDIA", 0);
-        sysvars.Set("CMDECHO", 0);
-        sysvars.Set("BACKGROUNDPLOT", 0);
-        sysvars.Remember("CTAB");
+        var raw = Path.Combine(
+          outputDirectory,
+          UniqueFileName(usedNames, $"{fileNamePrefix ?? drawingBase + "-"}{SanitizeFileName(job.LayoutName)}") + ".png");
+        job.OutputPath = FileBoundary.ResolveExportPath(raw, true, ".png");
+      }
+      var duplicate = jobs.GroupBy(job => job.OutputPath, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+      if (duplicate != null)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Two layouts resolve to the same output file: {duplicate.Key}");
+      }
 
-        // Before the first CTAB change: the layout current now is the one whose
-        // viewports may have been erased and re-created without a regen, and a
-        // layout switch would be the first thing to touch those stale graphics.
-        // The per-layout regen in PlotOneAsync still covers the layouts switched to.
+      // 3. Render, one -PLOT per layout, with sysvars saved and restored.
+      return await RunPlotBatchAsync(doc, jobs, true, continueOnError, cancellationToken, warnings);
+    });
+  }
+
+  // The batch both layout actions share: REGENALL once before the first layout
+  // switch, then one -PLOT per job. A failure stops the rest when it leaves the
+  // editor in an unknown state, or when continueOnError is off.
+  private static async Task<object?> RunPlotBatchAsync(Document doc, List<PlotJob> jobs, bool overwrite,
+    bool continueOnError, CancellationToken cancellationToken, List<string>? initialWarnings = null)
+  {
+    var raster = jobs.Any(job => job.Raster);
+    var doneStatus = raster ? "rendered" : "plotted";
+    var results = new List<Dictionary<string, object?>>();
+    var warnings = new List<string>(initialWarnings ?? []);
+    var stopReason = (string?)null;
+    var overall = Stopwatch.StartNew();
+
+    using (var sysvars = new SystemVariableScope())
+    {
+      sysvars.Set("FILEDIA", 0);
+      sysvars.Set("CMDECHO", 0);
+      sysvars.Set("BACKGROUNDPLOT", 0);
+      sysvars.Remember("CTAB");
+
+      // Before the first CTAB change: the layout current now is the one whose
+      // viewports may have been erased and re-created without a regen, and a
+      // layout switch would be the first thing to touch those stale graphics.
+      // The per-layout regen in PlotOneAsync still covers the layouts switched to.
+      try
+      {
+        await RegenerateBeforePlotAsync(doc);
+      }
+      catch (JsonRpcDispatchException ex) when (ex.Data.Contains(RegenFailedKey))
+      {
+        stopReason = ex.Message;
+      }
+
+      foreach (var job in jobs)
+      {
+        if (stopReason != null)
+        {
+          results.Add(LayoutResult(job, "skipped", null, stopReason, 0));
+          continue;
+        }
+        if (cancellationToken.IsCancellationRequested)
+        {
+          stopReason = $"Cancellation was requested; remaining layouts were not {doneStatus}.";
+          results.Add(LayoutResult(job, "skipped", null, stopReason, 0));
+          continue;
+        }
+
+        var watch = Stopwatch.StartNew();
         try
         {
-          await RegenerateBeforePlotAsync(doc);
+          var file = await PlotOneAsync(doc, job, overwrite);
+          results.Add(LayoutResult(job, doneStatus, file, null, watch.ElapsedMilliseconds));
         }
-        catch (JsonRpcDispatchException ex) when (ex.Data.Contains(RegenFailedKey))
+        catch (Exception ex)
         {
-          stopReason = ex.Message;
-        }
-
-        foreach (var job in jobs)
-        {
-          if (stopReason != null)
+          var message = ex is JsonRpcDispatchException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}";
+          results.Add(LayoutResult(job, "failed", null, message, watch.ElapsedMilliseconds));
+          if (ex is JsonRpcDispatchException { Code: CommandIncompleteCode })
           {
-            results.Add(LayoutResult(job, "skipped", null, stopReason, 0));
-            continue;
+            stopReason = $"An earlier -PLOT did not complete; remaining layouts were not {doneStatus}.";
           }
-          if (cancellationToken.IsCancellationRequested)
+          else if (ex.Data.Contains(RegenFailedKey))
           {
-            stopReason = "Cancellation was requested; remaining layouts were not plotted.";
-            results.Add(LayoutResult(job, "skipped", null, stopReason, 0));
-            continue;
+            stopReason = $"REGENALL failed before an earlier layout; remaining layouts were not {doneStatus}.";
           }
-
-          var watch = Stopwatch.StartNew();
-          try
+          else if (!continueOnError)
           {
-            var file = await PlotOneAsync(doc, job, overwrite);
-            results.Add(LayoutResult(job, "plotted", file, null, watch.ElapsedMilliseconds));
-          }
-          catch (Exception ex)
-          {
-            var message = ex is JsonRpcDispatchException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}";
-            results.Add(LayoutResult(job, "failed", null, message, watch.ElapsedMilliseconds));
-            if (ex is JsonRpcDispatchException { Code: CommandIncompleteCode })
-            {
-              stopReason = "An earlier -PLOT did not complete; remaining layouts were not plotted.";
-            }
-            else if (ex.Data.Contains(RegenFailedKey))
-            {
-              stopReason = "REGENALL failed before an earlier layout; remaining layouts were not plotted.";
-            }
-            else if (!continueOnError)
-            {
-              stopReason = "Stopped after the first failure (continueOnError=false).";
-            }
+            stopReason = "Stopped after the first failure (continueOnError=false).";
           }
         }
-
-        warnings.AddRange(sysvars.RestoreWarnings());
       }
 
-      var plotted = results.Count(item => Equals(item["status"], "plotted"));
-      if (plotted == 0)
-      {
-        var firstError = results.Select(item => item["error"] as string).FirstOrDefault(error => error != null);
-        throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"No layouts were plotted. {firstError}".Trim());
-      }
-      if (plotted < results.Count)
-      {
-        warnings.Add($"{results.Count - plotted} of {results.Count} layouts were not plotted; see per-layout status.");
-      }
+      warnings.AddRange(sysvars.RestoreWarnings());
+    }
 
-      return new Dictionary<string, object?>
-      {
-        ["device"] = DefaultPdfDevice,
-        ["method"] = "-PLOT (BACKGROUNDPLOT=0)",
-        ["regenerated"] = jobs.Any(job => job.Regenerated),
-        ["requested"] = results.Count,
-        ["plotted"] = plotted,
-        ["failed"] = results.Count(item => Equals(item["status"], "failed")),
-        ["skipped"] = results.Count(item => Equals(item["status"], "skipped")),
-        ["totalBytes"] = results.Sum(item => item["bytes"] is long bytes ? bytes : 0L),
-        ["durationMs"] = overall.ElapsedMilliseconds,
-        ["layouts"] = results,
-        ["warnings"] = warnings,
-      };
-    });
+    var done = results.Count(item => Equals(item["status"], doneStatus));
+    if (done == 0)
+    {
+      var firstError = results.Select(item => item["error"] as string).FirstOrDefault(error => error != null);
+      throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"No layouts were {doneStatus}. {firstError}".Trim());
+    }
+    if (done < results.Count)
+    {
+      warnings.Add($"{results.Count - done} of {results.Count} layouts were not {doneStatus}; see per-layout status.");
+    }
+
+    return new Dictionary<string, object?>
+    {
+      ["device"] = raster ? RasterPlot.DefaultDevice : DefaultPdfDevice,
+      ["method"] = "-PLOT (BACKGROUNDPLOT=0)",
+      ["regenerated"] = jobs.Any(job => job.Regenerated),
+      ["requested"] = results.Count,
+      [doneStatus] = done,
+      ["failed"] = results.Count(item => Equals(item["status"], "failed")),
+      ["skipped"] = results.Count(item => Equals(item["status"], "skipped")),
+      ["totalBytes"] = results.Sum(item => item["bytes"] is long bytes ? bytes : 0L),
+      ["durationMs"] = overall.ElapsedMilliseconds,
+      ["layouts"] = results,
+      ["warnings"] = warnings,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -604,7 +691,8 @@ public static class PlotCommands
   {
     public required string LayoutName { get; init; }
     public required string PaperSize { get; init; }
-    public required string PaperUnitsToken { get; init; }
+    // Null for pixel devices, which skip the paper-units prompt.
+    public required string? PaperUnitsToken { get; init; }
     public required string OrientationToken { get; init; }
     public required bool UpsideDown { get; init; }
     public required string StyleSheetToken { get; init; }
@@ -612,6 +700,14 @@ public static class PlotCommands
     public required string PlotAreaToken { get; init; }
     public string[]? WindowCorners { get; init; }
     public string? PageSetup { get; init; }
+    // Plot scale and offset answers: "1:1" and "0.00,0.00" for a layout's sheet,
+    // "_F" (fit) and "_C" (centred) for the Model tab and the PNG review render.
+    public string ScaleToken { get; init; } = "1:1";
+    public string OffsetToken { get; init; } = "0.00,0.00";
+    // The review render (plotLayoutsToPng): a pixel medium on the raster PC3.
+    public bool Raster { get; init; }
+    public string Device { get; init; } = DefaultPdfDevice;
+    public RasterPlot.MediaChoice? Media { get; init; }
     public string? OutputPath { get; set; }
     public DateTime StartedUtc { get; set; }
     public bool Regenerated { get; set; }
@@ -766,7 +862,7 @@ public static class PlotCommands
   private sealed record MediaName(string Canonical, string Locale);
 
   private sealed record OutputFile(string Path, long Bytes, int? PageCount, DateTime LastWriteUtc,
-    IReadOnlyList<PdfOutputInspector.Page>? Pages = null);
+    IReadOnlyList<PdfOutputInspector.Page>? Pages = null, (int Width, int Height)? PixelSize = null);
 
   private static List<PlotJob> PreparePlotJobs(
     Document doc,
@@ -869,6 +965,8 @@ public static class PlotCommands
         // "." answers "Enter plot style table name ... (enter . for none)".
         StyleSheetToken = string.IsNullOrWhiteSpace(styleSheet) ? "." : styleSheet,
         IsModel = layout.ModelType,
+        ScaleToken = layout.ModelType ? "_F" : "1:1",
+        OffsetToken = layout.ModelType ? "_C" : "0.00,0.00",
         PlotAreaToken = (plotArea ?? (layout.ModelType ? "extents" : "layout")) switch
         {
           "extents" => "_E",
@@ -879,6 +977,143 @@ public static class PlotCommands
         WindowCorners = windowCorners == null
           ? null
           : [FormatPoint(windowCorners[0], windowCorners[1]), FormatPoint(windowCorners[2], windowCorners[3])],
+      });
+    }
+
+    transaction.Commit();
+    return jobs;
+  }
+
+  // Review render jobs (plotLayoutsToPng): read-only like PreparePlotJobs. The
+  // sheet is plotted on a pixel medium of the raster PC3, fit and centred, so
+  // the medium is chosen per layout from the paper's own shape (RasterPlot.Choose).
+  private static List<PlotJob> PrepareRenderJobs(
+    Document doc,
+    IReadOnlyList<string> requestedLayouts,
+    bool allLayouts,
+    string? paperSize,
+    string? plotStyleTable,
+    string? plotArea,
+    double[]? windowCorners,
+    int pixelWidth,
+    List<string> warnings)
+  {
+    var database = doc.Database;
+    using var documentLock = doc.LockDocument();
+    using var transaction = database.TransactionManager.StartTransaction();
+
+    var layouts = ReadLayouts(database, transaction).ToList();
+    var paperLayouts = layouts.Where(layout => !layout.ModelType).OrderBy(layout => layout.TabOrder).ToList();
+
+    List<Layout> selected;
+    if (allLayouts)
+    {
+      selected = paperLayouts;
+      if (selected.Count == 0)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", "The active drawing has no paper-space layouts to render.");
+      }
+    }
+    else
+    {
+      selected = [];
+      foreach (var name in requestedLayouts)
+      {
+        var layout = layouts.FirstOrDefault(item => string.Equals(item.LayoutName, name, StringComparison.OrdinalIgnoreCase))
+          ?? throw new JsonRpcDispatchException(
+            "CIVIL3D.OBJECT_NOT_FOUND",
+            LayoutNotFoundMessage(name, paperLayouts.Select(item => new LayoutSnapshot(item.LayoutName, item.TabOrder, false))));
+        if (layout.ModelType)
+        {
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "render_layouts_to_png renders paper-space layouts; the Model tab has no sheet. Use plot_layouts_to_pdf for the Model tab.");
+        }
+        if (!selected.Contains(layout)) selected.Add(layout);
+      }
+    }
+
+    var validator = PlotSettingsValidator.Current;
+    using var probe = new PlotSettings(false);
+    validator.RefreshLists(probe);
+    var devices = ToList(validator.GetPlotDeviceList());
+    RequireDevice(devices, RasterPlot.DefaultDevice);
+    var styleSheets = ToList(validator.GetPlotStyleSheetList());
+    if (!string.IsNullOrWhiteSpace(plotStyleTable) &&
+        !styleSheets.Any(name => string.Equals(name, plotStyleTable, StringComparison.OrdinalIgnoreCase)))
+    {
+      throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", $"Plot style table '{plotStyleTable}' was not found. Available: {Preview(styleSheets)}.");
+    }
+
+    var media = ReadMedia(probe, RasterPlot.DefaultDevice);
+    var pixelMedia = RasterPlot.PixelMedia(media.Select(item => (item.Canonical, item.Locale)));
+    RasterPlot.PixelMedium? named = null;
+    if (!string.IsNullOrWhiteSpace(paperSize))
+    {
+      var match = media.FirstOrDefault(item =>
+        string.Equals(item.Locale, paperSize, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(item.Canonical, paperSize, StringComparison.OrdinalIgnoreCase))
+        ?? throw new JsonRpcDispatchException(
+          "CIVIL3D.INVALID_INPUT",
+          $"Medium '{paperSize}' is not available on {RasterPlot.DefaultDevice}. Use civil3d_plot action=list_plotters with device='{RasterPlot.DefaultDevice}' to list media. Examples: {Preview(media.Select(item => item.Locale))}.");
+      var size = RasterPlot.ParsePixelSize(match.Canonical) ?? RasterPlot.ParsePixelSize(match.Locale);
+      named = new RasterPlot.PixelMedium(match.Canonical, match.Locale, size?.Long ?? 0, size?.Short ?? 0);
+    }
+    else if (pixelMedia.Count == 0)
+    {
+      throw new JsonRpcDispatchException(
+        "CIVIL3D.INVALID_INPUT",
+        $"{RasterPlot.DefaultDevice} lists no pixel media. Pass 'paperSize' with one of its media: {Preview(media.Select(item => item.Locale))}.");
+    }
+
+    var jobs = new List<PlotJob>();
+    var warned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var layout in selected)
+    {
+      var paper = layout.PlotPaperSize;
+      if (paper.X <= 0 || paper.Y <= 0)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Layout '{layout.LayoutName}' has no valid paper size.");
+      }
+      var landscape = IsLandscape(layout);
+      var choice = named != null
+        ? RasterPlot.ForMedium(named, paper.X, paper.Y, landscape)
+        : RasterPlot.Choose(pixelMedia, paper.X, paper.Y, pixelWidth, landscape)!;
+      if (choice.Medium.LongPx > 0 && choice.SheetLongPx < pixelWidth * 0.75 && warned.Add(choice.Medium.Canonical))
+      {
+        warnings.Add($"Medium '{choice.Medium.Locale}' puts the sheet at about {choice.SheetLongPx:0} px on its long side, below the requested {pixelWidth} px; it is the closest {RasterPlot.DefaultDevice} offers. Add a larger pixel size to the PC3 (Custom Paper Sizes) and pass it as 'paperSize' for a sharper render.");
+      }
+      var styleSheet = plotStyleTable ?? layout.CurrentStyleSheet;
+      var rotation = layout.PlotRotation;
+      // The sheet is a window over the layout's limits, which AutoCAD keeps on the paper.
+      // Plot area "Layout" on a pixel device plots one paper unit per pixel and ignores Fit
+      // (an 11x17 sheet became 17 x 11 px, seen live 2026-10-16); only a window or extents
+      // area fits the media and offers Center at the offset prompt.
+      var limits = layout.Limits;
+      if (windowCorners == null && (limits.MaxPoint.X - limits.MinPoint.X <= 0 || limits.MaxPoint.Y - limits.MinPoint.Y <= 0))
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+          $"Layout '{layout.LayoutName}' has no paper limits to render. Pass plotArea 'window' with windowCorners in paper units.");
+      }
+
+      jobs.Add(new PlotJob
+      {
+        LayoutName = layout.LayoutName,
+        PageSetup = NullIfEmpty(layout.PlotSettingsName),
+        PaperSize = choice.Medium.Locale,
+        // Pixel devices ask no paper-units question (seen live on Civil 3D 2026).
+        PaperUnitsToken = null,
+        OrientationToken = landscape ? "_L" : "_P",
+        UpsideDown = rotation is PlotRotation.Degrees180 or PlotRotation.Degrees270,
+        StyleSheetToken = string.IsNullOrWhiteSpace(styleSheet) ? "." : styleSheet,
+        IsModel = false,
+        PlotAreaToken = "_W",
+        WindowCorners = windowCorners == null
+          ? [FormatPoint(limits.MinPoint.X, limits.MinPoint.Y), FormatPoint(limits.MaxPoint.X, limits.MaxPoint.Y)]
+          : [FormatPoint(windowCorners[0], windowCorners[1]), FormatPoint(windowCorners[2], windowCorners[3])],
+        ScaleToken = "_F",
+        OffsetToken = "_C",
+        Raster = true,
+        Device = RasterPlot.DefaultDevice,
+        Media = choice,
       });
     }
 
@@ -963,34 +1198,31 @@ public static class PlotCommands
     // style table, lineweights?, scale lineweights?, paper space first?, hide
     // paperspace objects?, file, save page setup?, proceed? The Model tab asks
     // the same up to lineweights?, then a shade plot setting instead of the
-    // three paper-space questions.
+    // three paper-space questions. A pixel device (PublishToWeb PNG, recorded on
+    // Civil 3D 2026) asks no paper units, and offers Center at the offset prompt
+    // only after a window or extents area.
     var tokens = new List<object>
     {
       "_.-PLOT",
       "_Y",                         // Detailed plot configuration?
       job.LayoutName,               // Layout name ("Model" for the Model tab)
-      DefaultPdfDevice,             // Output device
+      job.Device,                   // Output device
       job.PaperSize,                // Paper size (locale name for the device)
-      job.PaperUnitsToken,          // Paper units
-      job.OrientationToken,         // Drawing orientation
-      job.UpsideDown ? "_Y" : "_N", // Plot upside down?
-      job.PlotAreaToken,            // Plot area: Layout, Extents or Window
     };
+    if (job.PaperUnitsToken != null)
+    {
+      tokens.Add(job.PaperUnitsToken); // Paper units
+    }
+    tokens.Add(job.OrientationToken);              // Drawing orientation
+    tokens.Add(job.UpsideDown ? "_Y" : "_N");      // Plot upside down?
+    tokens.Add(job.PlotAreaToken);                 // Plot area: Layout, Extents or Window
     if (job.WindowCorners != null)
     {
       tokens.Add(job.WindowCorners[0]); // Lower left corner of window
       tokens.Add(job.WindowCorners[1]); // Upper right corner of window
     }
-    if (job.IsModel)
-    {
-      tokens.Add("_F");             // Plot scale: fit the area to the paper
-      tokens.Add("_C");             // Plot offset: centred
-    }
-    else
-    {
-      tokens.Add("1:1");            // Plot scale (viewports carry the drawing scale)
-      tokens.Add("0.00,0.00");      // Plot offset
-    }
+    tokens.Add(job.ScaleToken);      // Plot scale: 1:1 on a layout (viewports carry the drawing scale), fit on the Model tab
+    tokens.Add(job.OffsetToken);     // Plot offset: 0,0 on a layout, centred on the Model tab
     tokens.Add("_Y");                // Plot with plot styles?
     tokens.Add(job.StyleSheetToken); // Plot style table name ("." = none)
     tokens.Add("_Y");                // Plot with lineweights?
@@ -1010,6 +1242,10 @@ public static class PlotCommands
 
     await RunCommandAsync(doc, "PLOT", tokens.ToArray());
 
+    if (job.Raster)
+    {
+      return output.Commit((path, stream) => VerifyPngOutput(path, stream, job.StartedUtc));
+    }
     return output.Commit((path, stream) => VerifyOutput(path, stream, job.StartedUtc));
   }
 
@@ -1033,7 +1269,7 @@ public static class PlotCommands
     if (stale != null)
     {
       var stalePrompt = Convert.ToString(App.GetSystemVariable("LASTPROMPT"));
-      QueueCancel(doc);
+      CivilExecution.QueueCancelAfterOperation();
       throw new JsonRpcDispatchException(
         CommandIncompleteCode,
         $"-{stale} from an earlier request is still waiting at prompt '{stalePrompt}', so -{commandName} was not started. A cancel was queued; retry the request.");
@@ -1075,7 +1311,7 @@ public static class PlotCommands
     if (stillActive)
     {
       var lastPrompt = Convert.ToString(App.GetSystemVariable("LASTPROMPT"));
-      QueueCancel(doc);
+      CivilExecution.QueueCancelAfterOperation();
       throw new JsonRpcDispatchException(
         CommandIncompleteCode,
         $"-{commandName} did not complete; it was waiting at prompt '{lastPrompt}'. A cancel was queued. The prompt chain may differ in this Civil 3D release.");
@@ -1132,25 +1368,29 @@ public static class PlotCommands
       ?.FirstOrDefault(name => commandNames.Contains(name, StringComparer.OrdinalIgnoreCase));
   }
 
-  private static void QueueCancel(Document doc)
-  {
-    try
-    {
-      doc.SendStringToExecute("\x03\x03", true, false, false);
-    }
-    catch
-    {
-      // Best effort; the caller still reports the stuck command.
-    }
-  }
-
   // Reads the output only through the stream Commit opened on the checked
   // handle; the path is used for messages and the result only.
   private static OutputFile VerifyOutput(string path, FileStream? stream, DateTime startedUtc)
   {
+    var (length, lastWriteUtc) = CheckWritten(path, stream, startedUtc, "PDF");
+    return new OutputFile(path, length, CountPdfPages(stream!), lastWriteUtc);
+  }
+
+  // A PNG must carry the PNG signature and an IHDR chunk; the pixel size comes
+  // from that header, not from the medium that was asked for.
+  private static OutputFile VerifyPngOutput(string path, FileStream? stream, DateTime startedUtc)
+  {
+    var (length, lastWriteUtc) = CheckWritten(path, stream, startedUtc, "PNG");
+    var size = RasterPlot.ReadPngSize(stream!)
+      ?? throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"'{path}' was written but is not a PNG image.");
+    return new OutputFile(path, length, null, lastWriteUtc, null, size);
+  }
+
+  private static (long Length, DateTime LastWriteUtc) CheckWritten(string path, FileStream? stream, DateTime startedUtc, string kind)
+  {
     if (stream == null)
     {
-      throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"The plot command finished but no PDF was written to '{path}'.");
+      throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"The plot command finished but no {kind} was written to '{path}'.");
     }
     var lastWriteUtc = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
     // Allow for coarse filesystem timestamps.
@@ -1164,7 +1404,7 @@ public static class PlotCommands
       throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"'{path}' was written but is empty.");
     }
 
-    return new OutputFile(path, length, CountPdfPages(stream), lastWriteUtc);
+    return (length, lastWriteUtc);
   }
 
   private static OutputFile VerifyPublishedOutput(string path, FileStream? stream, DateTime startedUtc,
@@ -1472,7 +1712,7 @@ public static class PlotCommands
 
   private static Dictionary<string, object?> LayoutResult(PlotJob job, string status, OutputFile? file, string? error, long durationMs)
   {
-    return new Dictionary<string, object?>
+    var result = new Dictionary<string, object?>
     {
       ["layoutName"] = job.LayoutName,
       ["status"] = status,
@@ -1487,6 +1727,17 @@ public static class PlotCommands
       ["regenerated"] = job.Regenerated,
       ["error"] = error,
     };
+    if (job.Raster)
+    {
+      // The PNG's own header is the pixel size; the medium's size is what was asked for.
+      result["ok"] = file != null;
+      result["media"] = job.Media?.Medium.Canonical;
+      result["mediaPixels"] = job.Media is { WidthPx: > 0 } ? new[] { job.Media.WidthPx, job.Media.HeightPx } : null;
+      result["pixelWidth"] = file?.PixelSize?.Width;
+      result["pixelHeight"] = file?.PixelSize?.Height;
+      result["plotArea"] = job.PlotAreaToken == "_W" ? "window" : "layout";
+    }
+    return result;
   }
 
   private static string LayoutNotFoundMessage(string name, IEnumerable<LayoutSnapshot> available) =>

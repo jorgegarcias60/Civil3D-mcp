@@ -798,7 +798,7 @@ internal static class ScriptCompiler
           return display + ": Preview allows locks and nested transactions only on the run's drawing (Db or Doc.Database).";
         if (typeName == DatabaseTypeName && DatabaseDenyReason(previewMethod, node, model) is { } reason)
           return reason + outside;
-        if (typeName == BaseClassName && name is "WriteFile" or "AttachXref"
+        if (typeName == BaseClassName && name is "WriteFile" or "AttachXref" or "ImportBlock"
             || typeName is "Autodesk.AutoCAD.ApplicationServices.Application" or "Autodesk.AutoCAD.ApplicationServices.Core.Application"
               && name == "SetSystemVariable"
             || InheritsFrom(type, "Autodesk.AutoCAD.DatabaseServices.LayoutManager")
@@ -824,7 +824,7 @@ internal static class ScriptCompiler
 
     const string useWrite = " Use mode 'write' to change the drawing.";
 
-    if (symbol is IMethodSymbol && typeName == BaseClassName && name is ("EnsureLayer" or "Tag" or "XClip" or "AttachXref" or "SetViewport"))
+    if (symbol is IMethodSymbol && typeName == BaseClassName && name is ("EnsureLayer" or "Tag" or "XClip" or "AttachXref" or "SetViewport" or "ImportBlock"))
     {
       return $"{display} changes the drawing. Use mode 'write'.";
     }

@@ -130,7 +130,9 @@ and `run.json`, expire after 180 days by default. Set
 An integer of 0 or less disables folder deletion; output pruning still runs.
 See the README's [retention settings](../README.md#plugin-run-code-retention).
 
-The plugin project targets .NET 8 (Civil 3D 2026). For a quick compile check of a `fix/` branch
-against the 2027 references:
+The plugin project targets .NET 8 (Civil 3D 2026). `C_References` in Jorge's clone holds the
+Civil 3D 2027 references (AutoCAD 26.x, from `scripts\gather-refs-2027.ps1`), so it serves only the
+net10 build; the net8 build uses `/p:Civil3DReferencesPath=%LOCALAPPDATA%\Civil3D-mcp\refs-2026`.
+For a quick compile check of a `fix/` branch against the 2027 references:
 `dotnet build Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release --restore /p:Civil3DReferencesPath=<C_References> /p:TargetFramework=net10.0-windows`.
 Autodesk assemblies are never committed.

@@ -68,6 +68,7 @@ public static class PluginRuntime
       {
         RpcAuth.TokenPath = InstanceDiscovery.TokenPathForPort(Port);
         RpcAuth.Issue();
+        PruneStaleDiscovery();
         _discovery = new InstanceDiscovery(Environment.ProcessId, Port, ownership: _ownership);
         RegisterForCom();
         App.DocumentManager.DocumentCreated += OnDocumentCreated;
@@ -124,6 +125,16 @@ public static class PluginRuntime
       PluginLog.Info("ComRegistration", $"Registered {ComRegistration.DisplayName(Environment.ProcessId)} in the Running Object Table.");
     }
     catch (Exception error) { PluginLog.Warn("ComRegistration", "Could not register the per-process COM name.", error); }
+  }
+
+  private static void PruneStaleDiscovery()
+  {
+    try
+    {
+      var removed = InstanceDiscovery.PruneStaleRecords(Environment.ProcessId);
+      if (removed > 0) PluginLog.Info("Discovery", $"Removed {removed} stale discovery file(s) of exited instances.");
+    }
+    catch (Exception error) { PluginLog.Warn("Discovery", "Could not prune stale discovery files.", error); }
   }
 
   public static string Owner => _discovery?.Owner ?? "user";

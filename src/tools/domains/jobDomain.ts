@@ -8,6 +8,7 @@ const JobOperationSchema = z.enum([
   "surface_dem_import",
   "bulk_qc_report",
   "plot_layouts_to_pdf",
+  "render_layouts_to_png",
   "publish_sheet_set",
 ]);
 
@@ -55,7 +56,7 @@ export const JOB_DOMAIN_DEFINITION: DomainToolDefinition = {
       pluginMethods: ["startJob"],
       execute: async (args) => await withApplicationConnection(async (appClient) => {
         if (Object.hasOwn(PLOT_JOB_OPERATIONS, String(args.operation))) {
-          await requirePlotApi(appClient, args.parameters as Record<string, unknown>);
+          await requirePlotApi(appClient, args.parameters as Record<string, unknown>, String(args.operation));
         }
         return await appClient.sendCommand("startJob", {
           operation: args.operation,

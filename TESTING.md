@@ -5,6 +5,21 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Open issues #13, #22, #39, #45, #46 (2026-10-16)
+
+Plugin installed from the combined branch with Civil 3D closed; a scratch instance started by CAD-Tools
+`Start-Civil3D.ps1` on copies under `C:\CAD-Tools\tmp\c3d-open-issues` (template drawing with five 11x17 layouts;
+a copy of the CAD-Tools block library as the ImportBlock source). Each check attached by pid.
+
+| Check | Result |
+|---|---|
+| #39 stale discovery files | Before the start, 7 records of exited instances were in `instances`; the plugin log said "Removed 7 stale discovery file(s)" and only the live record was left. After that instance was killed, the next start removed its record ("Removed 1"). |
+| #13 `label_list_styles` | Alignment without `labelType` = `label_set` (the label set styles); `curves` listed the 2 curve label styles, `station` the 2 station-offset label styles, both different from the label sets; `bogus` refused with the allowed values; profile ignores `labelType`. |
+| #22 `ImportBlock` | Target had no definition; a run that imported and then threw ended `runtime_error` and left NO definition (the import rolls back with the run); first import returned a definition id, a second import (Ignore) the same id, `replace: true` the same id; an unknown name listed the 8 blocks in the source; read mode refused it at compile time (C3DMCP001); a reference of the imported block was inserted. |
+| #45 first attempt | Failed: "no PNG was written". Recorded the device's `-PLOT` prompts with a LISP probe: `PublishToWeb PNG.pc3` asks no paper units (the extra answer shifted the chain and the rest reached the command line as unknown commands), plot area `Layout` plots one paper unit per pixel and ignores Fit (17 x 11 px sheet), and the offset prompt offers Center only after a window or extents area. Fixed: no paper-units answer, a window over the layout's limits, Fit, Center. |
+| #45 after the fix | All 5 layouts rendered on `4K UHD (3840.00 x 2160.00 Pixels)` (the device lists media up to 16K), 3840 x 2160 px each, the whole sheet fitted and centred; a second run replaced all 5 files, same file set, no backups left, `regenerated: true` both runs, no warnings. |
+| #46 | Not exercised live: no `-PLOT` was left at a prompt in these runs. A proxy (LINE started by one COM client's `SendCommand`, ESC ESC from another) could not run: while one client's `SendCommand` waits for a command to end, AutoCAD refuses every other COM call. With no command active, COM `SendCommand` of ESC ESC throws "Invalid input"; the plugin logs that as a warning. |
+
 ### Startup prompts, per-pid COM, run_code and plot crash guards (2026-10-16)
 
 Plugin installed from the combined branch (all Civil 3D closed first); scratch drawings under `C:\CAD-Tools\tmp\c3d-test-all`.
@@ -19,11 +34,44 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 
 ## Offline (no Civil 3D needed)
 
-### Per-process COM registration (2026-10-15)
+### Stale discovery files #39, COM cancel #46, reference docs #47, order-dependent tests #34 (2026-10-16)
 
 | Check | Result |
 |---|---|
-| Harness net8 / net10 (`ComRegistrationChecks`, real Running Object Table, stand-in object) | Pass: display name `!Civil3DMcp.AcadApplication:<pid>`, registration found by that name, second Register a no-op, Revoke removes it, non-positive pid refused. |
+| Harness net8 (`InstanceDiscoveryChecks.CheckPruneStale`, temp root, this process as the live pid) | Pass (1258 checks): records of exited pids removed (readable or not), a live record kept, a record whose pid started at another time removed, uninspectable records / own pid / other files kept, only temp files older than an hour removed, a missing folder removes nothing. |
+| `tests/host_routes.test.ts` | No plugin file calls `SendStringToExecute`; both stuck-`-PLOT` paths queue the cancel, which `RunOnHostAsync` sends as ESC ESC with COM `SendCommand` in a `finally` after the operation. |
+| `npx vitest run --cache=false --sequence.shuffle`, seeds 8919, 16838, 24757 | Before: 2 failures each (`instance_dialogs` "rejects invalid process identity" saw calls from earlier tests on the shared mock; `instance_manager` "writes an expiring claim" inherited the job label an earlier test set). After a per-test mock reset and `resetSessionLabelForTests()`: 889 passed each, and with two more seeds. |
+| `tests/approval_logging.test.ts` (the test #34 names) | Passed 15 solo runs and every shuffled full run; the 2026-10-12 failure did not reproduce. |
+| Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+### ImportBlock, issue #22 wave 2 (2026-10-16)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10: `ImportBlock` exact signature compiles in write mode | Pass. |
+| Harness: read mode refuses `ImportBlock`, with replace, base-qualified and as a method group; a local function named `ImportBlock` is allowed | Pass. The four refusals fail on the old compiler. |
+| Harness: preview refuses the `ImportBlock` helper outside its transaction | Pass; fails on the old compiler. |
+| Harness totals | net8: 1260 ok, 0 failed (230 references). net10: 1260 ok, 0 failed (238 references). |
+| vitest (`run_code_domain`, `run_code_script_source`) | `ImportBlock` description; the server refuses code that calls it on runCode API 6 or none and sends it on 7; code that only has a similar name sends no health call; source checks for write-only, preview refusal, import-root path, side database disposal, Ignore or Replace, and the 20-name listing; `ApiVersion = 7`. Full run: 896 tests in 61 files. |
+| `npm run build`, `docs:check` | Ok. |
+| Plugin Release net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+Not covered offline: the clone itself needs Civil 3D. Live results: see the live section (2026-10-16).
+
+### Layout PNG review render, #45 (2026-10-16)
+
+| Check | Result |
+|---|---|
+| `render_layouts_to_png` schema: layout selection, absolute folder, `pixelWidth` range, `plotArea`/`windowCorners` pairing | Pass (vitest). |
+| Approval gating, non-retryable, forwarding to `plotLayoutsToPng`, job route, plot API 3 refusal on every route | Pass (vitest). |
+| Source guards: same `-PLOT` batch and REGENALL as the PDF, `.png` through `FileBoundary` with overwrite, read-only preparation, page setup not saved | Pass (vitest). |
+| Harness net8 / net10 (`RasterPlotChecks`): pixel media parsing, media choice by sheet width then aspect, portrait swap, named medium, PNG header read | Pass (1277 checks on each framework, 24 of them new). |
+| Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+Live test pending (needs a scratch drawing with layouts and the PNG device): the `-PLOT` answers for the raster
+device (paper units `Pixels`, fit, centred), whether plot area `layout` keeps the whole sheet on a pixel medium,
+the medium and pixel siLive results, including the corrected `-PLOT` answers for the pixel device: see the live section (2026-10-16).
+y that name, second Register a no-op, Revoke removes it, non-positive pid refused. |
 | Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
 | `npm run build`, full vitest, `docs:check`, installer check | Pass (874 tests). |
 
@@ -1386,6 +1434,18 @@ The first live run caught a bug the offline checks could not: Civil 3D keeps one
 `GetProfileViewsDisplayingMe` is now labelled with `Part.ProfileViewPartId`.
 
 Not yet run on Civil 3D 2027 (Luis): run the same two scripts there.
+
+## label_list_styles labelType (2026-10-16, `jorgegarcias60/label-styles`, offline only)
+
+Offline: `tests/label_list_styles.test.ts` (5 tests; 4 fail on the 58fc942 code): `labelType` survives the
+schema and reaches `listLabelStyles` (also through `civil3d_label` and `civil3d_standards`), and the plugin
+source resolves alignment `curves` and `station` style names for both `label_list_styles` and `label_add`
+from one helper (`GetAlignmentLabelStyleCollection`). Plugin builds for 2026 (net8) and 2027 (net10) with
+0 warnings.
+
+Live check (not run yet): on an open drawing, `label_list_styles` for an alignment with no `labelType`,
+`label_set`, `curves` and `station` returns the label sets, the label sets, the curve label styles and the
+station-offset label styles; `bogus` is rejected; each `curves` / `station` name is accepted by `label_add`.
 
 ## Not automated
 

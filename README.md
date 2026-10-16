@@ -563,7 +563,11 @@ dotnet build .\Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release `
 ```
 
 An untracked `C_References` directory remains the local fallback when
-`Civil3DReferencesPath` is omitted.
+`Civil3DReferencesPath` is omitted. Its references must match the target framework:
+Civil 3D 2025/2026 (AutoCAD 25.x) for the default net8.0-windows build, Civil 3D 2027
+(AutoCAD 26.x) for net10.0-windows. `scripts\gather-refs-2027.ps1` fills it with
+2027 references, so a net8 build from such a clone needs `Civil3DReferencesPath`
+pointing at 2026 references.
 
 At minimum, the configured directory must contain:
 
@@ -907,11 +911,12 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 | `civil3d_plot` | `list_page_setups` | Named page setups in the drawing |
 | `civil3d_plot` | `list_plotters` | Configured plot devices and plot style tables; with `device`, that device's paper sizes |
 | `civil3d_plot` | `plot_layouts_to_pdf` | One PDF per layout (`layoutNames` or `allLayouts`) into `outputDirectory`, or a single layout to `outputPath`; optional `pageSetup`, `paperSize`, `plotStyleTable`, `orientation`; `plotArea` `layout` (default), `extents` or `window` + `windowCorners`; `layoutNames: ["Model"]` plots the Model tab (extents or window, fit to the paper) |
+| `civil3d_plot` | `render_layouts_to_png` | One review PNG per paper-space layout (`layoutNames` or `allLayouts`) into `outputDirectory`, written as `<prefix><layout>.png` and always replaced. Uses the pixel medium of `PublishToWeb PNG.pc3` nearest `pixelWidth` (default 3300), fits the sheet to it, and reports the medium and the PNG's pixel size. Optional `paperSize` (a medium), `plotStyleTable`, `plotArea` `layout` or `window` + `windowCorners` |
 | `civil3d_plot` | `publish_sheet_set` | One multi-sheet PDF from `layoutNames`, `sheets` (may include other saved drawings), or every paper-space layout |
 
-Read-only actions are never approval-gated. `plot_layouts_to_pdf` and
-`publish_sheet_set` declare the `export` capability, so they need a
-`civil3d_request_approval` token. `outputPath` (a single layout, or the
+Read-only actions are never approval-gated. `plot_layouts_to_pdf`,
+`render_layouts_to_png` and `publish_sheet_set` declare the `export`
+capability, so they need a `civil3d_request_approval` token. `outputPath` (a single layout, or the
 combined `publish_sheet_set` PDF) must be an absolute `.pdf` file path;
 `outputDirectory` is an absolute folder in which one `<prefix><layout>.pdf` is
 written per layout. Both must sit under `CIVIL3D_EXPORT_ROOTS` (which falls
@@ -972,6 +977,45 @@ the copy before publishing. Refusal must name the table and layout with no PDF
 or DSD written. Without the flag, that check reports SKIP and touches no files
 outside `--out`. Failures still reach cancellation, health and cleanup, then
 exit 1. After jobs drain, scratch settings are restored and fixture files removed.
+
+#### Review before plotting: `render_layouts_to_png`
+
+Look at the paper view before a PDF is plotted, and keep throw-away PDFs out
+of the output folder: PNG for review, PDF only for the final sheet.
+
+1. Render the sheets to PNG:
+   `civil3d_plot action=render_layouts_to_png allLayouts=true outputDirectory=C:\path\inside\export-roots\review`.
+   One `<drawing>-<layout>.png` is written per layout and replaced on every run,
+   so the folder never fills with copies. Use `layoutNames` for a few sheets.
+2. Open the PNGs and read them: text clear of lines, nothing cut at a viewport
+   edge, matchlines and the title block where they belong.
+3. Optionally run your own read-mode `civil3d_run_code` check on the same
+   layouts first (pass the script with `codePath`), for example a text/line
+   overlap check that lists annotation boxes crossed by lines or by other text.
+   It reads the drawing only. This server ships no such script; use your own.
+4. Fix what the review found, render again (the PNGs are replaced), and when it
+   is clean plot the PDF once with `plot_layouts_to_pdf` or `publish_sheet_set`.
+
+How the render is made. `-PLOT` is driven exactly as for the PDF (REGENALL first,
+`regenerated` is reported, the layout and its page setup are never changed, the
+layout's own plot style table is kept unless `plotStyleTable` is given). The
+device is `PublishToWeb PNG.pc3`. That device has pixel media, not paper sizes
+(on Civil 3D 2026 from `Super VGA (800.00 x 600.00 Pixels)` up to
+`16K (15360.00 x 8640.00 Pixels)`, including `4K UHD (3840.00 x 2160.00 Pixels)`),
+and a medium of another size means a custom paper size in the PC3's PMP file,
+which this server never edits. So each layout gets the listed medium whose fitted
+sheet is closest to `pixelWidth`; among media within 5% of that width the one whose
+aspect is nearest the sheet's wins. An 11x17 sheet at the default 3300 gets 4K UHD:
+the sheet fills 3338 x 2160 px (about 196 dpi) with narrow white bands at the sides.
+Each layout reports `media`, the expected `mediaPixels`, and the real `pixelWidth`
+and `pixelHeight` read from the PNG; a warning says when no medium comes close.
+
+The sheet is a window over the layout's limits (AutoCAD keeps them on the paper),
+plotted fit and centred, never cropped. Plot area `Layout` is not used: on a pixel
+device it plots one paper unit per pixel and ignores Fit (an 11x17 sheet came out
+17 x 11 px). The pixel device also asks no paper-units question. If a layout's
+limits do not match its paper, pass `plotArea: "window"` with `windowCorners`
+`[x1, y1, x2, y2]` in the layout's paper units.
 
 </details>
 
@@ -1242,7 +1286,7 @@ The script API also provides these helpers. Database parameters default to `Db`.
 
 `SideErrors` and `TryErrors` keep at most 200 entries each. `OpenSide` retries sharing errors once with a fresh database. It does not retry drawing-content errors. The run owns both `OpenSide` and `OpenSideOrNull` results; do not dispose them. Both modes refuse plugin internals outside this script API.
 
-Drawing helpers require plugin API 6 and add no tool parameters.
+Drawing helpers require plugin API 6 (`ImportBlock`: API 7) and add no tool parameters. The server refuses code that calls `ImportBlock` when the loaded plugin is older than 7.
 
 | Helper | Behaviour |
 |---|---|
@@ -1250,10 +1294,11 @@ Drawing helpers require plugin API 6 and add no tool parameters.
 | `XClip(BlockReference blockRef, IReadOnlyList<Point3d> wcsPolygon)` | Write only. Returns the new `SpatialFilter` ObjectId. Transforms WCS vertices into block coordinates and replaces only the insert's `ACAD_FILTER/SPATIAL` filter. Uses zero elevation and clip depths. Requires three distinct points and refuses self-intersections. Relative-coordinate area validation accepts small polygons far from the origin. AutoCAD may read BackClip back as `1e300` (no back plane). |
 | `AttachXref(string path, Point3d insertionPoint, double? scale = null, string? layer = null, bool relativePath = true, string? blockName = null)` | Write only. Attaches a DWG and inserts it into model space. Returns the nested `XrefResult` record with `DefinitionId`, `ReferenceId`, `Scale`, `SourceUnits`, `HostUnits` and `PathName`. Creates the insert's layer if missing. Paths follow the import-root rules. |
 | `SetViewport(string layoutName, ObjectId viewportId, Point3d? paperCenter = null, double? paperWidth = null, double? paperHeight = null, Point3d? modelCenter = null, double? customScale = null, double? twistAngle = null, bool? locked = null)` | Write only. Edits the existing viewport and returns the same ObjectId. Refuses the layout's overall paper-space viewport. `modelCenter` sets `ViewTarget` and resets `ViewCenter` to `(0,0)`. `customScale` is the paper/model ratio; `ViewHeight` becomes effective paper height divided by that scale. Twist is in radians. Unlocks for editing, restores or applies `locked`, then updates the display. |
+| `ImportBlock(string dwgPath, string blockName, bool replace = false, Database? db = null)` | Write only (API 7); preview refuses it. Reads the DWG as a side database, read-only and never opened in the editor, and clones that block definition with `WblockCloneObjects` into the target block table. Nested blocks, layers and linetypes the definition uses come along. Returns the definition's `ObjectId` in the target and never inserts a reference: the script does that. With `replace: false` an existing definition of that name is kept and its id returned; with `replace: true` it is overwritten in place, so existing references show the new content. An unknown name throws `KeyNotFoundException` listing up to 20 block names in the source (anonymous, layout and xref blocks are left out); a layout, anonymous or xref name is refused. The path follows the import-root rules, like `AttachXref`. Drawing-content errors (`DwgNeedsRecovery`, `InvalidDwgVersion`...) are not retried. |
 
 `AttachXref` uses an explicit scale when supplied; otherwise it converts source to host `INSUNITS`. Unitless or undefined units require an explicit scale, such as `1.0 / 12` for inches into feet. Feet and US survey feet use scale 1 to avoid shifting state-plane backgrounds. Other units use AutoCAD's conversion factor. Relative paths require a saved host and source on the same drive; otherwise the full path is kept.
 
-Write helpers commit nested transactions: a failure caught by `Try` leaves no partial change, while successful changes remain subject to the run's outer rollback and one undo step. `SetViewport` activates non-current layouts or layouts with empty `GetViewports()` before identifying the overall viewport, then restores the previous layout even on failure. Responses and `run.json` report `activatedLayout: true` when needed. `ImportBlock` remains deferred.
+Write helpers commit nested transactions: a failure caught by `Try` leaves no partial change, while successful changes remain subject to the run's outer rollback and one undo step. `ImportBlock` clones through the database, not through `Tr`. A run that fails after it still leaves no definition (seen live on Civil 3D 2026), and one UNDO removes a committed import, but do not count on `Try` to undo it. Do not hold the existing definition open when you call it with `replace: true`. `SetViewport` activates non-current layouts or layouts with empty `GetViewports()` before identifying the overall viewport, then restores the previous layout even on failure. Responses and `run.json` report `activatedLayout: true` when needed.
 
 Opt-in `--helpers` smoke checks cover text bounds, clipping, xref scaling and undo, and viewport persistence. The dormant-layout check needs a reopened saved scratch drawing with an unvisited paper layout; it uses `OpenSide` on the saved DWG to identify the overall handle, then checks refusal and layout restoration. It skips when no candidate exists or the saved DWG is outside import roots. Other fixtures are created and removed by the script; xref checks skip if import roots exclude the run folder. See [TESTING.md](./TESTING.md) for the command and live results.
 
@@ -1564,6 +1609,10 @@ scratch user instance. Run the three commands above separately; the legacy
 - Verify the DLL targets the correct Civil 3D version
 - Ensure Civil 3D and Visual Studio are running as the same Windows user (no elevation mismatch)
 - Check the DLL path passed to `NETLOAD` has no spaces or special characters
+
+**Another plugin's commands are ignored after a civil3d tool call**
+- Once any COM client has used `SendCommand` in a Civil 3D session (this plugin starts its `C3DMCPHOP` command that way), AutoCAD silently drops input queued with `Document.SendStringToExecute`. Seen live on Civil 3D 2026: Design Master commands were lost right after `civil3d_plot`.
+- A plugin that sends commands next to this one should use COM `SendCommand` on `Document.GetAcadDocument()` from a background thread, as `CivilExecution` does. This plugin no longer uses `SendStringToExecute` (a stuck `-PLOT` is cancelled with ESC ESC over COM), and `run_code` refuses it.
 
 ---
 

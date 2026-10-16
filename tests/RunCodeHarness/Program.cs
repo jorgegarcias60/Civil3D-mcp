@@ -491,6 +491,23 @@ foreach (var snippet in new[] {
 }
 Expect(Compile("ObjectId XClip() => ObjectId.Null; return XClip();").Succeeded,
   "read guard permits a local function sharing the XClip name");
+var importBlock = Compile("""
+  ObjectId first = ImportBlock("C:/library.dwg", "MH");
+  ObjectId second = ImportBlock("C:/library.dwg", "MH", replace: true, db: Db);
+  return new { first, second };
+  """, write: true);
+Expect(importBlock.Succeeded, "ImportBlock exact signature compiles in write mode", importBlock);
+foreach (var (label, snippet) in new[] {
+  ("ImportBlock", "ImportBlock(\"C:/library.dwg\", \"MH\");"),
+  ("ImportBlock with replace", "ImportBlock(\"C:/library.dwg\", \"MH\", replace: true);"),
+  ("base-qualified ImportBlock", "base.ImportBlock(\"C:/library.dwg\", \"MH\");"),
+  ("ImportBlock method group", "Func<string, string, bool, Database?, ObjectId> import = ImportBlock; return import;") })
+{
+  var result = Compile(snippet);
+  Expect(HasError(result, ScriptCompiler.GuardDiagnosticId, 1), $"read mode refuses {label}", result);
+}
+Expect(Compile("ObjectId ImportBlock() => ObjectId.Null; return ImportBlock();").Succeeded,
+  "read guard permits a local function sharing the ImportBlock name");
 
 foreach (var (label, snippet) in new[] {
   ("Database setting", "Db.Ltscale = 2;"),
@@ -504,6 +521,7 @@ foreach (var (label, snippet) in new[] {
   ("Insert", "using var side = new Database(false, true); Db.Insert(\"X\", side, true);"),
   ("AttachXref Database API", "Db.AttachXref(\"C:/source.dwg\", \"X\");"),
   ("AttachXref helper", "AttachXref(\"C:/source.dwg\", Point3d.Origin);"),
+  ("ImportBlock helper", "ImportBlock(\"C:/library.dwg\", \"MH\");"),
   ("save", "Db.SaveAs(\"C:/out.dwg\", DwgVersion.Current);"),
   ("layout switch", "LayoutManager.Current.CurrentLayout = \"Sheet\";"),
   ("Session indexer", "Session[\"test\"] = 1;"),
@@ -600,6 +618,7 @@ RuntimeChecks.Run((condition, name) => Expect(condition, name));
 InstanceDiscoveryChecks.Run((condition, name) => Expect(condition, name));
 ComRegistrationChecks.Run((condition, name) => Expect(condition, name));
 PdfChecks.Run((condition, name) => Expect(condition, name));
+RasterPlotChecks.Run((condition, name) => Expect(condition, name));
 PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 PreviewGuardChecks.Run((code, preview) => Compile(code, write: true, preview: preview),

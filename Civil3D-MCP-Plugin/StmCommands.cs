@@ -6,7 +6,9 @@ namespace Civil3DMcpPlugin;
 
 /// <summary>
 /// Backend commands for STM (Storm and Sanitary Analysis) import/export.
-/// Uses SendStringToExecute for the AutoCAD command-line SSA commands.
+/// Sends the AutoCAD command-line SSA commands with CivilExecution.QueueCommandLine
+/// (COM SendCommand after the host operation; SendStringToExecute input is dropped
+/// once any COM client has used SendCommand in the session, issue #46).
 /// These commands invoke Civil 3D's built-in Storm and Sanitary Analysis
 /// dialog workflows via command line.
 /// </summary>
