@@ -235,7 +235,8 @@ const AbsolutePathSchema = z.string().min(1).refine(
 
 // Layout-to-PNG review render: a paper-space layout at its own aspect on the
 // raster PC3's pixel media, one file per layout, always overwritten. Plot area
-// is the sheet ("layout", default) or a paper-space "window".
+// is the sheet ("layout", default: a window over the layout's limits, fitted and
+// centred) or a paper-space "window".
 export const RenderLayoutsToPngArgsSchema = z.object({
   action: z.literal("render_layouts_to_png"),
   layoutNames: z.array(z.string().min(1)).min(1).optional(),

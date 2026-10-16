@@ -5,6 +5,21 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Open issues #13, #22, #39, #45, #46 (2026-10-16)
+
+Plugin installed from the combined branch with Civil 3D closed; a scratch instance started by CAD-Tools
+`Start-Civil3D.ps1` on copies under `C:\CAD-Tools\tmp\c3d-open-issues` (template drawing with five 11x17 layouts;
+a copy of the CAD-Tools block library as the ImportBlock source). Each check attached by pid.
+
+| Check | Result |
+|---|---|
+| #39 stale discovery files | Before the start, 7 records of exited instances were in `instances`; the plugin log said "Removed 7 stale discovery file(s)" and only the live record was left. After that instance was killed, the next start removed its record ("Removed 1"). |
+| #13 `label_list_styles` | Alignment without `labelType` = `label_set` (the label set styles); `curves` listed the 2 curve label styles, `station` the 2 station-offset label styles, both different from the label sets; `bogus` refused with the allowed values; profile ignores `labelType`. |
+| #22 `ImportBlock` | Target had no definition; a run that imported and then threw ended `runtime_error` and left NO definition (the import rolls back with the run); first import returned a definition id, a second import (Ignore) the same id, `replace: true` the same id; an unknown name listed the 8 blocks in the source; read mode refused it at compile time (C3DMCP001); a reference of the imported block was inserted. |
+| #45 first attempt | Failed: "no PNG was written". Recorded the device's `-PLOT` prompts with a LISP probe: `PublishToWeb PNG.pc3` asks no paper units (the extra answer shifted the chain and the rest reached the command line as unknown commands), plot area `Layout` plots one paper unit per pixel and ignores Fit (17 x 11 px sheet), and the offset prompt offers Center only after a window or extents area. Fixed: no paper-units answer, a window over the layout's limits, Fit, Center. |
+| #45 after the fix | All 5 layouts rendered on `4K UHD (3840.00 x 2160.00 Pixels)` (the device lists media up to 16K), 3840 x 2160 px each, the whole sheet fitted and centred; a second run replaced all 5 files, same file set, no backups left, `regenerated: true` both runs, no warnings. |
+| #46 | Not exercised live: no `-PLOT` was left at a prompt in these runs. A proxy (LINE started by one COM client's `SendCommand`, ESC ESC from another) could not run: while one client's `SendCommand` waits for a command to end, AutoCAD refuses every other COM call. With no command active, COM `SendCommand` of ESC ESC throws "Invalid input"; the plugin logs that as a warning. |
+
 ### Startup prompts, per-pid COM, run_code and plot crash guards (2026-10-16)
 
 Plugin installed from the combined branch (all Civil 3D closed first); scratch drawings under `C:\CAD-Tools\tmp\c3d-test-all`.
@@ -41,9 +56,7 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 | `npm run build`, `docs:check` | Ok. |
 | Plugin Release net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
 
-Not covered offline: the clone itself needs Civil 3D. Live checks to run: import twice (same id), `replace: true`,
-an unknown name (listing), read-mode refusal, inserting a reference of the imported block, and whether a run that
-throws after `ImportBlock` leaves the definition in the drawing (the docs say one UNDO removes it; this is not verified).
+Not covered offline: the clone itself needs Civil 3D. Live results: see the live section (2026-10-16).
 
 ### Layout PNG review render, #45 (2026-10-16)
 
@@ -57,14 +70,8 @@ throws after `ImportBlock` leaves the definition in the drawing (the docs say on
 
 Live test pending (needs a scratch drawing with layouts and the PNG device): the `-PLOT` answers for the raster
 device (paper units `Pixels`, fit, centred), whether plot area `layout` keeps the whole sheet on a pixel medium,
-the medium and pixel size the stock `PublishToWeb PNG.pc3` gives for 11x17 and 24x36 sheets, and a second run
-replacing the first.
-
-### Per-process COM registration (2026-10-15)
-
-| Check | Result |
-|---|---|
-| Harness net8 / net10 (`ComRegistrationChecks`, real Running Object Table, stand-in object) | Pass: display name `!Civil3DMcp.AcadApplication:<pid>`, registration found by that name, second Register a no-op, Revoke removes it, non-positive pid refused. |
+the medium and pixel siLive results, including the corrected `-PLOT` answers for the pixel device: see the live section (2026-10-16).
+y that name, second Register a no-op, Revoke removes it, non-positive pid refused. |
 | Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
 | `npm run build`, full vitest, `docs:check`, installer check | Pass (874 tests). |
 

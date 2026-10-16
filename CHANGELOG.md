@@ -34,7 +34,8 @@
   looked at before the one PDF is plotted. It uses the same `-PLOT` driver as
   `plot_layouts_to_pdf` (REGENALL first, `regenerated`, approval, `asJob`, `continueOnError`),
   never changes a layout's page setup, picks the pixel medium nearest `pixelWidth`
-  (default 3300) and reports the medium and the PNG's pixel size. Plot API 3.
+  (default 3300; 4K UHD for an 11x17 sheet) and reports the medium and the PNG's pixel
+  size. The sheet is a window over the layout's limits, fitted and centred. Plot API 3.
   The README has the review-before-plot recipe. Closes #45.
 
 - run_code write runs refuse a layout change together with creating or erasing

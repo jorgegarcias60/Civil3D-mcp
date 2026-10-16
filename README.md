@@ -999,21 +999,23 @@ of the output folder: PNG for review, PDF only for the final sheet.
 How the render is made. `-PLOT` is driven exactly as for the PDF (REGENALL first,
 `regenerated` is reported, the layout and its page setup are never changed, the
 layout's own plot style table is kept unless `plotStyleTable` is given). The
-device is `PublishToWeb PNG.pc3`. That device has pixel media, not paper sizes,
-such as `Sun Hi-Res (1600.00 x 1280.00 Pixels)`, and a medium of another size
-means a custom paper size in the PC3's PMP file, which this server never edits.
-So each layout gets the listed medium whose fitted sheet is closest to
-`pixelWidth`; among media within 5% of that width the one whose aspect is nearest
-the sheet's wins. The sheet is plotted fit and centred, so a 4:3 medium shows an
-11x17 sheet with white bands above and below, never cropped. Each layout reports
-`media`, the expected `mediaPixels`, and the real `pixelWidth` and `pixelHeight`
-read from the PNG. The stock device lists media up to 1600 x 1280 px, so the
-long side is at most 1600 px, below the 3300 px default (about 200 dpi on
-11x17); a warning says so. For a sharper
-review add a larger pixel size to the PC3 (Plotter Configuration Editor, Custom
-Paper Sizes) and pass its name as `paperSize`. `plotArea: "layout"` plots the
-layout area; if a layout shows only part of the sheet, use `plotArea: "window"`
-with `windowCorners` `[0, 0, width, height]` in the layout's paper units.
+device is `PublishToWeb PNG.pc3`. That device has pixel media, not paper sizes
+(on Civil 3D 2026 from `Super VGA (800.00 x 600.00 Pixels)` up to
+`16K (15360.00 x 8640.00 Pixels)`, including `4K UHD (3840.00 x 2160.00 Pixels)`),
+and a medium of another size means a custom paper size in the PC3's PMP file,
+which this server never edits. So each layout gets the listed medium whose fitted
+sheet is closest to `pixelWidth`; among media within 5% of that width the one whose
+aspect is nearest the sheet's wins. An 11x17 sheet at the default 3300 gets 4K UHD:
+the sheet fills 3338 x 2160 px (about 196 dpi) with narrow white bands at the sides.
+Each layout reports `media`, the expected `mediaPixels`, and the real `pixelWidth`
+and `pixelHeight` read from the PNG; a warning says when no medium comes close.
+
+The sheet is a window over the layout's limits (AutoCAD keeps them on the paper),
+plotted fit and centred, never cropped. Plot area `Layout` is not used: on a pixel
+device it plots one paper unit per pixel and ignores Fit (an 11x17 sheet came out
+17 x 11 px). The pixel device also asks no paper-units question. If a layout's
+limits do not match its paper, pass `plotArea: "window"` with `windowCorners`
+`[x1, y1, x2, y2]` in the layout's paper units.
 
 </details>
 
@@ -1296,7 +1298,7 @@ Drawing helpers require plugin API 6 (`ImportBlock`: API 7) and add no tool para
 
 `AttachXref` uses an explicit scale when supplied; otherwise it converts source to host `INSUNITS`. Unitless or undefined units require an explicit scale, such as `1.0 / 12` for inches into feet. Feet and US survey feet use scale 1 to avoid shifting state-plane backgrounds. Other units use AutoCAD's conversion factor. Relative paths require a saved host and source on the same drive; otherwise the full path is kept.
 
-Write helpers commit nested transactions: a failure caught by `Try` leaves no partial change, while successful changes remain subject to the run's outer rollback and one undo step. `ImportBlock` is the exception: the clone is made by the database, not through `Tr`, so `Try` does not undo it; one UNDO removes it. Do not hold the existing definition open when you call it with `replace: true`. `SetViewport` activates non-current layouts or layouts with empty `GetViewports()` before identifying the overall viewport, then restores the previous layout even on failure. Responses and `run.json` report `activatedLayout: true` when needed.
+Write helpers commit nested transactions: a failure caught by `Try` leaves no partial change, while successful changes remain subject to the run's outer rollback and one undo step. `ImportBlock` clones through the database, not through `Tr`. A run that fails after it still leaves no definition (seen live on Civil 3D 2026), and one UNDO removes a committed import, but do not count on `Try` to undo it. Do not hold the existing definition open when you call it with `replace: true`. `SetViewport` activates non-current layouts or layouts with empty `GetViewports()` before identifying the overall viewport, then restores the previous layout even on failure. Responses and `run.json` report `activatedLayout: true` when needed.
 
 Opt-in `--helpers` smoke checks cover text bounds, clipping, xref scaling and undo, and viewport persistence. The dormant-layout check needs a reopened saved scratch drawing with an unvisited paper layout; it uses `OpenSide` on the saved DWG to identify the overall handle, then checks refusal and layout restoration. It skips when no candidate exists or the saved DWG is outside import roots. Other fixtures are created and removed by the script; xref checks skip if import roots exclude the run folder. See [TESTING.md](./TESTING.md) for the command and live results.
 

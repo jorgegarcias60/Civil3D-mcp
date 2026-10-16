@@ -909,14 +909,16 @@ describe("civil3d_plot render_layouts_to_png", () => {
     expect(source).toContain("return await RunPlotBatchAsync(doc, jobs, true, continueOnError, cancellationToken, warnings);");
     expect(source.match(/await RunPlotBatchAsync\(/g)?.length).toBe(2);
     expect(source).toContain("Device = RasterPlot.DefaultDevice");
-    // Pixel media answer "Pixels" to the paper-units prompt and fit/centre the sheet.
+    // Pixel devices ask no paper units; the sheet is a window over the layout limits, fitted and centred
+    // (plot area "Layout" plotted one paper unit per pixel, seen live on Civil 3D 2026).
     const prepStart = code.indexOf("private static List<PlotJob> PrepareRenderJobs(");
     const prepEnd = code.indexOf("private static string ResolvePaper(");
     expect(prepStart).toBeGreaterThan(-1);
     expect(prepEnd).toBeGreaterThan(prepStart);
     const prep = code.slice(prepStart, prepEnd);
     expect(source.slice(source.indexOf("private static List<PlotJob> PrepareRenderJobs("), source.indexOf("private static string ResolvePaper(")))
-      .toMatch(/PaperUnitsToken = "_P",[\s\S]*ScaleToken = "_F",\s*OffsetToken = "_C",[\s\S]*Raster = true,/);
+      .toMatch(/PaperUnitsToken = null,[\s\S]*PlotAreaToken = "_W",\s*WindowCorners = windowCorners == null\s*\? \[FormatPoint\(limits\.MinPoint\.X, limits\.MinPoint\.Y\), FormatPoint\(limits\.MaxPoint\.X, limits\.MaxPoint\.Y\)\][\s\S]*ScaleToken = "_F",\s*OffsetToken = "_C",[\s\S]*Raster = true,/);
+    expect(source).toMatch(/if \(job\.PaperUnitsToken != null\)\s*\{\s*tokens\.Add\(job\.PaperUnitsToken\);/);
     // Read-only preparation: nothing upgraded, copied into a layout or switched.
     expect(prep).not.toMatch(/UpgradeOpen|DowngradeOpen|CopyFrom|validator\.Set\w*\(|CurrentLayout|SetSystemVariable/);
     // The answers still decline to save the page setup, and the PNG is verified from its header.

@@ -691,7 +691,8 @@ public static class PlotCommands
   {
     public required string LayoutName { get; init; }
     public required string PaperSize { get; init; }
-    public required string PaperUnitsToken { get; init; }
+    // Null for pixel devices, which skip the paper-units prompt.
+    public required string? PaperUnitsToken { get; init; }
     public required string OrientationToken { get; init; }
     public required bool UpsideDown { get; init; }
     public required string StyleSheetToken { get; init; }
@@ -1082,20 +1083,31 @@ public static class PlotCommands
       }
       var styleSheet = plotStyleTable ?? layout.CurrentStyleSheet;
       var rotation = layout.PlotRotation;
+      // The sheet is a window over the layout's limits, which AutoCAD keeps on the paper.
+      // Plot area "Layout" on a pixel device plots one paper unit per pixel and ignores Fit
+      // (an 11x17 sheet became 17 x 11 px, seen live 2026-10-16); only a window or extents
+      // area fits the media and offers Center at the offset prompt.
+      var limits = layout.Limits;
+      if (windowCorners == null && (limits.MaxPoint.X - limits.MinPoint.X <= 0 || limits.MaxPoint.Y - limits.MinPoint.Y <= 0))
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+          $"Layout '{layout.LayoutName}' has no paper limits to render. Pass plotArea 'window' with windowCorners in paper units.");
+      }
 
       jobs.Add(new PlotJob
       {
         LayoutName = layout.LayoutName,
         PageSetup = NullIfEmpty(layout.PlotSettingsName),
         PaperSize = choice.Medium.Locale,
-        PaperUnitsToken = "_P",
+        // Pixel devices ask no paper-units question (seen live on Civil 3D 2026).
+        PaperUnitsToken = null,
         OrientationToken = landscape ? "_L" : "_P",
         UpsideDown = rotation is PlotRotation.Degrees180 or PlotRotation.Degrees270,
         StyleSheetToken = string.IsNullOrWhiteSpace(styleSheet) ? "." : styleSheet,
         IsModel = false,
-        PlotAreaToken = plotArea == "window" ? "_W" : "_L",
+        PlotAreaToken = "_W",
         WindowCorners = windowCorners == null
-          ? null
+          ? [FormatPoint(limits.MinPoint.X, limits.MinPoint.Y), FormatPoint(limits.MaxPoint.X, limits.MaxPoint.Y)]
           : [FormatPoint(windowCorners[0], windowCorners[1]), FormatPoint(windowCorners[2], windowCorners[3])],
         ScaleToken = "_F",
         OffsetToken = "_C",
@@ -1186,7 +1198,9 @@ public static class PlotCommands
     // style table, lineweights?, scale lineweights?, paper space first?, hide
     // paperspace objects?, file, save page setup?, proceed? The Model tab asks
     // the same up to lineweights?, then a shade plot setting instead of the
-    // three paper-space questions.
+    // three paper-space questions. A pixel device (PublishToWeb PNG, recorded on
+    // Civil 3D 2026) asks no paper units, and offers Center at the offset prompt
+    // only after a window or extents area.
     var tokens = new List<object>
     {
       "_.-PLOT",
@@ -1194,11 +1208,14 @@ public static class PlotCommands
       job.LayoutName,               // Layout name ("Model" for the Model tab)
       job.Device,                   // Output device
       job.PaperSize,                // Paper size (locale name for the device)
-      job.PaperUnitsToken,          // Paper units
-      job.OrientationToken,         // Drawing orientation
-      job.UpsideDown ? "_Y" : "_N", // Plot upside down?
-      job.PlotAreaToken,            // Plot area: Layout, Extents or Window
     };
+    if (job.PaperUnitsToken != null)
+    {
+      tokens.Add(job.PaperUnitsToken); // Paper units
+    }
+    tokens.Add(job.OrientationToken);              // Drawing orientation
+    tokens.Add(job.UpsideDown ? "_Y" : "_N");      // Plot upside down?
+    tokens.Add(job.PlotAreaToken);                 // Plot area: Layout, Extents or Window
     if (job.WindowCorners != null)
     {
       tokens.Add(job.WindowCorners[0]); // Lower left corner of window
