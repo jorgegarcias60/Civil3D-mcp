@@ -2,13 +2,19 @@
 
 ## Unreleased
 
+- run_code write runs refuse a layout change together with creating or erasing
+  viewports (Fixes #43), and any viewport `Erase`: the second erase-and-re-create on the
+  current layout killed acad.exe live. `civil3d_plot` runs REGENALL before every
+  in-session plot and reports `regenerated` (Fixes #44).
+
 - The plugin registers its instance's AutoCAD `Application` in the Running
   Object Table as `!Civil3DMcp.AcadApplication:<pid>`, so COM clients (CAD-Tools
   PowerShell) can reach any instance by process id, not only the earliest-started
   one. Revoked when the plugin stops; a registration failure only logs a warning.
 
-- Agent starts also answer AutoCAD's "Missing SHX Files" prompt with Ignore, including
-  prompts that appear after the plugin registers (with a substitute-font warning).
+- Agent starts also answer AutoCAD's "Missing SHX Files" prompt with Ignore and close the
+  "Drawing Recovery" notice, including prompts that appear after the plugin registers
+  (with a warning each).
   `attach` on an unresponsive instance names the open dialog; it answers known
   prompts only in this session's own agent instance and only reports elsewhere
   (`reportOnly`). Fixes #48.

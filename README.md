@@ -105,8 +105,9 @@ and Save As as well as open/close.
   to claim that drawing and answer health. While waiting, it scans only the
   verified launched process's dialogs about every two seconds. It finds that
   process's windows by Win32 enumeration of its pid, so no other process is queried.
-  For the English "References - Not Found Files" and "Missing SHX Files" prompts
-  (also when they appear after the plugin registers), it presses the button
+  For the English "References - Not Found Files", "Missing SHX Files" and "Drawing Recovery"
+  prompts (also when they appear after the plugin registers), it presses the one button
+  of that prompt ("Ignore ..." or, for the Drawing Recovery notice, "Close"), the button
   whose text starts with "Ignore": through UI Automation Invoke when available,
   otherwise (task dialog command links in Civil 3D 2026 expose no pattern) by
   sending the button's own BN_CLICKED notification to its host window, then
@@ -1181,6 +1182,8 @@ Side-drawing reads skip retries for recovery, version and improperly read object
 <summary><strong>In-process C# (1 tool)</strong></summary>
 
 `civil3d_run_code` compiles a C# snippet with Roslyn inside the plugin and runs it on Civil 3D's main thread. When it uses an open drawing, the drawing is locked. Use it for work the fixed tools and COM/LISP make too slow or cannot do: bulk geometry over thousands of objects, reading other DWGs as side databases, anything the AutoCAD/Civil 3D .NET API reaches. Measured on Civil 3D 2026: walking 96,913 objects of a 10 MB background into 547,441 sample points took 1.2 s in-process, about 20 minutes in LISP.
+
+Two write-mode guards come from crashes on Civil 3D 2026 and refuse the script before anything runs: a layout change (`CurrentLayout`, `SetCurrentLayoutId`, `CreateLayout`, or `CTAB`/`TILEMODE`) together with creating or erasing viewports in one run (issue #43; stage it as separate runs: layout, title block and table; then only the switch; then the viewports), and any `Erase` on a `Viewport` (issue #44: create viewports once and update them in place). The check reads the whole script, so stages picked by an `Args` value inside one file are refused too. `SetViewport` refuses at run time when it would switch layouts in a run that created or erased a viewport. `civil3d_plot` regenerates (REGENALL) before every in-session plot and reports `regenerated`.
 
 The code runs with your full Windows rights. By default, `CIVIL3D_RUN_CODE_APPROVAL=token` requires an approval token bound to the exact code, even with `CIVIL3D_APPROVAL_MODE=disabled`. With `CIVIL3D_RUN_CODE_APPROVAL=client`, a direct MCP client call without a token uses the client's tool permission and does not need an open drawing for approval. Supplied tokens are still validated. Calls through `civil3d_orchestrate`, `civil3d_docs`, or the HTTP bridge still need a token.
 
