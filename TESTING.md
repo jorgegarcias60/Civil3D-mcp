@@ -19,6 +19,21 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 
 ## Offline (no Civil 3D needed)
 
+### Layout PNG review render, #45 (2026-10-16)
+
+| Check | Result |
+|---|---|
+| `render_layouts_to_png` schema: layout selection, absolute folder, `pixelWidth` range, `plotArea`/`windowCorners` pairing | Pass (vitest). |
+| Approval gating, non-retryable, forwarding to `plotLayoutsToPng`, job route, plot API 3 refusal on every route | Pass (vitest). |
+| Source guards: same `-PLOT` batch and REGENALL as the PDF, `.png` through `FileBoundary` with overwrite, read-only preparation, page setup not saved | Pass (vitest). |
+| Harness net8 / net10 (`RasterPlotChecks`): pixel media parsing, media choice by sheet width then aspect, portrait swap, named medium, PNG header read | Pass (1277 checks on each framework, 24 of them new). |
+| Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+Live test pending (needs a scratch drawing with layouts and the PNG device): the `-PLOT` answers for the raster
+device (paper units `Pixels`, fit, centred), whether plot area `layout` keeps the whole sheet on a pixel medium,
+the medium and pixel size the stock `PublishToWeb PNG.pc3` gives for 11x17 and 24x36 sheets, and a second run
+replacing the first.
+
 ### Per-process COM registration (2026-10-15)
 
 | Check | Result |
