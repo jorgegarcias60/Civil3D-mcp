@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- When the plugin starts, it removes the discovery files that crashed or killed instances
+  left in `%LOCALAPPDATA%\Civil3DMcpPlugin\instances`: the pid has exited, or it now
+  belongs to a process started at another time. A file whose process cannot be inspected
+  is kept. Fixes #39.
+
+- A `-PLOT` left waiting at a prompt is cancelled with ESC ESC over COM `SendCommand`
+  after the operation, also when it failed. It used `SendStringToExecute`, whose input
+  AutoCAD silently drops once any COM client has used `SendCommand` in the session
+  (C3DMCPHOP always does). The plugin no longer uses `SendStringToExecute`; README
+  troubleshooting explains the effect on other plugins. Fixes #46.
+
+- The build message and docs say which references each target needs: Civil 3D 2025/2026
+  (AutoCAD 25.x) for net8.0-windows, Civil 3D 2027 (AutoCAD 26.x) for net10.0-windows.
+  `C_References` from `gather-refs-2027.ps1` holds 2027 references. Fixes #47.
+
+- Two tests failed when vitest ran tests in shuffled order: the dialog scanner mock kept
+  calls from earlier tests, and the instance manager kept the job label an earlier test
+  set. Each test now starts clean. The approval_logging failure #34 names did not
+  reproduce in 15 solo and 8 shuffled full runs. Closes #34.
+
 - run_code write runs refuse a layout change together with creating or erasing
   viewports (Fixes #43), and any viewport `Erase`: the second erase-and-re-create on the
   current layout killed acad.exe live. `civil3d_plot` runs REGENALL before every

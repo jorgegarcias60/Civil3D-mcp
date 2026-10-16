@@ -1033,7 +1033,7 @@ public static class PlotCommands
     if (stale != null)
     {
       var stalePrompt = Convert.ToString(App.GetSystemVariable("LASTPROMPT"));
-      QueueCancel(doc);
+      CivilExecution.QueueCancelAfterOperation();
       throw new JsonRpcDispatchException(
         CommandIncompleteCode,
         $"-{stale} from an earlier request is still waiting at prompt '{stalePrompt}', so -{commandName} was not started. A cancel was queued; retry the request.");
@@ -1075,7 +1075,7 @@ public static class PlotCommands
     if (stillActive)
     {
       var lastPrompt = Convert.ToString(App.GetSystemVariable("LASTPROMPT"));
-      QueueCancel(doc);
+      CivilExecution.QueueCancelAfterOperation();
       throw new JsonRpcDispatchException(
         CommandIncompleteCode,
         $"-{commandName} did not complete; it was waiting at prompt '{lastPrompt}'. A cancel was queued. The prompt chain may differ in this Civil 3D release.");
@@ -1130,18 +1130,6 @@ public static class PlotCommands
 
     return ActiveCommandNames(doc)
       ?.FirstOrDefault(name => commandNames.Contains(name, StringComparer.OrdinalIgnoreCase));
-  }
-
-  private static void QueueCancel(Document doc)
-  {
-    try
-    {
-      doc.SendStringToExecute("\x03\x03", true, false, false);
-    }
-    catch
-    {
-      // Best effort; the caller still reports the stuck command.
-    }
   }
 
   // Reads the output only through the stream Commit opened on the checked

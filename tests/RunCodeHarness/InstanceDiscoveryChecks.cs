@@ -7,9 +7,61 @@ using Civil3DMcpPlugin;
 
 internal static class InstanceDiscoveryChecks
 {
+  // Issue #39: records of exited instances and reused pids go; live, uninspectable and foreign files stay.
+  private static void CheckPruneStale(Action<bool, string> expect)
+  {
+    var root = Path.Combine(Path.GetTempPath(), "c3d-prune-harness-" + Guid.NewGuid().ToString("N"));
+    var folder = Path.Combine(root, "instances");
+    Directory.CreateDirectory(folder);
+    try
+    {
+      using var self = Process.GetCurrentProcess();
+      var selfStart = new DateTimeOffset(self.StartTime.ToUniversalTime());
+      string Record(DateTimeOffset started) => JsonSerializer.Serialize(new { startedAtUtc = started.ToString("o") });
+      string Write(string name, string content)
+      {
+        var path = Path.Combine(folder, name);
+        File.WriteAllText(path, content);
+        return path;
+      }
+      // Real process checks: int.MaxValue is never a running pid; this harness is a live one.
+      var dead = Write($"{int.MaxValue}.json", Record(selfStart));
+      var deadUnreadable = Write($"{int.MaxValue - 1}.json", "{ not json");
+      var live = Write($"{self.Id}.json", Record(selfStart));
+      var removed = InstanceDiscovery.PruneStaleRecords(ownPid: 0, root: root);
+      expect(removed == 2 && !File.Exists(dead) && !File.Exists(deadUnreadable) && File.Exists(live),
+        "pruning removes records of exited pids, readable or not, and keeps a live instance");
+
+      File.WriteAllText(live, Record(selfStart.AddMinutes(-5)));
+      expect(InstanceDiscovery.PruneStaleRecords(ownPid: 0, root: root) == 1 && !File.Exists(live),
+        "pruning removes a record whose pid now belongs to a process started at another time");
+
+      var unreadableLive = Write($"{self.Id}.json", "{ not json");
+      var own = Write("4242.json", Record(selfStart));
+      var foreign = Write("notes.json", "{}");
+      var freshTemp = Write($"{self.Id}.json.{Guid.NewGuid():N}.tmp", "{}");
+      var oldTemp = Write($"{self.Id}.json.{Guid.NewGuid():N}.tmp", "{}");
+      File.SetLastWriteTimeUtc(oldTemp, DateTime.UtcNow.AddHours(-2));
+      var asked = new List<int>();
+      removed = InstanceDiscovery.PruneStaleRecords(ownPid: 4242, root: root, isGone: (pid, _) => { asked.Add(pid); return false; });
+      expect(removed == 1 && !File.Exists(oldTemp) && File.Exists(freshTemp) && File.Exists(unreadableLive) &&
+        File.Exists(own) && File.Exists(foreign) && asked.SequenceEqual(new[] { self.Id }),
+        "pruning keeps uninspectable records, its own pid and other files, and removes only old temp files");
+
+      var started = new List<DateTimeOffset?>();
+      File.WriteAllText(unreadableLive, Record(selfStart));
+      InstanceDiscovery.PruneStaleRecords(ownPid: 4242, root: root, isGone: (_, s) => { started.Add(s); return false; });
+      expect(started.Count == 1 && started[0] == selfStart, "pruning passes the record's start time to the identity check");
+      expect(InstanceDiscovery.PruneStaleRecords(ownPid: 0, root: Path.Combine(root, "missing")) == 0,
+        "pruning a missing folder removes nothing");
+    }
+    finally { Directory.Delete(root, true); }
+  }
+
   internal static void Run(Action<bool, string> expect)
   {
     CheckGraceClaims(expect);
+    CheckPruneStale(expect);
     var now = Stopwatch.GetTimestamp();
     var deadline = new IdleDeadline(TimeSpan.FromSeconds(10), now);
     expect(!deadline.IsExpired(now) &&

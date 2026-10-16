@@ -23,6 +23,12 @@ export function configureSessionLabel(job?: string, drawing?: string): string | 
   return sessionLabel = deriveSessionLabel(explicitJob, drawing) ?? sessionLabel;
 }
 
+/** Tests only: forget the job label, so a test never inherits the label an earlier test set (issue #34). */
+export function resetSessionLabelForTests(): void {
+  explicitJob = undefined;
+  sessionLabel = process.env.CIVIL3D_SESSION_LABEL?.trim() || null;
+}
+
 export function serverIdentity(): Promise<{ serverPid: number; serverStartedAtUtc: string }> {
   return identity ??= processStartTimes([process.pid]).then(starts => {
     if (!Number.isFinite(Date.parse(starts[process.pid]))) throw new Error("Cannot establish MCP server process creation time.");

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InstanceManager, defaultInstanceDependencies, LAUNCH_GRACE_MS, mergeDialogs } from "../src/utils/instanceManager.js";
-import { sessionId, sessionLabel, setAttachedInstance, attachedInstance, selectDefault, withPinnedEndpoint } from "../src/utils/instanceSession.js";
+import { sessionId, sessionLabel, setAttachedInstance, attachedInstance, selectDefault, withPinnedEndpoint, resetSessionLabelForTests } from "../src/utils/instanceSession.js";
 import { isOrphan, parseInstance, pluginDataRoot, processStartTimes, readInstanceRegistry, readDesignMasterInstance, type CivilInstance } from "../src/utils/instanceRegistry.js";
 import { findCivilShortcut, shortcutArguments, windowsScript, launchProcessScript, acquireStartLock, releaseStartLock, launchedProcessAlive, stopLaunchedProcess, type CivilLaunchProof } from "../src/utils/instanceLauncher.js";
 import { readPluginToken } from "../src/utils/pluginAuth.js";
@@ -30,6 +30,7 @@ beforeEach(async () => {
   vi.stubEnv("LOCALAPPDATA", temp);
   vi.stubEnv("CIVIL3D_PORT", undefined);
   vi.stubEnv("CIVIL3D_MAX_AGENT_INSTANCES", undefined);
+  resetSessionLabelForTests();
   root = pluginDataRoot();
   await mkdir(join(root, "instances"), { recursive: true });
   await mkdir(join(root, "claims"), { recursive: true });

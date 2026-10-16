@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -8,6 +8,9 @@ import { windowsScriptFile } from "../src/utils/instanceLauncher.js";
 vi.mock("../src/utils/instanceLauncher.js", () => ({ windowsScriptFile: vi.fn() }));
 
 describe("instance dialog scanner", () => {
+  // Each test starts with a fresh mock, so call counts never depend on test order (issue #34).
+  beforeEach(() => { vi.mocked(windowsScriptFile).mockReset(); });
+
   it("rejects invalid process identity before opening the helper", async () => {
     await expect(scanInstanceDialogs(0, "2026-10-15T12:00:00Z")).rejects.toThrow(/process ID/);
     await expect(scanInstanceDialogs(42, "invalid")).rejects.toThrow(/start time/);
@@ -25,7 +28,6 @@ describe("instance dialog scanner", () => {
   });
 
   it("passes reportOnly to the scanner only when asked", async () => {
-    vi.mocked(windowsScriptFile).mockClear();
     vi.mocked(windowsScriptFile).mockResolvedValue(JSON.stringify({ dialogs: [], missingXrefs: [] }));
     await scanInstanceDialogs(42, "2026-10-15T12:00:00Z", { reportOnly: true });
     await scanInstanceDialogs(42, "2026-10-15T12:00:00Z", {});
