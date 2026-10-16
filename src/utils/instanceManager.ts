@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { readInstanceRegistry, processAlive, pluginDataRoot, describeInstances, sameDrawing, type CivilInstance } from "./instanceRegistry.js";
 import { attachedInstance, setAttachedInstance, sessionId, sessionLabel, configureSessionLabel, serverIdentity, adoptInstanceOwnership, withPinnedEndpoint } from "./instanceSession.js";
 import { acadPids, findCivilShortcut, launchCivilShortcut, protectInstanceFolders, acquireStartLock, releaseStartLock, launchedProcessAlive, stopLaunchedProcess } from "./instanceLauncher.js";
-import { scanInstanceDialogs, titleIs, XREF_PROMPT, SHX_PROMPT, type DialogScanResult, type InstanceDialog } from "./instanceDialogs.js";
+import { scanInstanceDialogs, titleIs, XREF_PROMPT, SHX_PROMPT, RECOVERY_PROMPT, type DialogScanResult, type InstanceDialog } from "./instanceDialogs.js";
 import { effectivePluginHost, withApplicationConnection } from "./ConnectionManager.js";
 import { readPluginToken } from "./pluginAuth.js";
 import { currentAbortSignal } from "./requestContext.js";
@@ -30,6 +30,7 @@ const SCAN_FAILED = "Dialog scan failed";
 const RECOVERY_ROUNDS = 8;
 const RECOVERY_WAIT_MS = 2000;
 const XREF_WARNING = "The drawing has missing external references (Civil 3D's prompt was answered with Ignore). Review missingXrefs and the dialog text before using its contents.";
+const RECOVERY_WARNING = "Civil 3D's Drawing Recovery notice (the previous session ended unexpectedly) was closed; its backups stay in the Drawing Recovery Manager.";
 const SHX_WARNING = "Civil 3D's Missing SHX Files prompt was answered with Ignore; text that uses those fonts shows a substitute font.";
 
 // Every dialog seen during the start stays in the result: one answered with Ignore is gone by the next scan
@@ -283,6 +284,7 @@ export class InstanceManager {
     const warnings = [
       ...(scan.missingXrefs.length || answered(XREF_PROMPT) ? [XREF_WARNING] : []),
       ...(answered(SHX_PROMPT) ? [SHX_WARNING] : []),
+      ...(answered(RECOVERY_PROMPT) ? [RECOVERY_WARNING] : []),
     ];
     return { ...scan, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
   }

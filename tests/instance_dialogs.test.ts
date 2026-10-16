@@ -58,22 +58,29 @@ describe("instance dialog scanner", () => {
     expect(source).not.toMatch(/SendKeys|SetFocus|Click\(|mouse_event|keybd_event|SendInput|SetForegroundWindow|SetActiveWindow|PostMessage|SetCursorPos/i);
   });
 
-  it("answers only the two table prompts, only when not reportOnly, and verifies the matched title", async () => {
+  it("answers only the three table prompts, only when not reportOnly, and verifies the matched title and button", async () => {
     const source = await readFile(fileURLToPath(new URL("../scripts/scan-instance-dialogs.ps1", import.meta.url)), "utf8");
-    // One table: title -> the one Ignore button; missingXrefs belongs to the xref dialog only.
+    // One table: title -> the one button it presses; missingXrefs belongs to the xref dialog only.
     const table = source.match(/\$knownPrompts = @\(([\s\S]*?)\r?\n\)/)?.[1] ?? "";
-    expect(table.match(/title = '/g)).toHaveLength(2);
-    expect(table).toMatch(/title = 'References - Not Found Files'; xrefs = \$true/);
-    expect(table).toMatch(/title = 'Missing SHX Files'; xrefs = \$false/);
+    expect(table.match(/title = '/g)).toHaveLength(3);
+    expect(table).toMatch(/title = 'References - Not Found Files'; button = '\^Ignore'; xrefs = \$true/);
+    expect(table).toMatch(/title = 'Missing SHX Files'; button = '\^Ignore'; xrefs = \$false/);
+    // Drawing Recovery only informs; its single action button is Close (seen live 2026-10-16).
+    expect(table).toMatch(/title = 'Drawing Recovery'; button = '\^Close\$'; xrefs = \$false/);
     expect(source).toMatch(/\$prompt\.xrefs/);
     expect(source).toMatch(/-ieq \$known\.title/);
-    // Titles are not repeated outside the table (comments aside), so a third prompt cannot slip past the checks.
+    // Titles are not repeated outside the table (comments aside), so a fourth prompt cannot slip past the checks.
     const code = source.replace(table, "").split(/\r?\n/).filter(line => !line.trim().startsWith("#")).join("\n");
-    expect(code).not.toMatch(/References - Not Found Files|Missing SHX Files/);
-    // The C# click verifies against the title passed in, case-insensitively.
-    expect(source).toMatch(/ClickButton\(long dialogHandle, long buttonHandle, int expectedPid, string expectedTitle\)/);
+    expect(code).not.toMatch(/References - Not Found Files|Missing SHX Files|Drawing Recovery/);
+    // The button is matched by the entry's own pattern everywhere; no hard-coded Ignore check is left.
+    expect(code).not.toMatch(/'\^Ignore'|StartsWith\("Ignore"/);
+    expect(source).toMatch(/-match \$dialog\.buttonPattern/);
+    expect(source).toMatch(/-notmatch \$prompt\.button/);
+    // The C# click verifies against the title and button pattern passed in, case-insensitively.
+    expect(source).toMatch(/ClickButton\(long dialogHandle, long buttonHandle, int expectedPid, string expectedTitle, string buttonPattern\)/);
     expect(source).toMatch(/string\.Equals\(TextOf\(dialog\)\.Trim\(\), expectedTitle, StringComparison\.OrdinalIgnoreCase\)/);
-    expect(source).toMatch(/\]::ClickButton\([^)]*\[string\]\$prompt\.title\)/);
+    expect(source).toMatch(/Regex\.IsMatch\(TextOf\(button\)\.Replace\("&", ""\)\.Trim\(\), buttonPattern/);
+    expect(source).toMatch(/\]::ClickButton\([^)]*\[string\]\$prompt\.title, \[string\]\$prompt\.button\)/);
     // reportOnly defaults to false and guards the only block that can invoke or click.
     expect(source).toMatch(/\$reportOnly = \$data\.reportOnly -eq \$true/);
     const guard = source.indexOf("if ($recognized -and -not $reportOnly) {");
