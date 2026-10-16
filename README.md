@@ -563,7 +563,11 @@ dotnet build .\Civil3D-MCP-Plugin\Civil3DMcpPlugin.csproj -c Release `
 ```
 
 An untracked `C_References` directory remains the local fallback when
-`Civil3DReferencesPath` is omitted.
+`Civil3DReferencesPath` is omitted. Its references must match the target framework:
+Civil 3D 2025/2026 (AutoCAD 25.x) for the default net8.0-windows build, Civil 3D 2027
+(AutoCAD 26.x) for net10.0-windows. `scripts\gather-refs-2027.ps1` fills it with
+2027 references, so a net8 build from such a clone needs `Civil3DReferencesPath`
+pointing at 2026 references.
 
 At minimum, the configured directory must contain:
 
@@ -1564,6 +1568,10 @@ scratch user instance. Run the three commands above separately; the legacy
 - Verify the DLL targets the correct Civil 3D version
 - Ensure Civil 3D and Visual Studio are running as the same Windows user (no elevation mismatch)
 - Check the DLL path passed to `NETLOAD` has no spaces or special characters
+
+**Another plugin's commands are ignored after a civil3d tool call**
+- Once any COM client has used `SendCommand` in a Civil 3D session (this plugin starts its `C3DMCPHOP` command that way), AutoCAD silently drops input queued with `Document.SendStringToExecute`. Seen live on Civil 3D 2026: Design Master commands were lost right after `civil3d_plot`.
+- A plugin that sends commands next to this one should use COM `SendCommand` on `Document.GetAcadDocument()` from a background thread, as `CivilExecution` does. This plugin no longer uses `SendStringToExecute` (a stuck `-PLOT` is cancelled with ESC ESC over COM), and `run_code` refuses it.
 
 ---
 

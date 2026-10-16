@@ -235,7 +235,10 @@ C_References/
 └── AeccPressurePipesMgd.dll
 ```
 
-Use assemblies from the matching Civil 3D 2026 installation or licensed SDK.
+Use assemblies that match the target framework: Civil 3D 2025/2026 (AutoCAD 25.x)
+for the default net8.0-windows build, Civil 3D 2027 (AutoCAD 26.x) for
+net10.0-windows. `scripts/gather-refs-2027.ps1` stages the 2027 assemblies
+into `C_References/`.
 
 ---
 

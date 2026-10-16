@@ -19,6 +19,16 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 
 ## Offline (no Civil 3D needed)
 
+### Stale discovery files #39, COM cancel #46, reference docs #47, order-dependent tests #34 (2026-10-16)
+
+| Check | Result |
+|---|---|
+| Harness net8 (`InstanceDiscoveryChecks.CheckPruneStale`, temp root, this process as the live pid) | Pass (1258 checks): records of exited pids removed (readable or not), a live record kept, a record whose pid started at another time removed, uninspectable records / own pid / other files kept, only temp files older than an hour removed, a missing folder removes nothing. |
+| `tests/host_routes.test.ts` | No plugin file calls `SendStringToExecute`; both stuck-`-PLOT` paths queue the cancel, which `RunOnHostAsync` sends as ESC ESC with COM `SendCommand` in a `finally` after the operation. |
+| `npx vitest run --cache=false --sequence.shuffle`, seeds 8919, 16838, 24757 | Before: 2 failures each (`instance_dialogs` "rejects invalid process identity" saw calls from earlier tests on the shared mock; `instance_manager` "writes an expiring claim" inherited the job label an earlier test set). After a per-test mock reset and `resetSessionLabelForTests()`: 889 passed each, and with two more seeds. |
+| `tests/approval_logging.test.ts` (the test #34 names) | Passed 15 solo runs and every shuffled full run; the 2026-10-12 failure did not reproduce. |
+| Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
 ### Per-process COM registration (2026-10-15)
 
 | Check | Result |

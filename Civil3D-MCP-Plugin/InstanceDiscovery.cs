@@ -237,6 +237,66 @@ internal sealed class InstanceDiscovery
     }
   }
 
+  // Removes the discovery records that crashed or killed instances left behind (issue #39): the
+  // process has exited, or its pid now belongs to a process started at another time. A record
+  // whose process cannot be inspected is kept, and so is an unreadable record of a live pid.
+  // Temp files older than an hour go too. The MCP server already removes expired claims and
+  // claims of dead launches when it starts an instance. Returns the number of files removed.
+  internal static int PruneStaleRecords(int ownPid, string? root = null, Func<int, DateTimeOffset?, bool>? isGone = null)
+  {
+    var directory = Path.Combine(root ?? Root, "instances");
+    if (!Directory.Exists(directory)) return 0;
+    isGone ??= IsGoneProcess;
+    var removed = 0;
+    foreach (var path in Directory.EnumerateFiles(directory))
+    {
+      try
+      {
+        var name = Path.GetFileName(path);
+        if (name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+        {
+          if (DateTime.UtcNow - File.GetLastWriteTimeUtc(path) <= TimeSpan.FromHours(1)) continue;
+        }
+        else
+        {
+          if (!name.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
+              !int.TryParse(Path.GetFileNameWithoutExtension(name), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var pid) || pid <= 0 || pid == ownPid) continue;
+          DateTimeOffset? started = null;
+          try
+          {
+            if (JsonNode.Parse(File.ReadAllText(path))?["startedAtUtc"]?.GetValue<string>() is string text &&
+                DateTimeOffset.TryParse(text, System.Globalization.CultureInfo.InvariantCulture,
+                  System.Globalization.DateTimeStyles.None, out var parsed)) started = parsed;
+          }
+          catch (Exception error) when (error is JsonException or InvalidOperationException or FormatException) { }
+          if (!isGone(pid, started)) continue;
+        }
+        File.Delete(path);
+        removed++;
+      }
+      catch (IOException) { /* Locked or already removed: the next start tries again. */ }
+      catch (UnauthorizedAccessException) { /* Not ours to remove. */ }
+    }
+    return removed;
+  }
+
+  // True when the pid runs no process, or a process that started at another time than the record
+  // says (pid reuse; a second of tolerance for clock rounding). Unknown start: only exit counts.
+  private static bool IsGoneProcess(int pid, DateTimeOffset? startedAtUtc)
+  {
+    try
+    {
+      using var process = Process.GetProcessById(pid);
+      if (process.HasExited) return true;
+      return startedAtUtc != null &&
+        Math.Abs((process.StartTime.ToUniversalTime() - startedAtUtc.Value.UtcDateTime).TotalSeconds) > 1;
+    }
+    catch (ArgumentException) { return true; }
+    catch (InvalidOperationException) { return true; }
+    catch (System.ComponentModel.Win32Exception) { return false; } // Cannot inspect: keep the record.
+  }
+
   private sealed record Claim(string ClaimId, string Drawing, string OwnerSession, DateTimeOffset CreatedAtUtc, DateTimeOffset ExpiresAtUtc,
     string? Label, string? LaunchToken, int? LaunchPid, DateTimeOffset? LaunchStartedAtUtc,
     string? OwnerLabel, int? OwnerServerPid, DateTimeOffset? OwnerServerStartedAtUtc);

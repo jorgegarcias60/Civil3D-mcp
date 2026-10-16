@@ -469,6 +469,16 @@ public static class CivilExecution
     PendingCommandLine.Add(input.TrimEnd('\r', '\n', ' ') + " ");
   }
 
+  // Set by a host operation that left a command waiting at a prompt. After the
+  // operation ends, successfully or not, ESC ESC goes to the document through
+  // COM SendCommand. Not SendStringToExecute: once any COM client has used
+  // SendCommand in the session (C3DMCPHOP always does), AutoCAD silently drops
+  // input queued with SendStringToExecute (issue #46: another plugin's
+  // commands were lost right after civil3d_plot). Main thread only.
+  private static bool PendingCancel;
+
+  public static void QueueCancelAfterOperation() => PendingCancel = true;
+
   private static Document RequireExpectedDocument(string? expectedDrawingIdentity, string noChanges)
   {
     var doc = App.DocumentManager.MdiActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
@@ -534,6 +544,7 @@ public static class CivilExecution
       }
 
       PendingCommandLine.Clear();
+      PendingCancel = false;
       try
       {
         await operation(route);
@@ -605,7 +616,18 @@ public static class CivilExecution
         // Work in C3DMCPHOP may still be awaiting commands (-PLOT) after
         // SendCommand returned; wait for the operation, then send any
         // command-line input it queued.
-        await dispatch.OperationDone;
+        try
+        {
+          await dispatch.OperationDone;
+        }
+        finally
+        {
+          if (PendingCancel)
+          {
+            PendingCancel = false;
+            if (acadDocument != null) await SendCancelAsync(acadDocument);
+          }
+        }
         if (cancellationToken.IsCancellationRequested) return;
         if (PendingCommandLine.Count > 0 && acadDocument != null)
         {
@@ -762,6 +784,19 @@ public static class CivilExecution
       }
 
       await call;
+    }
+  }
+
+  // Best effort: a failure is logged and never replaces the operation's result.
+  private static async Task SendCancelAsync(object acadDocument)
+  {
+    try
+    {
+      await SendCommandLineAsync(acadDocument, new[] { "\x03\x03" });
+    }
+    catch (Exception ex)
+    {
+      PluginLog.Warn("Host", "Could not cancel the command left at a prompt.", ex);
     }
   }
 

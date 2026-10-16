@@ -87,12 +87,21 @@ describe("host routes", () => {
           : has(writes);
         if (bad.length > 0) offenders.push(`${name} ${kind}: ${bad.join(", ")}`);
       }
-      const sendString = code.match(/SendStringToExecute\(/g)?.length ?? 0;
-      // PlotCommands cancels a stuck -PLOT from inside its own command with ESC ESC.
-      if (sendString > (name === "PlotCommands.cs" ? 1 : 0)) offenders.push(`${name}: SendStringToExecute`);
+      if (code.includes("SendStringToExecute(")) offenders.push(`${name}: SendStringToExecute`);
     }
     expect(offenders).toEqual([]);
     expect(counts.ReadInCommandAsync).toBe(11);
     expect(counts.ReadThenCommandLineAsync).toBe(6);
+  });
+
+  // After any COM SendCommand in the session (C3DMCPHOP always sends one), AutoCAD silently
+  // drops SendStringToExecute input (issue #46), so a stuck -PLOT is cancelled over COM after
+  // the operation, also when the operation failed.
+  it("cancels a command left at a prompt through COM SendCommand after the operation", () => {
+    const plot = withoutComments(source("PlotCommands.cs"));
+    expect(plot.match(/CivilExecution\.QueueCancelAfterOperation\(\)/g)?.length).toBe(2);
+    expect(execution).toMatch(/try\s*\{\s*await dispatch\.OperationDone;\s*\}\s*finally\s*\{\s*if \(PendingCancel\)[\s\S]*?await SendCancelAsync\(acadDocument\)/);
+    expect(execution).toContain('SendCommandLineAsync(acadDocument, new[] { "\\x03\\x03" })');
+    expect(execution).toMatch(/PendingCommandLine\.Clear\(\);\s*PendingCancel = false;/);
   });
 });
