@@ -16,6 +16,7 @@ export interface InstanceDialog {
 // Titles of the prompts the scanner answers (its $knownPrompts table); matched trimmed and case-insensitively.
 export const XREF_PROMPT = "References - Not Found Files";
 export const SHX_PROMPT = "Missing SHX Files";
+export const RECOVERY_PROMPT = "Drawing Recovery";
 export const titleIs = (dialog: Pick<InstanceDialog, "title">, title: string) =>
   dialog.title.trim().toLowerCase() === title.toLowerCase();
 
