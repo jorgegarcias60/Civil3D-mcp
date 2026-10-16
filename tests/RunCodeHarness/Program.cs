@@ -332,6 +332,86 @@ Expect(HasError(explode, ScriptCompiler.GuardDiagnosticId, 1), "read mode refuse
 var layout = Compile("LayoutManager.Current.CreateLayout(\"X\");");
 Expect(HasError(layout, ScriptCompiler.GuardDiagnosticId, 1), "read mode refuses LayoutManager changes", layout);
 
+// Issue #43: a layout change plus viewport creation/erasure in one write run crashed AutoCAD at commit.
+var layoutViewportRefused = new (string Label, string Code, int Line)[] {
+  ("CurrentLayout switch + new Viewport",
+    "LayoutManager.Current.CurrentLayout = \"Sheet\";\nvar vp = new Viewport();\nreturn 1;", 2),
+  ("new Viewport before the switch (reported on the viewport line)",
+    "var vp = new Viewport();\nLayoutManager.Current.CurrentLayout = \"Sheet\";\nreturn 1;", 1),
+  ("SetCurrentLayoutId + Erase on a Viewport",
+    "LayoutManager.Current.SetCurrentLayoutId(Db.CurrentSpaceId);\nOpen<Viewport>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;", 2),
+  ("CreateLayout + new Viewport",
+    "var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nusing var vp = new Viewport();\nreturn id;", 2),
+  ("CreateLayout + target-typed new Viewport",
+    "var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nViewport vp = new();\nreturn id;", 2),
+  ("CurrentLayout switch + Erase(bool) through a conditional access",
+    "LayoutManager.Current.CurrentLayout = \"Sheet\";\nViewport vp = Open<Viewport>(ObjectId.Null, forWrite: true);\nvp?.Erase(true);\nreturn 1;", 3),
+  ("CurrentLayout deconstruction + Erase method group",
+    "string unused;\n(LayoutManager.Current.CurrentLayout, unused) = (\"Sheet\", \"x\");\nAction a = Open<Viewport>(ObjectId.Null, forWrite: true).Erase;\nreturn a;", 3),
+  ("CTAB system variable + new Viewport",
+    "Application.SetSystemVariable(\"CTAB\", \"Sheet\");\nusing var vp = new Viewport();\nreturn 1;", 2),
+  ("lower-case ctab + named arguments + new Viewport",
+    "Application.SetSystemVariable(value: \"Sheet\", name: \"ctab\");\nusing var vp = new Viewport();\nreturn 1;", 2),
+  ("TILEMODE system variable + Erase on a Viewport",
+    "Application.SetSystemVariable(\"TILEMODE\", 0);\nOpen<Viewport>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;", 2),
+  ("CTAB through a const name + new Viewport",
+    "const string variable = \"CTAB\";\nApplication.SetSystemVariable(variable, \"Sheet\");\nusing var vp = new Viewport();\nreturn 1;", 3),
+  ("Database.TileMode assignment + new Viewport",
+    "Db.TileMode = false;\nusing var vp = new Viewport();\nreturn 1;", 2),
+  ("stages chosen by Args in one script (the whole source counts)",
+    "var stage = (string)Args[\"stage\"]!;\nif (stage == \"activate\") LayoutManager.Current.CurrentLayout = \"Sheet\";\nelse if (stage == \"viewports\") { using var vp = new Viewport(); }\nreturn stage;", 3),
+};
+foreach (var (label, code, viewportLine) in layoutViewportRefused)
+{
+  var result = Compile(code, write: true);
+  var guard = result.Errors.Where(error => error.Code == ScriptCompiler.GuardDiagnosticId).ToList();
+  Expect(guard.Count == 1 && guard[0].Line == viewportLine
+      && guard[0].Message.Contains("issue #43", StringComparison.OrdinalIgnoreCase)
+      && guard[0].Message.Contains("FlushGraphics", StringComparison.Ordinal),
+    $"write mode refuses {label} in one run (issue #43)", result);
+}
+var layoutViewportAllowed = new (string Label, string Code)[] {
+  ("CurrentLayout switch alone", "LayoutManager.Current.CurrentLayout = \"Sheet\";\nreturn 1;"),
+  ("SetCurrentLayoutId alone", "LayoutManager.Current.SetCurrentLayoutId(Db.CurrentSpaceId);\nreturn 1;"),
+  ("CreateLayout alone", "var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nreturn id;"),
+  ("CreateLayout with a title-block xref", "var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nvar x = AttachXref(\"C:/tb.dwg\", Point3d.Origin);\nreturn id;"),
+  ("new Viewport alone", "using var vp = new Viewport();\nreturn vp.Width;"),
+  ("Erase on a Viewport alone", "Open<Viewport>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;"),
+  ("SetViewport alone", "return SetViewport(\"Sheet\", ObjectId.Null, customScale: 0.1);"),
+  ("reading CurrentLayout next to a new Viewport", "var name = LayoutManager.Current.CurrentLayout;\nusing var vp = new Viewport();\nreturn name;"),
+  ("Erase on a non-Viewport next to a layout switch", "LayoutManager.Current.CurrentLayout = \"Sheet\";\nOpen<DBText>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;"),
+  ("a local Erase function next to a layout switch", "void Erase() { }\nLayoutManager.Current.CurrentLayout = \"Sheet\";\nErase();\nreturn 1;"),
+  ("CTAB system variable alone", "Application.SetSystemVariable(\"CTAB\", \"Sheet\");\nreturn 1;"),
+  ("another system variable next to a new Viewport", "Application.SetSystemVariable(\"OSMODE\", 0);\nusing var vp = new Viewport();\nreturn vp.Width;"),
+  ("a system variable named at run time next to a new Viewport",
+    "var name = (string)Args[\"name\"]!;\nApplication.SetSystemVariable(name, 0);\nusing var vp = new Viewport();\nreturn vp.Width;"),
+  ("reading CTAB next to a new Viewport", "var tab = Application.GetSystemVariable(\"CTAB\");\nusing var vp = new Viewport();\nreturn tab;"),
+  ("Database.TileMode read next to a new Viewport", "var tile = Db.TileMode;\nusing var vp = new Viewport();\nreturn tile;"),
+  ("new Viewport with SetViewport (SetViewport refuses a layout switch at run time instead)",
+    "using var vp = new Viewport();\nreturn SetViewport(\"Sheet\", ObjectId.Null, customScale: 0.1);"),
+};
+foreach (var (label, code) in layoutViewportAllowed)
+{
+  var result = Compile(code, write: true);
+  Expect(result.Succeeded, $"write mode still allows {label} (issue #43)", result);
+}
+// The guard is for write runs only: read mode keeps refusing each part by itself, and preview keeps its own reasons.
+var layoutViewportRead = Compile("var vp = new Viewport();\nreturn vp.Width;");
+Expect(layoutViewportRead.Succeeded, "read mode still allows an in-memory new Viewport", layoutViewportRead);
+var layoutViewportReadSwitch = Compile("LayoutManager.Current.CurrentLayout = \"Sheet\";\nvar vp = new Viewport();\nreturn 1;");
+Expect(layoutViewportReadSwitch.Errors.Count(error => error.Code == ScriptCompiler.GuardDiagnosticId) == 1
+    && !layoutViewportReadSwitch.Errors.Any(error => error.Message.Contains("issue #43", StringComparison.OrdinalIgnoreCase)),
+  "read mode reports its own write refusal, not the issue #43 message", layoutViewportReadSwitch);
+var layoutViewportPreview = Compile("var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nvar vp = new Viewport();\nreturn id;", preview: true);
+Expect(layoutViewportPreview.Errors.Count(error => error.Code == ScriptCompiler.GuardDiagnosticId) == 1
+    && !layoutViewportPreview.Errors.Any(error => error.Message.Contains("issue #43", StringComparison.OrdinalIgnoreCase)),
+  "preview keeps its own layout refusal and does not add the issue #43 message", layoutViewportPreview);
+// The guard reads the whole source, so the message must say a stage chosen by Args is refused too.
+var layoutViewportStages = Compile("var stage = (string)Args[\"stage\"]!;\nif (stage == \"activate\") LayoutManager.Current.CurrentLayout = \"Sheet\";\nelse if (stage == \"viewports\") { using var vp = new Viewport(); }\nreturn stage;", write: true);
+Expect(layoutViewportStages.Errors.Any(error => error.Message.Contains("own script or file", StringComparison.Ordinal)
+    && error.Message.Contains("Args", StringComparison.Ordinal)),
+  "the issue #43 message says stages selected by Args in one script are refused", layoutViewportStages);
+
 var addObject = Compile("Db.AddDBObject(new Xrecord());");
 Expect(HasError(addObject, ScriptCompiler.GuardDiagnosticId, 1), "read mode refuses Database.AddDBObject", addObject);
 

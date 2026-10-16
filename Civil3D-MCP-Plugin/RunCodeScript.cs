@@ -151,7 +151,16 @@ public abstract partial class RunCodeScript
     if (db != null && _transaction != null) _transactions[db] = _transaction;
     _savedWorkingDatabase = HostApplicationServices.WorkingDatabase;
     _clock = Stopwatch.StartNew();
+    // Only SetViewport reads it (issue #43); write runs are the only ones that commit.
+    if (writeMode && !previewMode && db != null)
+    {
+      try { _viewportWatch = new RunCodeViewportWatch(db); }
+      catch (Exception exception) { PluginLog.Swallow("RunCode", "watching viewport changes", exception); }
+    }
   }
+
+  private RunCodeViewportWatch? _viewportWatch;
+  internal bool ViewportsChangedInRun => _viewportWatch?.Changed == true;
 
   /// <summary>Appends a line to the run's output (returned as "output").</summary>
   public void Log(object? value)
@@ -525,6 +534,10 @@ public abstract partial class RunCodeScript
 
   internal void ReleaseOwned()
   {
+    try { _viewportWatch?.Dispose(); }
+    catch (Exception exception) { PluginLog.Swallow("RunCode", "ending the viewport watch", exception); }
+    _viewportWatch = null;
+
     // Never leave a disposed side database as the working database.
     var restoreFailed = false;
     Database? working = null;

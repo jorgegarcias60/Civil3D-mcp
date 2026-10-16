@@ -221,7 +221,7 @@ public abstract partial class RunCodeScript
         viewport.Locked = locked ?? wasLocked;
         viewport.UpdateDisplay();
         Check(); tx.Commit(); return viewportId;
-      });
+      }, () => ViewportsChangedInRun);
   }
 
   private void RequireDrawingWrite(string name)
