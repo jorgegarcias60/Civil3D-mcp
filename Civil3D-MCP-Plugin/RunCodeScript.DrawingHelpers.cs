@@ -224,6 +224,70 @@ public abstract partial class RunCodeScript
       }, () => ViewportsChangedInRun);
   }
 
+  /// <summary>
+  /// Brings one block definition from another DWG into a drawing and returns its
+  /// ObjectId there. It never inserts a reference: the script does that. The
+  /// source is read as a side database (read-only, never opened in the editor).
+  /// Nested blocks, layers and linetypes the definition uses come along. An
+  /// existing definition with that name is kept (its id is returned); with
+  /// replace it is overwritten in place, so existing references show the new
+  /// content.
+  /// </summary>
+  public ObjectId ImportBlock(string dwgPath, string blockName, bool replace = false, Database? db = null)
+  {
+    RequireDrawingWrite(nameof(ImportBlock));
+    // The clone is made by the database, not through Tr, so preview could not roll it back.
+    if (_previewMode) throw new InvalidOperationException("Preview cannot roll back ImportBlock; use mode 'write'.");
+    if (string.IsNullOrWhiteSpace(blockName)) throw new ArgumentException("Block name is required.", nameof(blockName));
+    db ??= Db;
+    var target = TransactionFor(db);
+    var source = FileBoundary.ResolveImportPath(dwgPath, ".dwg");
+    var side = ReadSideWithRetry(source);
+    try
+    {
+      ObjectId sourceId;
+      using (var read = side.TransactionManager.StartOpenCloseTransaction())
+      {
+        var table = (BlockTable)read.GetObject(side.BlockTableId, OpenMode.ForRead);
+        if (!table.Has(blockName)) throw new KeyNotFoundException(MissingBlockMessage(read, table, source, blockName));
+        sourceId = table[blockName];
+        var record = (BlockTableRecord)read.GetObject(sourceId, OpenMode.ForRead);
+        if (record.IsLayout || record.IsAnonymous || record.IsFromExternalReference || record.IsFromOverlayReference)
+          throw new ArgumentException($"'{record.Name}' in {source} is a layout, anonymous block or xref, not a block definition.", nameof(blockName));
+      }
+
+      Check();
+      var mapping = new IdMapping();
+      side.WblockCloneObjects(new ObjectIdCollection { sourceId }, db.BlockTableId, mapping,
+        replace ? DuplicateRecordCloning.Replace : DuplicateRecordCloning.Ignore, false);
+      Check();
+      if (mapping.Contains(sourceId) && !mapping[sourceId].Value.IsNull) return mapping[sourceId].Value;
+      var blocks = (BlockTable)target.GetObject(db.BlockTableId, OpenMode.ForRead);
+      return blocks.Has(blockName) ? blocks[blockName]
+        : throw new InvalidOperationException($"Block '{blockName}' was cloned from {source} but is not in the drawing's block table.");
+    }
+    finally
+    {
+      side.Dispose();
+    }
+  }
+
+  private string MissingBlockMessage(Transaction read, BlockTable table, string source, string blockName)
+  {
+    var names = new List<string>();
+    foreach (ObjectId id in table)
+    {
+      Check();
+      var record = (BlockTableRecord)read.GetObject(id, OpenMode.ForRead);
+      if (record.Name.StartsWith('*') || record.IsLayout || record.IsFromExternalReference || record.IsFromOverlayReference) continue;
+      names.Add(record.Name);
+    }
+    names.Sort(StringComparer.OrdinalIgnoreCase);
+    var listing = names.Count == 0 ? "it has none"
+      : string.Join(", ", names.Take(20)) + (names.Count > 20 ? $" (and {names.Count - 20} more)" : string.Empty);
+    return $"Block '{blockName}' was not found in {source}. Blocks there: {listing}.";
+  }
+
   private void RequireDrawingWrite(string name)
   {
     Check();

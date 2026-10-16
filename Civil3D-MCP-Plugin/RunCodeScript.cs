@@ -19,9 +19,9 @@ namespace Civil3DMcpPlugin;
 /// ModelSpace&lt;T&gt;(), PaperSpace&lt;T&gt;(layout), OpenSide(path),
 /// OpenSideOrNull(path), SideErrors, Try(label, action), TryErrors, ById(handle),
 /// EnsureLayer(...), Tag(...), TagValue(...), Tagged&lt;T&gt;(...),
-/// TextBox(...), XClip(...), AttachXref(...), SetViewport(...),
+/// TextBox(...), XClip(...), AttachXref(...), SetViewport(...), ImportBlock(...),
 /// TransactionFor(db), WriteFile(...), RunFolder, Session.
-/// EnsureLayer, Tag, XClip, AttachXref and SetViewport need write mode.
+/// EnsureLayer, Tag, XClip, AttachXref, SetViewport and ImportBlock need write mode.
 /// SideErrors and TryErrors keep at most
 /// 200 entries each; timeout and cancellation are never swallowed.
 ///
@@ -270,24 +270,7 @@ public abstract partial class RunCodeScript
       throw new FileNotFoundException($"Drawing not found: {fullPath}", fullPath);
     }
 
-    Database side;
-    try
-    {
-      side = ReadSideOnce(fullPath, FileOpenMode.OpenForReadAndAllShare);
-    }
-    catch (Exception first) when (first is not RunCodeTimeoutException and not OperationCanceledException
-      && !RunCodeHelpers.IsDrawingContentError((first as AcRuntimeException)?.ErrorStatus.ToString()))
-    {
-      try
-      {
-        side = ReadSideOnce(fullPath, FileOpenMode.OpenTryForReadShare);
-      }
-      catch
-      {
-        ExceptionDispatchInfo.Capture(first).Throw();
-        throw;
-      }
-    }
+    var side = ReadSideWithRetry(fullPath);
 
     // The owning wrapper, freed by ReleaseOwned after the transaction that
     // holds its objects.
@@ -305,6 +288,29 @@ public abstract partial class RunCodeScript
     var alias = (Database)Autodesk.AutoCAD.Runtime.DisposableWrapper.Create(typeof(Database), side.UnmanagedObject, false);
     _owned.Add(alias);
     return alias;
+  }
+
+  // Shared by OpenSide and ImportBlock: sharing errors get one retry with a
+  // fresh database, drawing-content errors none.
+  private static Database ReadSideWithRetry(string fullPath)
+  {
+    try
+    {
+      return ReadSideOnce(fullPath, FileOpenMode.OpenForReadAndAllShare);
+    }
+    catch (Exception first) when (first is not RunCodeTimeoutException and not OperationCanceledException
+      && !RunCodeHelpers.IsDrawingContentError((first as AcRuntimeException)?.ErrorStatus.ToString()))
+    {
+      try
+      {
+        return ReadSideOnce(fullPath, FileOpenMode.OpenTryForReadShare);
+      }
+      catch
+      {
+        ExceptionDispatchInfo.Capture(first).Throw();
+        throw;
+      }
+    }
   }
 
   private static Database ReadSideOnce(string path, FileOpenMode mode)

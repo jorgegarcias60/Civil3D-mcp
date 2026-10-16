@@ -31,7 +31,7 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class RunCodeCommands
 {
-  internal const int ApiVersion = 6;
+  internal const int ApiVersion = 7;
   private const int MaxCodeChars = 200_000;
   private const int DefaultTimeoutSeconds = 30;
   // Reads may take ten minutes and keep Civil 3D's UI busy. Writes stay short.
