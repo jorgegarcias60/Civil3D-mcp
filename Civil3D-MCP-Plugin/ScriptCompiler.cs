@@ -523,6 +523,7 @@ internal static class ScriptCompiler
   {
     var layoutChange = false;
     SyntaxNode? firstViewport = null;
+    SyntaxNode? firstErase = null;
     void NoteViewport(SyntaxNode node)
     {
       if (MapToScript(node.GetLocation()).Line != 0 && (firstViewport == null || node.SpanStart < firstViewport.SpanStart))
@@ -544,7 +545,22 @@ internal static class ScriptCompiler
       // Erase is declared on DBObject, so the receiver's static type decides.
       else if (symbol is IMethodSymbol && symbol.Name == "Erase" && MethodReceiver(node) is { } receiver
           && InheritsFrom(model.GetTypeInfo(receiver).Type as INamedTypeSymbol, ViewportTypeName))
+      {
         NoteViewport(node);
+        if (firstErase == null || node.SpanStart < firstErase.SpanStart) firstErase = node;
+      }
+    }
+
+    // Issue #44, live 2026-10-16: the second write run that erased and re-created the viewports on the current
+    // layout killed acad.exe (the first such run passed); a plot after the same pattern crashed in the field.
+    // Erasing a layout's own overall viewport wedged AutoCAD in a command. So viewports are never erased here.
+    if (firstErase != null)
+    {
+      var (eraseLine, eraseColumn) = MapToScript(firstErase.GetLocation());
+      return new ScriptDiagnostic(eraseLine, eraseColumn, GuardDiagnosticId,
+        "Erasing viewports crashed AutoCAD (2026-10-16: the second erase-and-re-create of viewports on the current layout killed acad.exe; "
+        + "a plot after the same pattern crashed too). Create viewports once and update them in place (SetViewport, or Width, Height, "
+        + "CenterPoint, ViewCenter, CustomScale) instead of erasing and re-creating them. See issue #44.");
     }
 
     foreach (var creation in tree.GetRoot().DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())

@@ -365,18 +365,25 @@ foreach (var (label, code, viewportLine) in layoutViewportRefused)
 {
   var result = Compile(code, write: true);
   var guard = result.Errors.Where(error => error.Code == ScriptCompiler.GuardDiagnosticId).ToList();
+  // A viewport erase is refused on its own (issue #44), so those combinations carry the erase message.
+  var erases = code.Contains(".Erase", StringComparison.Ordinal);
   Expect(guard.Count == 1 && guard[0].Line == viewportLine
-      && guard[0].Message.Contains("issue #43", StringComparison.OrdinalIgnoreCase)
-      && guard[0].Message.Contains("FlushGraphics", StringComparison.Ordinal),
-    $"write mode refuses {label} in one run (issue #43)", result);
+      && (erases
+        ? guard[0].Message.Contains("issue #44", StringComparison.OrdinalIgnoreCase) && guard[0].Message.Contains("Erasing viewports", StringComparison.Ordinal)
+        : guard[0].Message.Contains("issue #43", StringComparison.OrdinalIgnoreCase) && guard[0].Message.Contains("FlushGraphics", StringComparison.Ordinal)),
+    $"write mode refuses {label} in one run (issue #43{(erases ? "/#44" : "")})", result);
 }
+// Issue #44 (live 2026-10-16): erasing a viewport is refused even without a layout change.
+var viewportEraseAlone = Compile("Open<Viewport>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;", write: true);
+Expect(viewportEraseAlone.Errors.Count(error => error.Code == ScriptCompiler.GuardDiagnosticId) == 1
+    && viewportEraseAlone.Errors.Any(error => error.Line == 1 && error.Message.Contains("update them in place", StringComparison.Ordinal)),
+  "write mode refuses Erase on a Viewport alone and says to update viewports in place (issue #44)", viewportEraseAlone);
 var layoutViewportAllowed = new (string Label, string Code)[] {
   ("CurrentLayout switch alone", "LayoutManager.Current.CurrentLayout = \"Sheet\";\nreturn 1;"),
   ("SetCurrentLayoutId alone", "LayoutManager.Current.SetCurrentLayoutId(Db.CurrentSpaceId);\nreturn 1;"),
   ("CreateLayout alone", "var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nreturn id;"),
   ("CreateLayout with a title-block xref", "var id = LayoutManager.Current.CreateLayout(\"Sheet\");\nvar x = AttachXref(\"C:/tb.dwg\", Point3d.Origin);\nreturn id;"),
   ("new Viewport alone", "using var vp = new Viewport();\nreturn vp.Width;"),
-  ("Erase on a Viewport alone", "Open<Viewport>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;"),
   ("SetViewport alone", "return SetViewport(\"Sheet\", ObjectId.Null, customScale: 0.1);"),
   ("reading CurrentLayout next to a new Viewport", "var name = LayoutManager.Current.CurrentLayout;\nusing var vp = new Viewport();\nreturn name;"),
   ("Erase on a non-Viewport next to a layout switch", "LayoutManager.Current.CurrentLayout = \"Sheet\";\nOpen<DBText>(ObjectId.Null, forWrite: true).Erase();\nreturn 1;"),
