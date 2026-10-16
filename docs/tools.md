@@ -1390,6 +1390,9 @@ Returns available label styles for a specific context.
 | ---------- | ----------------- | -------- | ----------- |
 | action     | `"list_styles"` | yes      | —          |
 | objectType | string            | yes      | Object type |
+| labelType  | string            | no       | Alignment only: `"label_set"` (the default), `"curves"` or `"station"`. Lists the style names `add` accepts for that `labelType`. Ignored for other object types |
+
+An alignment has three style collections: label sets (`add` with `"label_set"`), curve label styles (`"curves"`) and station-offset label styles (`"station"`). Without `labelType` the label set styles come back, which `add` rejects for `"curves"` and `"station"`. The alignment result also returns the `labelType` it listed. Any other alignment `labelType` is rejected.
 
 ---
 
