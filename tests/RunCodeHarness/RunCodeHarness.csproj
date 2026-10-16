@@ -33,5 +33,6 @@
     <Compile Include="..\..\Civil3D-MCP-Plugin\ComRegistration.cs" Link="ComRegistration.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\IdleDeadline.cs" Link="IdleDeadline.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\PdfOutputInspector.cs" Link="PdfOutputInspector.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\RasterPlot.cs" Link="RasterPlot.cs" />
   </ItemGroup>
 </Project>

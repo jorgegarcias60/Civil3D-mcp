@@ -18,6 +18,7 @@ import {
   PLOT_DOMAIN_DEFINITION,
   PlotLayoutsToPdfArgsSchema,
   PublishSheetSetArgsSchema,
+  RenderLayoutsToPngArgsSchema,
 } from "../src/tools/domains/plotDomain.js";
 import { JOB_DOMAIN_DEFINITION } from "../src/tools/domains/jobDomain.js";
 import { isApprovalRequired } from "../src/tools/approvalPolicy.js";
@@ -286,7 +287,7 @@ describe("civil3d_plot policy classification", () => {
   });
 
   it("gates both file-producing actions behind approval and marks them non-retryable", () => {
-    for (const action of ["plot_layouts_to_pdf", "publish_sheet_set"]) {
+    for (const action of ["plot_layouts_to_pdf", "render_layouts_to_png", "publish_sheet_set"]) {
       const target = approvalTargetFor(action);
       expect(target.capabilities).toContain("export");
       expect(target.safeForRetry).toBe(false);
@@ -306,6 +307,7 @@ describe("civil3d_plot policy classification", () => {
       "plotListPageSetups",
       "plotListPlotters",
       "plotLayoutsToPdf",
+      "plotLayoutsToPng",
       "plotPublishSheetSet",
     ]));
   });
@@ -329,8 +331,15 @@ describe("civil3d_plot policy classification", () => {
       safeForRetry: start.safeForRetry,
     })).toBe(true);
 
+    expect(start.inputSchema.safeParse({
+      action: "start",
+      operation: "render_layouts_to_png",
+      parameters: { allLayouts: true, outputDirectory: "C:/out/review" },
+    }).success).toBe(true);
+
     const jobs = pluginSource("JobCommands.cs");
     expect(jobs).toContain('["plot_layouts_to_pdf"] = "plotLayoutsToPdf"');
+    expect(jobs).toContain('["render_layouts_to_png"] = "plotLayoutsToPng"');
     expect(jobs).toContain('["publish_sheet_set"] = "plotPublishSheetSet"');
   });
 });
@@ -693,5 +702,229 @@ describe("civil3d_plot native implementation guards", () => {
     const sequence = execution.slice(execution.indexOf("ExecuteCommandSequenceAsync"));
     expect(sequence.indexOf("CIVIL3D.NO_DRAWING")).toBeGreaterThan(-1);
     expect(sequence.indexOf("CIVIL3D.NO_DRAWING")).toBeLessThan(sequence.indexOf("RunOnHostAsync"));
+  });
+});
+
+describe("civil3d_plot render_layouts_to_png", () => {
+  beforeEach(() => {
+    sendCommandMock.mockReset();
+  });
+
+  it("accepts a layout list or allLayouts into an absolute folder", () => {
+    for (const outputDirectory of ["C:/Users/me/Documents/review", "C:\\Users\\me\\review", "\\\\nas\\share\\review"]) {
+      expect(RenderLayoutsToPngArgsSchema.safeParse({
+        action: "render_layouts_to_png", layoutNames: ["SK-1", "SK-2"], outputDirectory,
+      }).success, outputDirectory).toBe(true);
+    }
+    expect(RenderLayoutsToPngArgsSchema.safeParse({
+      action: "render_layouts_to_png",
+      allLayouts: true,
+      outputDirectory: "C:/out/review",
+      fileNamePrefix: "job-",
+      pixelWidth: 2400,
+      paperSize: "Sun Hi-Res (1600.00 x 1280.00 Pixels)",
+      plotStyleTable: "monochrome.ctb",
+      plotArea: "window",
+      windowCorners: [0, 0, 17, 11],
+      continueOnError: false,
+      asJob: true,
+    }).success).toBe(true);
+  });
+
+  it("rejects ambiguous layout selection, relative folders and unusable options", () => {
+    const invalid = [
+      { allLayouts: true, layoutNames: ["SK-1"], outputDirectory: "C:/out" },
+      { outputDirectory: "C:/out" },
+      { layoutNames: [], outputDirectory: "C:/out" },
+      { layoutNames: ["SK-1"] },
+      { layoutNames: ["SK-1"], outputDirectory: "review" },
+      { layoutNames: ["SK-1"], outputDirectory: "../review" },
+      { layoutNames: ["SK-1"], outputDirectory: "/review" },
+      { layoutNames: ["SK-1"], outputDirectory: "C:review" },
+      { layoutNames: ["SK-1"], outputDirectory: "" },
+      { allLayouts: true, outputDirectory: "C:/out", pixelWidth: 100 },
+      { allLayouts: true, outputDirectory: "C:/out", pixelWidth: 20000 },
+      { allLayouts: true, outputDirectory: "C:/out", pixelWidth: 3300.5 },
+      { allLayouts: true, outputDirectory: "C:/out", paperSize: " " },
+      { allLayouts: true, outputDirectory: "C:/out", plotStyleTable: "\t" },
+      { allLayouts: true, outputDirectory: "C:/out", plotArea: "extents" },
+      { allLayouts: true, outputDirectory: "C:/out", plotArea: "window" },
+      { allLayouts: true, outputDirectory: "C:/out", windowCorners: [0, 0, 17, 11] },
+      { allLayouts: true, outputDirectory: "C:/out", plotArea: "window", windowCorners: [0, 0, 17] },
+    ];
+    for (const args of invalid) {
+      expect(
+        RenderLayoutsToPngArgsSchema.safeParse({ action: "render_layouts_to_png", ...args }).success,
+        JSON.stringify(args),
+      ).toBe(false);
+    }
+  });
+
+  it("is a file-producing, non-retryable action routed to the plugin", () => {
+    const definition = PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png;
+    expect(definition.capabilities).toEqual(["export", "generate"]);
+    expect(definition.safeForRetry).toBe(false);
+    expect(definition.requiresActiveDrawing).toBe(true);
+    expect(definition.pluginMethods).toEqual(["plotLayoutsToPng", "startJob"]);
+    expect(isApprovalRequired(approvalTargetFor("render_layouts_to_png"))).toBe(true);
+  });
+
+  it("sends the render to the plugin after the plot API check, with no overwrite switch", async () => {
+    sendCommandMock.mockImplementation(async (method) => method === "getCivil3DHealth" ? { plotApi: 3 } : { rendered: 1 });
+    const args = RenderLayoutsToPngArgsSchema.parse({
+      action: "render_layouts_to_png",
+      layoutNames: ["SK-1"],
+      outputDirectory: "C:/out/review",
+    });
+    await PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.execute(args);
+
+    expect(sendCommandMock.mock.calls[0]).toEqual(["getCivil3DHealth", {}]);
+    expect(sendCommandMock).toHaveBeenLastCalledWith("plotLayoutsToPng", expect.objectContaining({
+      layoutNames: ["SK-1"],
+      allLayouts: false,
+      outputDirectory: "C:/out/review",
+      continueOnError: true,
+    }));
+    const sent = sendCommandMock.mock.calls.at(-1)![1] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("overwrite");
+    expect(sent).not.toHaveProperty("outputPath");
+    expect(sent.pixelWidth).toBeUndefined();
+  });
+
+  it("passes the media, width, style and window options through", async () => {
+    sendCommandMock.mockImplementation(async (method) => method === "getCivil3DHealth" ? { plotApi: 3 } : { rendered: 1 });
+    const args = RenderLayoutsToPngArgsSchema.parse({
+      action: "render_layouts_to_png",
+      allLayouts: true,
+      outputDirectory: "C:/out/review",
+      fileNamePrefix: "job-",
+      pixelWidth: 2400,
+      paperSize: "Sun Hi-Res (1600.00 x 1280.00 Pixels)",
+      plotStyleTable: "monochrome.ctb",
+      plotArea: "window",
+      windowCorners: [0, 0, 17, 11],
+      continueOnError: false,
+    });
+    await PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.execute(args);
+    expect(sendCommandMock).toHaveBeenLastCalledWith("plotLayoutsToPng", {
+      layoutNames: undefined,
+      allLayouts: true,
+      outputDirectory: "C:/out/review",
+      fileNamePrefix: "job-",
+      pixelWidth: 2400,
+      paperSize: "Sun Hi-Res (1600.00 x 1280.00 Pixels)",
+      plotStyleTable: "monochrome.ctb",
+      plotArea: "window",
+      windowCorners: [0, 0, 17, 11],
+      continueOnError: false,
+    });
+  });
+
+  it("starts a job instead when asJob is set", async () => {
+    sendCommandMock.mockImplementation(async (method) => method === "getCivil3DHealth"
+      ? { plotApi: 3 } : { jobId: "abc", state: "running", operation: "render_layouts_to_png" });
+    const args = RenderLayoutsToPngArgsSchema.parse({
+      action: "render_layouts_to_png", allLayouts: true, outputDirectory: "C:/out/review", asJob: true,
+    });
+    const result = await PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.execute(args);
+    expect(sendCommandMock).toHaveBeenLastCalledWith("startJob", {
+      operation: "render_layouts_to_png",
+      parameters: expect.objectContaining({ allLayouts: true, outputDirectory: "C:/out/review" }),
+    });
+    expect(PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.responseSchema!.safeParse(result).success).toBe(true);
+  });
+
+  it.each([{}, { plotApi: 1 }, { plotApi: 2 }, { plotApi: "3" }])("refuses an older plugin before anything runs on every route (%j)", async (health) => {
+    sendCommandMock.mockResolvedValue(health);
+    const args = { action: "render_layouts_to_png" as const, allLayouts: true, outputDirectory: "C:/out/review" };
+    for (const asJob of [false, true]) {
+      sendCommandMock.mockClear();
+      await expect(PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.execute(
+        RenderLayoutsToPngArgsSchema.parse({ ...args, asJob }),
+      )).rejects.toThrow(/render_layouts_to_png needs plot API 3.*install the plugin from this build.*nothing ran/i);
+      expect(sendCommandMock.mock.calls).toEqual([["getCivil3DHealth", {}]]);
+    }
+    sendCommandMock.mockClear();
+    await expect(JOB_DOMAIN_DEFINITION.actions.start.execute({
+      action: "start", operation: "render_layouts_to_png", parameters: { allLayouts: true, outputDirectory: "C:/out/review" },
+    })).rejects.toThrow(/render_layouts_to_png needs plot API 3.*nothing ran/i);
+    expect(sendCommandMock.mock.calls).toEqual([["getCivil3DHealth", {}]]);
+  });
+
+  it("does not make the PDF actions wait for plot API 3", async () => {
+    sendCommandMock.mockResolvedValue({ plotted: 1 });
+    await PLOT_DOMAIN_DEFINITION.actions.plot_layouts_to_pdf.execute(PlotLayoutsToPdfArgsSchema.parse({
+      action: "plot_layouts_to_pdf", layoutNames: ["SK-1"], outputDirectory: "C:/out",
+    }));
+    expect(sendCommandMock.mock.calls.map((call) => call[0])).toEqual(["plotLayoutsToPdf"]);
+  });
+
+  it("validates a structured per-layout render result", () => {
+    const response = {
+      device: "PublishToWeb PNG.pc3",
+      method: "-PLOT (BACKGROUNDPLOT=0)",
+      regenerated: true,
+      requested: 2,
+      rendered: 1,
+      failed: 1,
+      skipped: 0,
+      totalBytes: 312345,
+      durationMs: 6400,
+      layouts: [
+        {
+          layoutName: "SK-1", status: "rendered", ok: true, outputPath: "C:/out/review/job-SK-1.png", bytes: 312345,
+          media: "Sun_Hi-Res_(1600.00_x_1280.00_Pixels)", mediaPixels: [1600, 1280], pixelWidth: 1600, pixelHeight: 1280,
+          paperSize: "Sun Hi-Res (1600.00 x 1280.00 Pixels)", orientation: "landscape", plotArea: "layout",
+          plotStyleTable: "monochrome.ctb", durationMs: 3100, regenerated: true, error: null,
+        },
+        {
+          layoutName: "SK-2", status: "failed", ok: false, outputPath: "C:/out/review/job-SK-2.png", bytes: null,
+          media: "Sun_Hi-Res_(1600.00_x_1280.00_Pixels)", mediaPixels: [1600, 1280], pixelWidth: null, pixelHeight: null,
+          paperSize: "Sun Hi-Res (1600.00 x 1280.00 Pixels)", orientation: "landscape", plotArea: "layout",
+          plotStyleTable: null, durationMs: 900, error: "-PLOT did not complete; it was waiting at prompt 'x'.",
+        },
+      ],
+      warnings: ["1 of 2 layouts were not rendered; see per-layout status."],
+    };
+    expect(PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.responseSchema!.safeParse(response).success).toBe(true);
+    expect(PLOT_DOMAIN_DEFINITION.actions.render_layouts_to_png.responseSchema!.safeParse({ ...response, layouts: [{ layoutName: "x" }] }).success).toBe(false);
+  });
+
+  it("exposes the action and pixelWidth on the civil3d_plot tool", () => {
+    const entry = GENERATED_TOOL_CATALOG_ENTRIES.find((candidate) => candidate.toolName === "civil3d_plot");
+    expect(entry).toBeDefined();
+    const exposure = PLOT_DOMAIN_DEFINITION.exposures[0];
+    expect(exposure.supportedActions).toContain("render_layouts_to_png");
+    expect(exposure.inputShape.action.safeParse("render_layouts_to_png").success).toBe(true);
+    expect(exposure.inputShape.pixelWidth.safeParse(3300).success).toBe(true);
+    expect(exposure.description).toMatch(/render_layouts_to_png/);
+  });
+
+  // The render rides the same -PLOT driver as the PDF: regen, boundary, batch loop.
+  it("shares the PDF batch driver and never changes or saves a layout's page setup", () => {
+    const source = pluginSource("PlotCommands.cs");
+    const code = pluginCode("PlotCommands.cs");
+    expect(source).toContain('FileBoundary.ResolveExportPath(raw, true, ".png")');
+    expect(source).toContain("return await RunPlotBatchAsync(doc, jobs, overwrite, continueOnError, cancellationToken);");
+    expect(source).toContain("return await RunPlotBatchAsync(doc, jobs, true, continueOnError, cancellationToken, warnings);");
+    expect(source.match(/await RunPlotBatchAsync\(/g)?.length).toBe(2);
+    expect(source).toContain("Device = RasterPlot.DefaultDevice");
+    // Pixel media answer "Pixels" to the paper-units prompt and fit/centre the sheet.
+    const prepStart = code.indexOf("private static List<PlotJob> PrepareRenderJobs(");
+    const prepEnd = code.indexOf("private static string ResolvePaper(");
+    expect(prepStart).toBeGreaterThan(-1);
+    expect(prepEnd).toBeGreaterThan(prepStart);
+    const prep = code.slice(prepStart, prepEnd);
+    expect(source.slice(source.indexOf("private static List<PlotJob> PrepareRenderJobs("), source.indexOf("private static string ResolvePaper(")))
+      .toMatch(/PaperUnitsToken = "_P",[\s\S]*ScaleToken = "_F",\s*OffsetToken = "_C",[\s\S]*Raster = true,/);
+    // Read-only preparation: nothing upgraded, copied into a layout or switched.
+    expect(prep).not.toMatch(/UpgradeOpen|DowngradeOpen|CopyFrom|validator\.Set\w*\(|CurrentLayout|SetSystemVariable/);
+    // The answers still decline to save the page setup, and the PNG is verified from its header.
+    expect(source).toMatch(/tokens\.Add\("_N"\);\s*\/\/ Save changes to page setup\?/);
+    expect(source).toContain("output.Commit((path, stream) => VerifyPngOutput(path, stream, job.StartedUtc))");
+    expect(source).toContain("RasterPlot.ReadPngSize(stream!)");
+    // The plugin dispatches the method and the job operation.
+    expect(pluginSource("CommandDispatcher.cs")).toContain('"plotLayoutsToPng" => PlotCommands.PlotLayoutsToPngAsync(parameters)');
+    expect(pluginSource("DrawingCommands.cs")).toContain('["plotApi"] = 3,');
   });
 });

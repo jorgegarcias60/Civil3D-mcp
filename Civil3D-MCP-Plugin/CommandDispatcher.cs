@@ -251,6 +251,7 @@ public static class CommandDispatcher
       "plotListPageSetups" => PlotCommands.ListPageSetupsAsync(),
       "plotListPlotters" => PlotCommands.ListPlottersAsync(parameters),
       "plotLayoutsToPdf" => PlotCommands.PlotLayoutsToPdfAsync(parameters),
+      "plotLayoutsToPng" => PlotCommands.PlotLayoutsToPngAsync(parameters),
       "plotPublishSheetSet" => PlotCommands.PublishSheetSetAsync(parameters),
       // QC checks
       "qcCheckAlignment" => QcCommands.QcCheckAlignmentAsync(parameters),

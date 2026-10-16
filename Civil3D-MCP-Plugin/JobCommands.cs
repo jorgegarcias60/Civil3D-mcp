@@ -12,6 +12,7 @@ public static class JobCommands
       ["surface_dem_import"] = "createSurfaceFromDem",
       ["bulk_qc_report"] = "qcReportGenerate",
       ["plot_layouts_to_pdf"] = "plotLayoutsToPdf",
+      ["render_layouts_to_png"] = "plotLayoutsToPng",
       ["publish_sheet_set"] = "plotPublishSheetSet",
     };
 

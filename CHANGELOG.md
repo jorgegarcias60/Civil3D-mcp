@@ -29,6 +29,14 @@
 
 - Run-code API 7 adds `ImportBlock(dwgPath, blockName, replace = false, db = null)`: clones one block definition, with its nested blocks, layers and linetypes, from another DWG into the drawing and returns its ObjectId without inserting a reference. An existing definition is kept unless `replace` is true; an unknown name lists up to 20 block names in the source. Write mode only; read mode and preview refuse it at compile time. The server refuses code that uses it on an older plugin. Closes #22.
 
+- `civil3d_plot` `render_layouts_to_png` renders paper-space layouts to review PNGs
+  (one per layout, always replaced) on `PublishToWeb PNG.pc3`, so a sheet can be
+  looked at before the one PDF is plotted. It uses the same `-PLOT` driver as
+  `plot_layouts_to_pdf` (REGENALL first, `regenerated`, approval, `asJob`, `continueOnError`),
+  never changes a layout's page setup, picks the pixel medium nearest `pixelWidth`
+  (default 3300) and reports the medium and the PNG's pixel size. Plot API 3.
+  The README has the review-before-plot recipe. Closes #45.
+
 - run_code write runs refuse a layout change together with creating or erasing
   viewports (Fixes #43), and any viewport `Erase`: the second erase-and-re-create on the
   current layout killed acad.exe live. `civil3d_plot` runs REGENALL before every

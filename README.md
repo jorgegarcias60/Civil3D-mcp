@@ -911,11 +911,12 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 | `civil3d_plot` | `list_page_setups` | Named page setups in the drawing |
 | `civil3d_plot` | `list_plotters` | Configured plot devices and plot style tables; with `device`, that device's paper sizes |
 | `civil3d_plot` | `plot_layouts_to_pdf` | One PDF per layout (`layoutNames` or `allLayouts`) into `outputDirectory`, or a single layout to `outputPath`; optional `pageSetup`, `paperSize`, `plotStyleTable`, `orientation`; `plotArea` `layout` (default), `extents` or `window` + `windowCorners`; `layoutNames: ["Model"]` plots the Model tab (extents or window, fit to the paper) |
+| `civil3d_plot` | `render_layouts_to_png` | One review PNG per paper-space layout (`layoutNames` or `allLayouts`) into `outputDirectory`, written as `<prefix><layout>.png` and always replaced. Uses the pixel medium of `PublishToWeb PNG.pc3` nearest `pixelWidth` (default 3300), fits the sheet to it, and reports the medium and the PNG's pixel size. Optional `paperSize` (a medium), `plotStyleTable`, `plotArea` `layout` or `window` + `windowCorners` |
 | `civil3d_plot` | `publish_sheet_set` | One multi-sheet PDF from `layoutNames`, `sheets` (may include other saved drawings), or every paper-space layout |
 
-Read-only actions are never approval-gated. `plot_layouts_to_pdf` and
-`publish_sheet_set` declare the `export` capability, so they need a
-`civil3d_request_approval` token. `outputPath` (a single layout, or the
+Read-only actions are never approval-gated. `plot_layouts_to_pdf`,
+`render_layouts_to_png` and `publish_sheet_set` declare the `export`
+capability, so they need a `civil3d_request_approval` token. `outputPath` (a single layout, or the
 combined `publish_sheet_set` PDF) must be an absolute `.pdf` file path;
 `outputDirectory` is an absolute folder in which one `<prefix><layout>.pdf` is
 written per layout. Both must sit under `CIVIL3D_EXPORT_ROOTS` (which falls
@@ -976,6 +977,43 @@ the copy before publishing. Refusal must name the table and layout with no PDF
 or DSD written. Without the flag, that check reports SKIP and touches no files
 outside `--out`. Failures still reach cancellation, health and cleanup, then
 exit 1. After jobs drain, scratch settings are restored and fixture files removed.
+
+#### Review before plotting: `render_layouts_to_png`
+
+Look at the paper view before a PDF is plotted, and keep throw-away PDFs out
+of the output folder: PNG for review, PDF only for the final sheet.
+
+1. Render the sheets to PNG:
+   `civil3d_plot action=render_layouts_to_png allLayouts=true outputDirectory=C:\path\inside\export-roots\review`.
+   One `<drawing>-<layout>.png` is written per layout and replaced on every run,
+   so the folder never fills with copies. Use `layoutNames` for a few sheets.
+2. Open the PNGs and read them: text clear of lines, nothing cut at a viewport
+   edge, matchlines and the title block where they belong.
+3. Optionally run your own read-mode `civil3d_run_code` check on the same
+   layouts first (pass the script with `codePath`), for example a text/line
+   overlap check that lists annotation boxes crossed by lines or by other text.
+   It reads the drawing only. This server ships no such script; use your own.
+4. Fix what the review found, render again (the PNGs are replaced), and when it
+   is clean plot the PDF once with `plot_layouts_to_pdf` or `publish_sheet_set`.
+
+How the render is made. `-PLOT` is driven exactly as for the PDF (REGENALL first,
+`regenerated` is reported, the layout and its page setup are never changed, the
+layout's own plot style table is kept unless `plotStyleTable` is given). The
+device is `PublishToWeb PNG.pc3`. That device has pixel media, not paper sizes,
+such as `Sun Hi-Res (1600.00 x 1280.00 Pixels)`, and a medium of another size
+means a custom paper size in the PC3's PMP file, which this server never edits.
+So each layout gets the listed medium whose fitted sheet is closest to
+`pixelWidth`; among media within 5% of that width the one whose aspect is nearest
+the sheet's wins. The sheet is plotted fit and centred, so a 4:3 medium shows an
+11x17 sheet with white bands above and below, never cropped. Each layout reports
+`media`, the expected `mediaPixels`, and the real `pixelWidth` and `pixelHeight`
+read from the PNG. The stock device lists media up to 1600 x 1280 px, so the
+long side is at most 1600 px, below the 3300 px default (about 200 dpi on
+11x17); a warning says so. For a sharper
+review add a larger pixel size to the PC3 (Plotter Configuration Editor, Custom
+Paper Sizes) and pass its name as `paperSize`. `plotArea: "layout"` plots the
+layout area; if a layout shows only part of the sheet, use `plotArea: "window"`
+with `windowCorners` `[0, 0, width, height]` in the layout's paper units.
 
 </details>
 
