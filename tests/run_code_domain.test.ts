@@ -256,6 +256,15 @@ describe("civil3d_run_code domain", () => {
     expect(CODE_DOMAIN_DEFINITION.exposures[0].inputShape).not.toHaveProperty("helpers");
   });
 
+  it("describes ImportBlock: API 7, write only, keep or replace, no reference inserted", () => {
+    const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
+    expect(description).toContain("ImportBlock(dwgPath, blockName, replace?, db?)");
+    expect(description).toContain("needs plugin API 7 and write mode (preview refuses it)");
+    expect(description).toContain("never inserts a reference");
+    expect(description).toMatch(/existing definition is kept and its id returned; replace:true overwrites it in place/);
+    expect(description).toContain("lists up to 20 block names");
+  });
+
   it("explains text frames, xref scale decisions and viewport identity", () => {
     const description = CODE_DOMAIN_DEFINITION.exposures[0].description;
     expect(description).toContain("lower-left, lower-right, upper-right, upper-left");
@@ -362,6 +371,28 @@ describe("civil3d_run_code execution", () => {
     expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth", "runCode"]);
     expect(sendCommandMock.mock.calls[1][1]).toMatchObject({ document: "B.dwg", mode: "write" });
     expect(response).toMatchObject({ activated: true, switchedBack: true });
+  });
+
+  it.each([undefined, 6])("refuses ImportBlock with runCode API %s before running", async (api) => {
+    sendCommandMock.mockResolvedValue({ runCodeApi: api });
+    const error = await execute(RunCodeArgsSchema.parse({
+      action: "run", mode: "write", code: "return ImportBlock(\"C:/lib.dwg\", \"MH\");",
+    })).catch((e) => e);
+    expect(error).toBeInstanceOf(Civil3DRpcError);
+    expect(error.message).toMatch(/ImportBlock needs runCode API 7, the loaded plugin has/);
+    expect(error.message).toMatch(/Nothing ran/);
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth"]);
+  });
+
+  it("sends ImportBlock code to runCode with API 7 and checks the API only for that helper", async () => {
+    sendCommandMock.mockImplementation(async (method: string) =>
+      method === "getCivil3DHealth" ? { runCodeApi: 7 } : { ...okResponse, mode: "write" });
+    await execute(RunCodeArgsSchema.parse({ action: "run", mode: "write", code: "var id = ImportBlock(Args[\"dwg\"]!.ToString()!, \"MH\", replace: true);\nreturn id;" }));
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["getCivil3DHealth", "runCode"]);
+    sendCommandMock.mockReset();
+    sendCommandMock.mockResolvedValue(okResponse);
+    await execute(RunCodeArgsSchema.parse({ action: "run", mode: "write", code: "return MyImportBlockCount(1);" }));
+    expect(sendCommandMock.mock.calls.map(([method]) => method)).toEqual(["runCode"]);
   });
 
   it("approves the caller's arguments, not the token added at execution", async () => {

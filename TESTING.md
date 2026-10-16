@@ -29,6 +29,22 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 | `tests/approval_logging.test.ts` (the test #34 names) | Passed 15 solo runs and every shuffled full run; the 2026-10-12 failure did not reproduce. |
 | Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
 
+### ImportBlock, issue #22 wave 2 (2026-10-16)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10: `ImportBlock` exact signature compiles in write mode | Pass. |
+| Harness: read mode refuses `ImportBlock`, with replace, base-qualified and as a method group; a local function named `ImportBlock` is allowed | Pass. The four refusals fail on the old compiler. |
+| Harness: preview refuses the `ImportBlock` helper outside its transaction | Pass; fails on the old compiler. |
+| Harness totals | net8: 1260 ok, 0 failed (230 references). net10: 1260 ok, 0 failed (238 references). |
+| vitest (`run_code_domain`, `run_code_script_source`) | `ImportBlock` description; the server refuses code that calls it on runCode API 6 or none and sends it on 7; code that only has a similar name sends no health call; source checks for write-only, preview refusal, import-root path, side database disposal, Ignore or Replace, and the 20-name listing; `ApiVersion = 7`. Full run: 896 tests in 61 files. |
+| `npm run build`, `docs:check` | Ok. |
+| Plugin Release net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+Not covered offline: the clone itself needs Civil 3D. Live checks to run: import twice (same id), `replace: true`,
+an unknown name (listing), read-mode refusal, inserting a reference of the imported block, and whether a run that
+throws after `ImportBlock` leaves the definition in the drawing (the docs say one UNDO removes it; this is not verified).
+
 ### Per-process COM registration (2026-10-15)
 
 | Check | Result |

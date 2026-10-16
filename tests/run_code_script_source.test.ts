@@ -31,6 +31,39 @@ const drawingHelpersSource = readFileSync(
   "utf8",
 ).replaceAll("\r\n", "\n");
 
+describe("ImportBlock", () => {
+  const helper = drawingHelpersSource.slice(
+    drawingHelpersSource.indexOf("public ObjectId ImportBlock("),
+    drawingHelpersSource.indexOf("private void RequireDrawingWrite("));
+
+  it("is write only, refuses preview, and resolves the path through the import roots", () => {
+    expect(helper).toContain("RequireDrawingWrite(nameof(ImportBlock));");
+    expect(helper).toContain("if (_previewMode) throw");
+    expect(helper).toContain("FileBoundary.ResolveImportPath(dwgPath, \".dwg\")");
+  });
+
+  it("reads the source like OpenSide and always disposes the side database", () => {
+    expect(helper).toContain("ReadSideWithRetry(source)");
+    expect(helper).toContain("StartOpenCloseTransaction()");
+    expect(helper).toMatch(/finally\s*\{\s*side\.Dispose\(\);/);
+    expect(source).toContain("var side = ReadSideWithRetry(fullPath);");
+    expect(helper).not.toContain("DocumentManager");
+  });
+
+  it("clones into the block table, keeping an existing definition unless replace is set", () => {
+    expect(helper).toContain("side.WblockCloneObjects(new ObjectIdCollection { sourceId }, db.BlockTableId, mapping,");
+    expect(helper).toContain("replace ? DuplicateRecordCloning.Replace : DuplicateRecordCloning.Ignore");
+    expect(helper).not.toMatch(/new BlockReference|AppendEntity\(/);
+  });
+
+  it("lists at most 20 block names, without anonymous, layout or xref blocks, when the name is unknown", () => {
+    expect(helper).toContain("names.Take(20)");
+    expect(helper).toContain("record.Name.StartsWith('*')");
+    expect(helper).toContain("record.IsFromExternalReference");
+    expect(helper).toContain("a layout, anonymous block or xref");
+  });
+});
+
 describe("SetViewport on a dormant layout", () => {
   const helper = drawingHelpersSource.slice(drawingHelpersSource.indexOf("public ObjectId SetViewport("));
 
@@ -200,7 +233,7 @@ describe("PR4 targeted write host route", () => {
   });
 
   it("reports activation and restoration in both the response and run.json, with restoration failures as warnings", () => {
-    expect(commandsSource).toContain("internal const int ApiVersion = 6;");
+    expect(commandsSource).toContain("internal const int ApiVersion = 7;");
     expect(commandsSource).toMatch(/finally\s*\{\s*if \(outcome.Activation.Activated\)/);
     for (const container of ["response", "summary"]) {
       expect(commandsSource).toContain(`${container}["activated"] = true;`);

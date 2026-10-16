@@ -27,6 +27,8 @@
   same collections. Before, it always listed the label set styles, which
   `label_add` rejects for `curves` and `station`. Fixes #13.
 
+- Run-code API 7 adds `ImportBlock(dwgPath, blockName, replace = false, db = null)`: clones one block definition, with its nested blocks, layers and linetypes, from another DWG into the drawing and returns its ObjectId without inserting a reference. An existing definition is kept unless `replace` is true; an unknown name lists up to 20 block names in the source. Write mode only; read mode and preview refuse it at compile time. The server refuses code that uses it on an older plugin. Closes #22.
+
 - run_code write runs refuse a layout change together with creating or erasing
   viewports (Fixes #43), and any viewport `Erase`: the second erase-and-re-create on the
   current layout killed acad.exe live. `civil3d_plot` runs REGENALL before every
