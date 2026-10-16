@@ -10,10 +10,33 @@ public static class LabelCommands
   public static Task<object?> ListLabelStylesAsync(JsonObject? parameters)
   {
     var objectType = PluginRuntime.GetRequiredString(parameters, "objectType");
+    var labelType = PluginRuntime.GetOptionalString(parameters, "labelType");
 
     return CivilExecution.ReadAsync<object?>((doc, civilDoc, database, transaction) =>
     {
-      var styles = GetLabelStyleCollection(civilDoc, objectType);
+      // For an alignment the style collection depends on what label_add is
+      // asked to create ("label_set", "curves" or "station"), so the same
+      // collections label_add resolves names from are listed. Other object
+      // types have one collection for every labelType, so labelType is ignored.
+      string? alignmentLabelType = null;
+      IEnumerable<ObjectId> styles;
+      if (string.Equals(objectType, "alignment", StringComparison.OrdinalIgnoreCase))
+      {
+        alignmentLabelType = string.IsNullOrWhiteSpace(labelType) ? "label_set" : labelType.ToLowerInvariant();
+        styles = alignmentLabelType switch
+        {
+          "label_set" => GetLabelStyleCollection(civilDoc, objectType),
+          "curves" or "station" => CivilObjectUtils.ToObjectIds(GetAlignmentLabelStyleCollection(civilDoc, alignmentLabelType)),
+          _ => throw new JsonRpcDispatchException(
+            "CIVIL3D.INVALID_INPUT",
+            $"Alignment labelType must be 'label_set', 'curves' or 'station', not '{labelType}'."),
+        };
+      }
+      else
+      {
+        styles = GetLabelStyleCollection(civilDoc, objectType);
+      }
+
       var styleItems = styles
         .Select(objectId => transaction.GetObject(objectId, OpenMode.ForRead))
         .Where(style => style != null)
@@ -25,11 +48,17 @@ public static class LabelCommands
         })
         .ToList();
 
-      return new Dictionary<string, object?>
+      var result = new Dictionary<string, object?>
       {
         ["objectType"] = objectType,
         ["styles"] = styleItems,
       };
+      if (alignmentLabelType != null)
+      {
+        result["labelType"] = alignmentLabelType;
+      }
+
+      return result;
     });
   }
 
@@ -104,7 +133,7 @@ public static class LabelCommands
 
       if (string.Equals(objectType, "alignment", StringComparison.OrdinalIgnoreCase) && string.Equals(labelType, "curves", StringComparison.OrdinalIgnoreCase))
       {
-        var styleId = FindStyleInCollection(transaction, civilDoc.Styles.LabelStyles.AlignmentLabelStyles.CurveLabelStyles, labelStyle, "alignment curve label");
+        var styleId = FindStyleInCollection(transaction, GetAlignmentLabelStyleCollection(civilDoc, "curves"), labelStyle, "alignment curve label");
         var handles = CreateAlignmentCurveLabels((Autodesk.Civil.DatabaseServices.Alignment)target, styleId)
           .Select(labelId => ResolveHandle(transaction, labelId))
           .ToList();
@@ -127,7 +156,7 @@ public static class LabelCommands
         // an alignment label SET style, and StationOffsetLabel.Create rejects
         // it with "Wrong type objectId". A station label needs a station-offset
         // LABEL style, which lives in its own collection.
-        var styleId = FindStationOffsetLabelStyleId(civilDoc, transaction, labelStyle);
+        var styleId = FindStyleInCollection(transaction, GetAlignmentLabelStyleCollection(civilDoc, "station"), labelStyle, "alignment station-offset label");
         var markerStyleId = FindFirstMarkerStyleId(civilDoc);
         var labelId = CreateAlignmentStationLabel(target, styleId, markerStyleId, station);
         return new Dictionary<string, object?>
@@ -395,74 +424,20 @@ public static class LabelCommands
   }
 
   /// <summary>
-  /// Resolves a station-offset label style from
-  /// civilDoc.Styles.LabelStyles.AlignmentLabelStyles.StationOffsetLabelStyles.
-  /// Returns the style matching <paramref name="labelStyle"/> when one is
-  /// named (an unknown name is rejected with the available names, rather than
-  /// silently replaced), otherwise the first available style. These styles are
-  /// not the alignment label SET styles that label_list_styles returns for
-  /// "alignment".
+  /// The style collection label_add resolves names from for an alignment
+  /// "curves" or "station" label, and the one label_list_styles lists for the
+  /// same labelType, so the two cannot drift. Neither is the alignment label
+  /// SET collection that label_list_styles returns without a labelType.
   /// </summary>
-  private static ObjectId FindStationOffsetLabelStyleId(
-    object civilDoc, Transaction transaction, string? labelStyle)
+  private static IEnumerable GetAlignmentLabelStyleCollection(Autodesk.Civil.ApplicationServices.CivilDocument civilDoc, string labelType)
   {
-    var styles = Civil3DCompatibility.GetPropertyValue(civilDoc, "Styles");
-    var labelStyles = Civil3DCompatibility.GetPropertyValue(styles, "LabelStyles");
-    var alignmentLabelStyles = Civil3DCompatibility.GetPropertyValue(labelStyles, "AlignmentLabelStyles");
-    var collection = Civil3DCompatibility.GetPropertyValue(alignmentLabelStyles, "StationOffsetLabelStyles");
-
-    if (collection is not IEnumerable enumerable)
+    var alignmentLabelStyles = civilDoc.Styles.LabelStyles.AlignmentLabelStyles;
+    return labelType switch
     {
-      throw new JsonRpcDispatchException(
-        "CIVIL3D.OBJECT_NOT_FOUND",
-        "Could not reach the alignment station-offset label styles in this drawing.");
-    }
-
-    var fallback = ObjectId.Null;
-    var available = new List<string>();
-    foreach (var item in enumerable)
-    {
-      if (item is not ObjectId objectId || objectId == ObjectId.Null)
-      {
-        continue;
-      }
-
-      if (fallback == ObjectId.Null)
-      {
-        fallback = objectId;
-      }
-
-      if (string.IsNullOrWhiteSpace(labelStyle))
-      {
-        continue;
-      }
-
-      var name = CivilObjectUtils.GetName(transaction.GetObject(objectId, OpenMode.ForRead)) ?? string.Empty;
-      if (string.Equals(name, labelStyle, StringComparison.OrdinalIgnoreCase))
-      {
-        return objectId;
-      }
-      if (!string.IsNullOrEmpty(name))
-      {
-        available.Add(name);
-      }
-    }
-
-    if (fallback == ObjectId.Null)
-    {
-      throw new JsonRpcDispatchException(
-        "CIVIL3D.OBJECT_NOT_FOUND",
-        "This drawing has no alignment station-offset label style to apply.");
-    }
-
-    if (!string.IsNullOrWhiteSpace(labelStyle))
-    {
-      throw new JsonRpcDispatchException(
-        "CIVIL3D.OBJECT_NOT_FOUND",
-        $"No alignment station-offset label style named '{labelStyle}'. Available: {string.Join(", ", available)}.");
-    }
-
-    return fallback;
+      "curves" => alignmentLabelStyles.CurveLabelStyles,
+      "station" => alignmentLabelStyles.StationOffsetLabelStyles,
+      _ => throw new ArgumentException($"No alignment label style collection for labelType '{labelType}'.", nameof(labelType)),
+    };
   }
 
   private static ObjectId FindLabelStyleId(object civilDoc, Transaction transaction, string objectType, string? labelStyle)

@@ -87,6 +87,7 @@ const LabelAddArgsSchema = z.object({
 const LabelListStylesArgsSchema = z.object({
   action: z.literal("label_list_styles"),
   objectType: z.string(),
+  labelType: z.string().optional(),
 });
 
 const StyleListArgsSchema = z.object({
@@ -183,6 +184,7 @@ export const STANDARDS_DOMAIN_DEFINITION: DomainToolDefinition = {
       execute: async (args) => await withApplicationConnection(
         async (appClient) => await appClient.sendCommand("listLabelStyles", {
           objectType: args.objectType,
+          labelType: args.labelType,
         }),
       ),
     },
@@ -346,7 +348,7 @@ export const STANDARDS_DOMAIN_DEFINITION: DomainToolDefinition = {
               station: rawArgs.station,
               point: rawArgs.point,
             }
-            : { action: "label_list_styles", objectType: rawArgs.objectType },
+            : { action: "label_list_styles", objectType: rawArgs.objectType, labelType: rawArgs.labelType },
       }),
     },
     {

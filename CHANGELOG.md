@@ -22,6 +22,11 @@
   set. Each test now starts clean. The approval_logging failure #34 names did not
   reproduce in 15 solo and 8 shuffled full runs. Closes #34.
 
+- `label_list_styles` takes an optional `labelType` for alignments (`label_set`,
+  `curves`, `station`) and lists the names `label_add` accepts for it, from the
+  same collections. Before, it always listed the label set styles, which
+  `label_add` rejects for `curves` and `station`. Fixes #13.
+
 - run_code write runs refuse a layout change together with creating or erasing
   viewports (Fixes #43), and any viewport `Erase`: the second erase-and-re-create on the
   current layout killed acad.exe live. `civil3d_plot` runs REGENALL before every

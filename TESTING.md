@@ -1397,6 +1397,18 @@ The first live run caught a bug the offline checks could not: Civil 3D keeps one
 
 Not yet run on Civil 3D 2027 (Luis): run the same two scripts there.
 
+## label_list_styles labelType (2026-10-16, `jorgegarcias60/label-styles`, offline only)
+
+Offline: `tests/label_list_styles.test.ts` (5 tests; 4 fail on the 58fc942 code): `labelType` survives the
+schema and reaches `listLabelStyles` (also through `civil3d_label` and `civil3d_standards`), and the plugin
+source resolves alignment `curves` and `station` style names for both `label_list_styles` and `label_add`
+from one helper (`GetAlignmentLabelStyleCollection`). Plugin builds for 2026 (net8) and 2027 (net10) with
+0 warnings.
+
+Live check (not run yet): on an open drawing, `label_list_styles` for an alignment with no `labelType`,
+`label_set`, `curves` and `station` returns the label sets, the label sets, the curve label styles and the
+station-offset label styles; `bogus` is rejected; each `curves` / `station` name is accepted by `label_add`.
+
 ## Not automated
 
 The plugin has no C# unit tests; `tests/FileBoundaryHarness` (dotnet) is upstream's
