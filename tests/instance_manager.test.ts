@@ -200,6 +200,58 @@ describe("attachment", () => {
     expect(attachedInstance()?.pid).toBe(101);
   });
 
+  const shxDialog = (extra: object = {}) => ({ title: "Missing SHX Files", className: "#32770",
+    buttons: ["Ignore the missing SHX files and continue", "Cancel"], ...extra });
+
+  it("answers a prompt on this session's own unresponsive instance and continues the attach", async () => {
+    const { service, deps } = manager();
+    instances = [own({ responsive: false })];
+    deps.scanDialogs.mockImplementationOnce(async () => {
+      instances = [own({ responsive: true })];
+      return { dialogs: [shxDialog({ action: "ignore_invoked", method: "button_notify" })], missingXrefs: [] } as any;
+    });
+    const result = await service.attach({ pid: 101 }) as any;
+    expect(deps.scanDialogs).toHaveBeenCalledExactlyOnceWith(101, own().startedAtUtc, { reportOnly: false });
+    expect(result.instance).toMatchObject({ pid: 101, responsive: true });
+    expect(result.dialogs).toEqual([expect.objectContaining({ title: "Missing SHX Files", action: "ignore_invoked" })]);
+    expect(result.warning).toMatch(/Missing SHX Files prompt was answered with Ignore; text that uses those fonts shows a substitute font\./);
+    expect(attachedInstance()?.pid).toBe(101);
+  });
+
+  it("keeps scanning after an answer until the instance responds, then throws naming what is left", async () => {
+    const { service, deps } = manager();
+    instances = [own({ responsive: false })];
+    deps.scanDialogs.mockResolvedValue({ dialogs: [shxDialog({ action: "ignore_invoked" })], missingXrefs: [] } as any);
+    await expect(service.attach({ pid: 101 })).rejects.toThrow("Civil 3D instance 101 is not responsive: dialog 'Missing SHX Files' was answered with Ignore.");
+    // The first pass plus one pass per recovery round, all allowed to answer.
+    expect(deps.scanDialogs.mock.calls.length).toBeGreaterThan(2);
+    for (const call of deps.scanDialogs.mock.calls) expect(call).toEqual([101, own().startedAtUtc, { reportOnly: false }]);
+    expect(attachedInstance()).toBeUndefined();
+  });
+
+  it("keeps the plain message when an unresponsive own instance has no dialog", async () => {
+    const { service, deps } = manager();
+    instances = [own({ responsive: false })];
+    await expect(service.attach({ pid: 101 })).rejects.toThrow(/^Civil 3D instance 101 is not responsive\.$/);
+    expect(deps.scanDialogs).toHaveBeenCalledOnce();
+    expect(deps.wait).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["user instance", () => own({ owner: "user", ownerSession: null, claimId: null, responsive: false }), { userInstance: true }],
+    ["other session's agent instance", () => own({ ownerSession: "another", responsive: false }), { force: true }],
+    ["orphaned agent instance", () => own({ ownerSession: "former-session", orphan: true, responsive: false }), { adoptOrphan: true }],
+  ])("only reports dialogs on a %s and throws naming the open dialog", async (_name, make, args) => {
+    const { service, deps } = manager();
+    instances = [make()];
+    deps.scanDialogs.mockResolvedValue({ dialogs: [shxDialog()], missingXrefs: [] } as any);
+    await expect(service.attach({ pid: 101, ...args })).rejects.toThrow(
+      "Civil 3D instance 101 is not responsive: dialog 'Missing SHX Files' is open (buttons: Ignore the missing SHX files and continue, Cancel)");
+    expect(deps.scanDialogs).toHaveBeenCalledExactlyOnceWith(101, own().startedAtUtc, { reportOnly: true });
+    expect(deps.wait).not.toHaveBeenCalled();
+    expect(attachedInstance()).toBeUndefined();
+  });
+
   it("requires force for another session and returns a warning without changing ownership", async () => {
     const { service } = manager();
     instances = [own({ ownerSession: "another" })];
@@ -259,6 +311,69 @@ describe("start lifecycle", () => {
     expect(await readdir(join(root, "claims"))).toEqual([]);
   });
 
+  // The plugin registers first, then a known prompt opens (issue #48).
+  const registerOnLaunch = (deps: ReturnType<typeof manager>["deps"]) => deps.launch.mockImplementation(async () => {
+    const [file] = await readdir(join(root, "claims"));
+    const claim = JSON.parse(await readFile(join(root, "claims", file), "utf8"));
+    instances = [own({ claimId: claim.claimId, startedAtUtc: new Date(Date.parse(claim.createdAtUtc) + 1).toISOString() })];
+    return { pid: 101, startedAtUtc: instances[0].startedAtUtc };
+  });
+  const answered = (title: string, className = "#32770") => ({ title, className,
+    buttons: ["Ignore the missing SHX files and continue", "Cancel"], action: "ignore_invoked", method: "button_notify" });
+
+  it("answers a prompt that opens after the plugin registers before returning", async () => {
+    const { service, deps } = manager();
+    registerOnLaunch(deps);
+    deps.scanDialogs.mockResolvedValue({ dialogs: [answered("Missing SHX Files")], missingXrefs: [] } as any);
+    const result = await service.start({ drawing }) as any;
+    expect(result.instance.pid).toBe(101);
+    expect(deps.scanDialogs).toHaveBeenCalledOnce();
+    expect(deps.scanDialogs).toHaveBeenCalledWith(101, instances[0].startedAtUtc, { reportOnly: false });
+    expect(result.dialogs).toEqual([expect.objectContaining({ title: "Missing SHX Files", action: "ignore_invoked" })]);
+    expect(result.warning).toMatch(/Missing SHX Files prompt was answered with Ignore/);
+    expect(result.warning).not.toMatch(/missing external references/);
+    expect(attachedInstance()?.pid).toBe(101);
+    expect(await readdir(join(root, "claims"))).toEqual([]);
+  });
+
+  it("keeps answering every ~2 s while a late prompt leaves the instance unresponsive, and reports every dialog", async () => {
+    const { service, deps } = manager();
+    registerOnLaunch(deps);
+    deps.scanDialogs
+      .mockImplementationOnce(async () => {
+        instances = [{ ...instances[0], responsive: false }];
+        return { dialogs: [answered("Missing SHX Files")], missingXrefs: [] } as any;
+      })
+      .mockImplementationOnce(async () => {
+        instances = [{ ...instances[0], responsive: true }];
+        return { dialogs: [answered("References - Not Found Files")], missingXrefs: ["C:\\sites\\base.dwg"] } as any;
+      });
+    const before = deps.now();
+    const result = await service.start({ drawing }) as any;
+    expect(result.instance.pid).toBe(101);
+    expect(deps.scanDialogs).toHaveBeenCalledTimes(2);
+    expect(deps.now() - before).toBeGreaterThanOrEqual(2000);
+    expect(result.dialogs.map((d: any) => d.title).sort()).toEqual(["Missing SHX Files", "References - Not Found Files"]);
+    expect(result.missingXrefs).toEqual(["C:\\sites\\base.dwg"]);
+    expect(result.warning).toMatch(/missing external references/);
+    expect(result.warning).toMatch(/Missing SHX Files prompt/);
+  });
+
+  it("returns the starting status with every dialog seen when a prompt blocks the registered instance until the timeout", async () => {
+    const { service, deps } = manager();
+    registerOnLaunch(deps);
+    deps.scanDialogs.mockImplementation(async () => {
+      instances = [{ ...instances[0], responsive: false }];
+      return { dialogs: [answered("Missing SHX Files")], missingXrefs: [] } as any;
+    });
+    const result = await service.start({ drawing }, 6000) as any;
+    expect(result).toMatchObject({ status: "starting", pid: 101,
+      dialogs: [expect.objectContaining({ title: "Missing SHX Files", action: "ignore_invoked" })] });
+    expect(result.warning).toMatch(/Missing SHX Files prompt/);
+    expect(deps.scanDialogs.mock.calls.length).toBeGreaterThan(2);
+    expect(attachedInstance()).toBeUndefined();
+  });
+
   it("keeps a dialog answered with Ignore in the result after it disappears", async () => {
     const { service, deps } = manager();
     deps.scanDialogs
@@ -271,6 +386,13 @@ describe("start lifecycle", () => {
     expect(result.status).toBe("starting");
     expect(result.dialogs).toEqual([expect.objectContaining({ title: "References - Not Found Files", action: "ignore_invoked" })]);
     expect(result.warning).toMatch(/missing external references/);
+  });
+
+  it("scans the launched process with answers allowed (never reportOnly)", async () => {
+    const { service, deps } = manager();
+    await service.start({ drawing }, 3000);
+    expect(deps.scanDialogs.mock.calls.length).toBeGreaterThan(0);
+    for (const call of deps.scanDialogs.mock.calls) expect(call[2]).toEqual({ reportOnly: false });
   });
 
   it("merges dialogs by title and class; a newer sighting replaces the older one", () => {

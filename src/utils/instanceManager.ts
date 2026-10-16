@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { readInstanceRegistry, processAlive, pluginDataRoot, describeInstances, sameDrawing, type CivilInstance } from "./instanceRegistry.js";
 import { attachedInstance, setAttachedInstance, sessionId, sessionLabel, configureSessionLabel, serverIdentity, adoptInstanceOwnership, withPinnedEndpoint } from "./instanceSession.js";
 import { acadPids, findCivilShortcut, launchCivilShortcut, protectInstanceFolders, acquireStartLock, releaseStartLock, launchedProcessAlive, stopLaunchedProcess } from "./instanceLauncher.js";
-import { scanInstanceDialogs, type DialogScanResult, type InstanceDialog } from "./instanceDialogs.js";
+import { scanInstanceDialogs, titleIs, XREF_PROMPT, SHX_PROMPT, type DialogScanResult, type InstanceDialog } from "./instanceDialogs.js";
 import { effectivePluginHost, withApplicationConnection } from "./ConnectionManager.js";
 import { readPluginToken } from "./pluginAuth.js";
 import { currentAbortSignal } from "./requestContext.js";
@@ -26,6 +26,11 @@ export const defaultInstanceDependencies = {
 
 export const LAUNCH_GRACE_MS = 15 * 60_000;
 const SCAN_FAILED = "Dialog scan failed";
+// After an answer the instance can need a moment to respond, and a second prompt may follow the first.
+const RECOVERY_ROUNDS = 8;
+const RECOVERY_WAIT_MS = 2000;
+const XREF_WARNING = "The drawing has missing external references (Civil 3D's prompt was answered with Ignore). Review missingXrefs and the dialog text before using its contents.";
+const SHX_WARNING = "Civil 3D's Missing SHX Files prompt was answered with Ignore; text that uses those fonts shows a substitute font.";
 
 // Every dialog seen during the start stays in the result: one answered with Ignore is gone by the next scan
 // (seen live 2026-10-15). A later sighting of the same title and class replaces the earlier entry.
@@ -72,8 +77,10 @@ export class InstanceManager {
         message: "Civil 3D started; the plugin has not loaded yet", ...this.diagnostics(pending.diagnostics) };
       throw new Error(`Expected one live instance. Instances: ${describeInstances(instances)}`);
     }
-    const instance = matches[0];
-    if (!instance.responsive) throw new Error(`Civil 3D instance ${instance.pid} is not responsive.`);
+    let instance = matches[0];
+    let recovered: DialogScanResult | undefined;
+    if (!instance.responsive) ({ instance, diagnostics: recovered } = await this.recoverUnresponsive(instance));
+    const extra = recovered ? this.diagnostics(recovered) : {};
     if (instance.owner === "user" && args.userInstance !== true) throw new Error("User-owned instance requires userInstance: true, only when Jorge says so.");
     configureSessionLabel(args.job, args.drawing ?? instance.documents[0]);
     if (instance.owner === "agent" && instance.orphan === true) {
@@ -83,12 +90,12 @@ export class InstanceManager {
       }
       const adopted = await this.deps.adopt(instance, sessionLabel ?? `session-${sessionId}`);
       setAttachedInstance(adopted);
-      return { instance: adopted, adopted: true };
+      return { instance: adopted, adopted: true, ...extra };
     }
     const other = instance.owner === "agent" && instance.ownerSession !== sessionId;
     if (other && args.force !== true) throw new Error("Instance belongs to another agent session. Refused; force: true is required to attach.");
     setAttachedInstance(instance);
-    return { instance, ...(other ? { warning: "Forced attachment to another agent session's instance. Ownership is unchanged; this session cannot stop it." } : {}) };
+    return { instance, ...extra, ...(other ? { warning: [(extra as { warning?: string }).warning, "Forced attachment to another agent session's instance. Ownership is unchanged; this session cannot stop it."].filter(Boolean).join(" ") } : {}) };
   }
 
   detach() { setAttachedInstance(); return { attached: false, sessionId }; }
@@ -195,6 +202,7 @@ export class InstanceManager {
       this.lastLaunch = pendingLaunch.instance;
       let seen: CivilInstance[] = [];
       let nextScan = created;
+      let postRegistrationScan = false;
       while (this.deps.now() - created < timeoutMs) {
         if (currentAbortSignal()?.aborted) throw new Error("Civil 3D instance start cancelled. Check civil3d_instance list before retrying.");
         seen = (await this.deps.registry({ root: this.root })).instances;
@@ -207,6 +215,14 @@ export class InstanceManager {
             || Date.parse(instance.startedAtUtc) <= created) {
             throw new Error("Start claim was taken by a pre-existing process. Refused attachment; inspect civil3d_instance list.");
           }
+          // A known prompt can appear after the plugin registers (issue #48). Answer it before returning; if it
+          // blocks the instance the next pass finds it unresponsive and the scheduled scan below keeps answering.
+          if (!postRegistrationScan) {
+            postRegistrationScan = true;
+            await this.scanInto(pendingLaunch.diagnostics, proof.pid, proof.startedAtUtc, false);
+            nextScan = this.deps.now() + 2000;
+            continue;
+          }
           takenClaimPath = join(claimsFolder, `${claimId}.taken-${instance.pid}.json`);
           attached = true;
           this.pending.delete(instance.pid);
@@ -217,15 +233,7 @@ export class InstanceManager {
             await this.withdrawPending(pendingLaunch);
             throw new Error(`Civil 3D launched process ${proof.pid} exited or its identity changed before the plugin loaded.`);
           }
-          try {
-            const scan = await this.deps.scanDialogs(proof.pid, proof.startedAtUtc);
-            pendingLaunch.diagnostics.dialogs = mergeDialogs(
-              pendingLaunch.diagnostics.dialogs.filter(d => d.title !== SCAN_FAILED), scan.dialogs);
-            pendingLaunch.diagnostics.missingXrefs = [...new Set([...pendingLaunch.diagnostics.missingXrefs, ...scan.missingXrefs])];
-          } catch (error) {
-            pendingLaunch.diagnostics.dialogs = mergeDialogs(pendingLaunch.diagnostics.dialogs,
-              [{ title: SCAN_FAILED, className: "", buttons: [], error: (error as Error).message }]);
-          }
+          await this.scanInto(pendingLaunch.diagnostics, proof.pid, proof.startedAtUtc, false);
           nextScan = this.deps.now() + 2000;
         }
         await this.deps.wait(1000);
@@ -271,10 +279,54 @@ export class InstanceManager {
   }
 
   private diagnostics(scan: DialogScanResult) {
-    const ignored = scan.dialogs.some(d => d.action === "ignore_invoked");
-    return { ...scan, ...(scan.missingXrefs.length || ignored ? {
-      warning: "The drawing has missing external references (Civil 3D's prompt was answered with Ignore). Review missingXrefs and the dialog text before using its contents.",
-    } : {}) };
+    const answered = (title: string) => scan.dialogs.some(d => d.action === "ignore_invoked" && titleIs(d, title));
+    const warnings = [
+      ...(scan.missingXrefs.length || answered(XREF_PROMPT) ? [XREF_WARNING] : []),
+      ...(answered(SHX_PROMPT) ? [SHX_WARNING] : []),
+    ];
+    return { ...scan, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  // One scan pass of the process identity (pid + start time) into diagnostics; a failed scan is recorded, never thrown.
+  // reportOnly: nothing is clicked. Returns the dialogs of this pass.
+  private async scanInto(diagnostics: DialogScanResult, pid: number, startedAtUtc: string, reportOnly: boolean): Promise<InstanceDialog[]> {
+    try {
+      const scan = await this.deps.scanDialogs(pid, startedAtUtc, { reportOnly });
+      diagnostics.dialogs = mergeDialogs(diagnostics.dialogs.filter(d => d.title !== SCAN_FAILED), scan.dialogs);
+      diagnostics.missingXrefs = [...new Set([...diagnostics.missingXrefs, ...scan.missingXrefs])];
+      return scan.dialogs;
+    } catch (error) {
+      diagnostics.dialogs = mergeDialogs(diagnostics.dialogs,
+        [{ title: SCAN_FAILED, className: "", buttons: [], error: (error as Error).message }]);
+      return [];
+    }
+  }
+
+  // attach on an unresponsive instance: a prompt is usually what blocks it. Only an agent instance owned by THIS
+  // session gets answers (pid and start time from discovery); any other instance is only reported on.
+  private async recoverUnresponsive(instance: CivilInstance): Promise<{ instance: CivilInstance; diagnostics: DialogScanResult }> {
+    const mine = instance.owner === "agent" && instance.ownerSession === sessionId;
+    const diagnostics: DialogScanResult = { dialogs: [], missingXrefs: [] };
+    let latest = await this.scanInto(diagnostics, instance.pid, instance.startedAtUtc, !mine);
+    const wasAnswered = (d: InstanceDialog) => d.action === "ignore_invoked";
+    const answered = mine && latest.some(wasAnswered);
+    for (let round = 0; answered && round < RECOVERY_ROUNDS; round++) {
+      await this.deps.wait(RECOVERY_WAIT_MS);
+      const fresh = (await this.deps.registry({ root: this.root, pid: instance.pid })).instances
+        .find(i => i.pid === instance.pid && Date.parse(i.startedAtUtc) === Date.parse(instance.startedAtUtc));
+      if (!fresh) break;
+      if (fresh.responsive) return { instance: fresh, diagnostics };
+      latest = await this.scanInto(diagnostics, instance.pid, instance.startedAtUtc, false);
+    }
+    const parts = [
+      ...latest.filter(d => !wasAnswered(d)).map(d => `dialog '${d.title}' is open (buttons: ${d.buttons.join(", ") || "none"})`),
+      ...diagnostics.dialogs.filter(wasAnswered).map(d => `dialog '${d.title}' was answered with Ignore`),
+    ];
+    const failed = diagnostics.dialogs.find(d => d.title === SCAN_FAILED);
+    if (!parts.length && failed) parts.push(`dialog scan failed (${failed.error})`);
+    const notAnswered = !mine && latest.length > 0;
+    throw new Error(`Civil 3D instance ${instance.pid} is not responsive${parts.length ? `: ${parts.join("; ")}` : ""}.`
+      + (notAnswered ? " Not answered: this session does not own the instance." : ""));
   }
 
   private async withdrawPending(pending: PendingLaunch) {

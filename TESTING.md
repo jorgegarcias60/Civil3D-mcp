@@ -15,6 +15,15 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 Live test pending: needs a plugin install with Civil 3D closed.
 
+### Missing SHX Files and late startup prompts, #48 (2026-10-15)
+
+| Check | Result |
+|---|---|
+| `npm run build`, `npx vitest run --cache=false`, `npm run docs:check` | Pass (887 tests): late prompt answered before start returns, repeated answering until responsive, timeout with the prompt open, attach answering on the session's own instance, report-only scans on user / other-session / orphaned instances, scanner source checks. |
+| Scanner against a stand-in WPF window titled "  missing shx FILES " | `reportOnly`: reported, not clicked, window stayed; otherwise Invoke closed it; an unknown title untouched. |
+
+Live check of AutoCAD's real "Missing SHX Files" prompt: see the live section once run.
+
 ### Instance follow-ups #36, #37, #38 and #40 (2026-10-15)
 
 Offline checks first (implementation round, before the live fixes below), then the live results on Civil 3D
