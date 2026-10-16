@@ -6,6 +6,20 @@ $data = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $targetPid = [int]$data.pid
 if ($targetPid -le 0) { throw 'Invalid process ID.' }
 $expectedStart = [DateTime]::Parse([string]$data.startedAtUtc).ToUniversalTime()
+# reportOnly (default false): dialogs are reported with their buttons, nothing is ever clicked or invoked.
+$reportOnly = $data.reportOnly -eq $true
+
+# The only prompts this scanner answers: window title (trimmed, case-insensitive) -> the one button it presses,
+# the single button whose name (mnemonic '&' removed) matches the entry's pattern ("Ignore unresolved reference
+# files", "Ignore the missing SHX files and continue", "Close"). Every other dialog is reported and never touched.
+# xrefs = the dialog lists missing reference files (reported as missingXrefs).
+$knownPrompts = @(
+  @{ title = 'References - Not Found Files'; button = '^Ignore'; xrefs = $true },
+  @{ title = 'Missing SHX Files'; button = '^Ignore'; xrefs = $false },
+  # Only says the last session ended unexpectedly; Close keeps the backups in the Drawing Recovery Manager palette
+  # (seen live 2026-10-16 after killed instances).
+  @{ title = 'Drawing Recovery'; button = '^Close$'; xrefs = $false }
+)
 
 function Test-ProcessIdentity {
   $process = $null
@@ -39,11 +53,11 @@ function Get-SafeCurrent($element) {
   try { return $element.Current } catch [Windows.Automation.ElementNotAvailableException] { return $null }
 }
 
-# Task dialog command links show up as Pane elements of window class "Button" with no UIA pattern
-# (Civil 3D 2026, "References - Not Found Files", verified live 2026-10-15).
+# Task dialog command links show up as Pane elements of class "Button", and push buttons as Pane "CCPushButton",
+# both with no UIA pattern (Civil 3D 2026, verified live 2026-10-15/16).
 function Test-ButtonLike($current) {
   return $current.ControlType -eq $buttonType -or
-    ($current.ControlType -eq [Windows.Automation.ControlType]::Pane -and [string]$current.ClassName -eq 'Button')
+    ($current.ControlType -eq [Windows.Automation.ControlType]::Pane -and [string]$current.ClassName -in 'Button', 'CCPushButton')
 }
 
 $taskDialogSource = @'
@@ -73,21 +87,21 @@ public static class CivilMcpTaskDialog {
     while (Environment.TickCount - end < 0) { if (!IsWindow(dialog)) return true; System.Threading.Thread.Sleep(100); }
     return !IsWindow(dialog);
   }
-  static string Verify(IntPtr dialog, IntPtr button, IntPtr host, int expectedPid, string expectedTitle) {
+  static string Verify(IntPtr dialog, IntPtr button, IntPtr host, int expectedPid, string expectedTitle, string buttonPattern) {
     if (dialog == IntPtr.Zero || button == IntPtr.Zero) return "Dialog or button has no window handle.";
     if (PidOf(dialog) != expectedPid || PidOf(button) != expectedPid || PidOf(host) != expectedPid) return "Window belongs to another process.";
-    if (ClassOf(dialog) != "#32770" || TextOf(dialog).Trim() != expectedTitle) return "Dialog window changed.";
+    if (ClassOf(dialog) != "#32770" || !string.Equals(TextOf(dialog).Trim(), expectedTitle, StringComparison.OrdinalIgnoreCase)) return "Dialog window changed.";
     if (FindWindowEx(dialog, IntPtr.Zero, "DirectUIHWND", null) == IntPtr.Zero) return "Dialog is not a task dialog.";
     if (GetAncestor(button, GA_ROOT) != dialog || GetAncestor(host, GA_ROOT) != dialog) return "Button is not inside the dialog.";
     if (ClassOf(host) != "CtrlNotifySink") return "Button host changed.";
-    if (ClassOf(button) != "Button" || !TextOf(button).TrimStart().StartsWith("Ignore", StringComparison.OrdinalIgnoreCase)) return "Button changed.";
+    if (ClassOf(button) != "Button" || !System.Text.RegularExpressions.Regex.IsMatch(TextOf(button).Replace("&", "").Trim(), buttonPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase)) return "Button changed.";
     return null;
   }
   // Returns "ok:<method>" once the dialog has closed, otherwise why it is still open or nothing was sent.
   // Task dialog command links have no control id (seen live 2026-10-15), so TDM_CLICK_BUTTON cannot target them.
-  public static string ClickButton(long dialogHandle, long buttonHandle, int expectedPid, string expectedTitle) {
+  public static string ClickButton(long dialogHandle, long buttonHandle, int expectedPid, string expectedTitle, string buttonPattern) {
     var dialog = new IntPtr(dialogHandle); var button = new IntPtr(buttonHandle); var host = GetParent(button);
-    var issue = Verify(dialog, button, host, expectedPid, expectedTitle);
+    var issue = Verify(dialog, button, host, expectedPid, expectedTitle, buttonPattern);
     if (issue != null) return issue;
     IntPtr result;
     // First the notification the button itself sends when clicked: BN_CLICKED to its own CtrlNotifySink host.
@@ -96,7 +110,7 @@ public static class CivilMcpTaskDialog {
     if (SendMessageTimeout(host, WM_COMMAND, wParam, button, SMTO_BLOCK_ABORTIFHUNG, 5000, out result) == IntPtr.Zero)
       return "The button host did not accept the click within 5 seconds.";
     if (Closed(dialog, 2000)) return "ok:button_notify";
-    issue = Verify(dialog, button, host, expectedPid, expectedTitle);
+    issue = Verify(dialog, button, host, expectedPid, expectedTitle, buttonPattern);
     if (issue != null) return issue;
     // Then BM_CLICK, the documented programmatic click of a button, sent to that button only.
     if (SendMessageTimeout(button, BM_CLICK, IntPtr.Zero, IntPtr.Zero, SMTO_BLOCK_ABORTIFHUNG, 5000, out result) == IntPtr.Zero)
@@ -118,10 +132,10 @@ function Scan-Element($element, $depth, $dialog, $recognized) {
   if ($name.Length -gt 260) { $name = $name.Substring(0, 260) }
   if (Test-ButtonLike $current) {
     if ($name) { [void]$dialog.buttons.Add($name) }
-    if ($recognized -and $name -match '^Ignore') { [void]$dialog.ignoreButtons.Add($element) }
+    if ($recognized -and ($name -replace '&', '') -match $dialog.buttonPattern) { [void]$dialog.ignoreButtons.Add($element) }
   }
   if ($recognized -and $current.ControlType -eq $textType -and $name -and
-      $dialog.text.Count -lt 100 -and $name -notmatch '^(References - Not Found Files|Ignore|Cancel|Help)$') {
+      $dialog.text.Count -lt 100 -and $name -ine $dialog.title.Trim() -and $name -notmatch '^(Ignore|Cancel|Help)$') {
     [void]$dialog.text.Add($name)
   }
   if ($depth -ge $maxDepth) { return }
@@ -141,7 +155,9 @@ function Scan-Window($window) {
   if ($null -eq $current -or $current.ProcessId -ne $targetPid) { return }
   $title = [string]$current.Name
   if ($title.Length -gt 260) { $title = $title.Substring(0, 260) }
-  $recognized = $title.Trim() -ieq 'References - Not Found Files'
+  $prompt = $null
+  foreach ($known in $knownPrompts) { if ($title.Trim() -ieq $known.title) { $prompt = $known; break } }
+  $recognized = $null -ne $prompt
   if (-not $recognized) {
     $isDialog = [string]$current.ClassName -eq '#32770'
     if (-not $isDialog) {
@@ -154,6 +170,7 @@ function Scan-Window($window) {
     if (-not $isDialog) { return }
   }
   $dialog = @{ title = $title; className = [string]$current.ClassName;
+    buttonPattern = $(if ($recognized) { [string]$prompt.button } else { '' });
     buttons = New-Object 'System.Collections.Generic.List[string]';
     ignoreButtons = New-Object 'System.Collections.Generic.List[object]';
     text = New-Object 'System.Collections.Generic.List[string]';
@@ -161,11 +178,12 @@ function Scan-Window($window) {
   Scan-Element $window 0 $dialog $recognized
   foreach ($line in $dialog.text) {
     # Lines with a file extension or a folder are the missing references; the rest is the dialog's own text.
-    if ($missing.Count -lt 100 -and ($line -match '\.(dwg|dxf|dwf|dwfx|pdf|dgn|png|jpe?g|tiff?|bmp|gif|rcp|rcs|nwd|nwc|ecw|sid)\b' -or $line -match '[\\/]')) {
+    # Only the xref prompt lists references; font names from the SHX prompt are not xrefs.
+    if ($recognized -and $prompt.xrefs -and $missing.Count -lt 100 -and ($line -match '\.(dwg|dxf|dwf|dwfx|pdf|dgn|png|jpe?g|tiff?|bmp|gif|rcp|rcs|nwd|nwc|ecw|sid)\b' -or $line -match '[\\/]')) {
       [void]$missing.Add($line)
     }
   }
-  if ($recognized) {
+  if ($recognized -and -not $reportOnly) {
     if ($dialog.ignoreButtons.Count -eq 1) {
       # PID reuse, changed title, and changed button ownership are checked immediately before Invoke.
       if (-not (Test-ProcessIdentity)) {
@@ -175,9 +193,9 @@ function Scan-Window($window) {
         $button = $dialog.ignoreButtons[0]
         $freshButton = Get-SafeCurrent $button
         if ($null -eq $freshWindow -or $freshWindow.ProcessId -ne $targetPid -or
-            ([string]$freshWindow.Name).Trim() -ine 'References - Not Found Files' -or
+            ([string]$freshWindow.Name).Trim() -ine $prompt.title -or
             $null -eq $freshButton -or $freshButton.ProcessId -ne $targetPid -or
-            -not (Test-ButtonLike $freshButton) -or ([string]$freshButton.Name) -notmatch '^Ignore') {
+            -not (Test-ButtonLike $freshButton) -or (([string]$freshButton.Name) -replace '&', '') -notmatch $prompt.button) {
           [void]$dialog.issues.Add('Dialog or Ignore button changed before action.')
         } else {
           $pattern = $null
@@ -190,7 +208,7 @@ function Scan-Window($window) {
             try {
               Add-Type -TypeDefinition $taskDialogSource -ErrorAction Stop
               $issue = [CivilMcpTaskDialog]::ClickButton([int64]$freshWindow.NativeWindowHandle,
-                [int64]$freshButton.NativeWindowHandle, $targetPid, 'References - Not Found Files')
+                [int64]$freshButton.NativeWindowHandle, $targetPid, [string]$prompt.title, [string]$prompt.button)
             } catch { $issue = 'Task dialog click helper failed.' }
             if ($issue -like 'ok:*') { $dialog.action = 'ignore_invoked'; $dialog.method = $issue.Substring(3) }
             else {

@@ -3,7 +3,40 @@
 How this fork is verified, and the last recorded results. Run everything from the
 repo root on Windows with Node 18+ and the .NET 10 SDK.
 
+## Live (Civil 3D 2026)
+
+### Startup prompts, per-pid COM, run_code and plot crash guards (2026-10-16)
+
+Plugin installed from the combined branch (all Civil 3D closed first); scratch drawings under `C:\CAD-Tools\tmp\c3d-test-all`.
+
+| Check | Result |
+|---|---|
+| Per-pid COM: a scratch user instance plus a later agent instance (CAD-Tools `Start-Civil3D -NewInstance`, 24 s) | ROT showed `!Civil3DMcp.AcadApplication:<pid>` for both; `Get-AcadApplication -Pid` reached the LATER instance and its drawing; `Test-AcadIdle -Pid` idle; COM `Quit` by pid ended it and its ROT entry was gone; the other instance untouched. |
+| "Drawing Recovery" notice (left by killed instances) | A report-only scan listed it (buttons Show details, Close: a push button that UIA reports as Pane `CCPushButton` without a pattern). Answered by `button_notify`; later `civil3d_instance start` closed it by itself and returned the warning. |
+| "Missing SHX Files" | A scratch drawing with a text style on a missing SHX opened without the prompt in this profile (missing fonts are substituted silently), so that prompt is not verified live; it uses the same table and click route as the two verified prompts. |
+| #43 guard | Layout switch + `new Viewport` in one write run: `status: rejected`. CreateLayout alone, switch alone, viewports alone: ok. |
+| #44 | Before the guard, the second erase-and-re-create of viewports on the current layout killed acad.exe. With the guard: viewport `Erase` rejected; two in-place updates ok; `plot_layouts_to_pdf` plotted 1 page (17,929 bytes) with `regenerated: true`; the instance stayed healthy and stopped cleanly. |
+
 ## Offline (no Civil 3D needed)
+
+### Per-process COM registration (2026-10-15)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10 (`ComRegistrationChecks`, real Running Object Table, stand-in object) | Pass: display name `!Civil3DMcp.AcadApplication:<pid>`, registration found by that name, second Register a no-op, Revoke removes it, non-positive pid refused. |
+| Plugin builds net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+| `npm run build`, full vitest, `docs:check`, installer check | Pass (874 tests). |
+
+Live test pending: needs a plugin install with Civil 3D closed.
+
+### Missing SHX Files and late startup prompts, #48 (2026-10-15)
+
+| Check | Result |
+|---|---|
+| `npm run build`, `npx vitest run --cache=false`, `npm run docs:check` | Pass (887 tests): late prompt answered before start returns, repeated answering until responsive, timeout with the prompt open, attach answering on the session's own instance, report-only scans on user / other-session / orphaned instances, scanner source checks. |
+| Scanner against a stand-in WPF window titled "  missing shx FILES " | `reportOnly`: reported, not clicked, window stayed; otherwise Invoke closed it; an unknown title untouched. |
+
+Live check of AutoCAD's real "Missing SHX Files" prompt: see the live section once run.
 
 ### Instance follow-ups #36, #37, #38 and #40 (2026-10-15)
 

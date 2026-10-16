@@ -72,6 +72,31 @@ internal static class RuntimeChecks
       }
     }
 
+    // Issue #43: SetViewport refuses to switch layouts in a run that created or erased viewports,
+    // before anything is switched (nothing to restore) and before the edit.
+    foreach (var (original, empty, changed, shouldRefuse) in new[] {
+      ("Model", false, true, true), ("sHeEt", true, true, true), ("Model", false, false, false),
+      ("sHeEt", false, true, false), ("sHeEt", false, false, false) })
+    {
+      var current = original;
+      var events = new List<string>();
+      try
+      {
+        RunCodeHelpers.WithCurrentLayout("Sheet", empty, () => current,
+          name => { current = name; events.Add("layout:" + name); }, () => events.Add("activated"),
+          () => { events.Add("edit"); return 0; }, () => changed);
+        expect(!shouldRefuse && events.Contains("edit") && current == original,
+          $"viewport changes in the run + layout: edit runs only when no switch is needed (previous={original}, empty={empty}, changed={changed})");
+      }
+      catch (InvalidOperationException refused)
+      {
+        expect(shouldRefuse && events.Count == 0 && current == original
+            && refused.Message.Contains("issue #43", StringComparison.Ordinal)
+            && refused.Message.Contains("'Sheet'", StringComparison.Ordinal),
+          $"viewport changes in the run + layout switch is refused before switching or editing (previous={original}, empty={empty})");
+      }
+    }
+
     var partiallyChanged = "Model";
     var activationFailure = new InvalidOperationException("Activation failed after changing layout");
     var editRan = false;

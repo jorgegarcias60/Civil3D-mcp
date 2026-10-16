@@ -460,6 +460,13 @@ internal static class ScriptCompiler
       }
     }
 
+    // Preview already refuses every layout change above and rolls back anyway.
+    if (writeMode && !previewMode
+        && FindLayoutViewportViolation(tree, model) is { } layoutViewport)
+    {
+      yield return layoutViewport;
+    }
+
     if (writeMode)
     {
       yield break;
@@ -484,6 +491,91 @@ internal static class ScriptCompiler
           $"Read mode opens objects for read only: {display} is not allowed. Use mode 'write' to change the drawing.");
       }
     }
+  }
+
+  // Issue #43: one write run that created a layout, switched to it and created
+  // and erased viewports crashed AutoCAD at commit (AccessViolation in
+  // FlushGraphics, live, 2026-10-15). Each part alone ran fine in its own run,
+  // so only the combination is refused. This reads the whole source: a branch
+  // chosen by Args at run time still counts, so stages must be separate scripts.
+  // SetViewport edits an existing viewport and neither creates nor erases one,
+  // and it may activate the layout itself, so it is not counted here: it
+  // refuses at run time instead (RunCodeHelpers.WithCurrentLayout).
+  private const string LayoutManagerTypeName = "Autodesk.AutoCAD.DatabaseServices.LayoutManager";
+  private const string ViewportTypeName = "Autodesk.AutoCAD.DatabaseServices.Viewport";
+
+  // Layout switches that bypass LayoutManager: the CTAB and TILEMODE system
+  // variables and Database.TileMode. A non-constant variable name is not counted.
+  private static bool SwitchesLayoutWithoutManager(ISymbol symbol, SimpleNameSyntax node, SemanticModel model)
+  {
+    if (symbol is IPropertySymbol && symbol.Name == "TileMode"
+        && symbol.ContainingType?.ToDisplayString() == DatabaseTypeName && IsAssignmentTarget(node))
+      return true;
+    return symbol is IMethodSymbol { Name: "SetSystemVariable" }
+      && symbol.ContainingType?.ToDisplayString() is "Autodesk.AutoCAD.ApplicationServices.Application" or "Autodesk.AutoCAD.ApplicationServices.Core.Application"
+      && InvocationOf(node) is { } call && model.GetOperation(call) is IInvocationOperation operation
+      && operation.Arguments.FirstOrDefault(argument => argument.Parameter?.Ordinal == 0)?.Value.ConstantValue
+        is { HasValue: true, Value: string variable }
+      && (variable.Equals("CTAB", StringComparison.OrdinalIgnoreCase) || variable.Equals("TILEMODE", StringComparison.OrdinalIgnoreCase));
+  }
+
+  private static ScriptDiagnostic? FindLayoutViewportViolation(SyntaxTree tree, SemanticModel model)
+  {
+    var layoutChange = false;
+    SyntaxNode? firstViewport = null;
+    SyntaxNode? firstErase = null;
+    void NoteViewport(SyntaxNode node)
+    {
+      if (MapToScript(node.GetLocation()).Line != 0 && (firstViewport == null || node.SpanStart < firstViewport.SpanStart))
+        firstViewport = node;
+    }
+
+    foreach (var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
+    {
+      if (MapToScript(node.GetLocation()).Line == 0) continue;
+      var info = model.GetSymbolInfo(node);
+      var symbol = info.Symbol ?? info.CandidateSymbols.FirstOrDefault();
+      if (symbol == null) continue;
+      if (InheritsFrom(symbol.ContainingType, LayoutManagerTypeName)
+          && (symbol is IMethodSymbol && symbol.Name is "CreateLayout" or "SetCurrentLayoutId"
+              || symbol is IPropertySymbol && symbol.Name == "CurrentLayout" && IsAssignmentTarget(node)))
+        layoutChange = true;
+      else if (SwitchesLayoutWithoutManager(symbol, node, model))
+        layoutChange = true;
+      // Erase is declared on DBObject, so the receiver's static type decides.
+      else if (symbol is IMethodSymbol && symbol.Name == "Erase" && MethodReceiver(node) is { } receiver
+          && InheritsFrom(model.GetTypeInfo(receiver).Type as INamedTypeSymbol, ViewportTypeName))
+      {
+        NoteViewport(node);
+        if (firstErase == null || node.SpanStart < firstErase.SpanStart) firstErase = node;
+      }
+    }
+
+    // Issue #44, live 2026-10-16: the second write run that erased and re-created the viewports on the current
+    // layout killed acad.exe (the first such run passed); a plot after the same pattern crashed in the field.
+    // Erasing a layout's own overall viewport wedged AutoCAD in a command. So viewports are never erased here.
+    if (firstErase != null)
+    {
+      var (eraseLine, eraseColumn) = MapToScript(firstErase.GetLocation());
+      return new ScriptDiagnostic(eraseLine, eraseColumn, GuardDiagnosticId,
+        "Erasing viewports crashed AutoCAD (2026-10-16: the second erase-and-re-create of viewports on the current layout killed acad.exe; "
+        + "a plot after the same pattern crashed too). Create viewports once and update them in place (SetViewport, or Width, Height, "
+        + "CenterPoint, ViewCenter, CustomScale) instead of erasing and re-creating them. See issue #44.");
+    }
+
+    foreach (var creation in tree.GetRoot().DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
+    {
+      if (model.GetOperation(creation) is IObjectCreationOperation { Constructor.ContainingType: { } created }
+          && InheritsFrom(created, ViewportTypeName))
+        NoteViewport(creation);
+    }
+
+    if (!layoutChange || firstViewport == null) return null;
+    var (line, column) = MapToScript(firstViewport.GetLocation());
+    return new ScriptDiagnostic(line, column, GuardDiagnosticId,
+      "Changing or creating a layout and creating/erasing viewports in one write run crashed AutoCAD at commit (AccessViolation in FlushGraphics, 2026-10-15). "
+      + "Split it into separate write runs: (1) layout, title block and table without switching layouts, (2) only the CurrentLayout switch, (3) the viewports. "
+      + "This check reads the whole script, so stages chosen by an Args value inside one script or codePath file are refused too: keep each stage in its own script or file. See issue #43.");
   }
 
   // Require explicit constant mode/access and constant sharing/options for

@@ -30,6 +30,7 @@
     <Compile Include="..\..\Civil3D-MCP-Plugin\RpcAuth.cs" Link="RpcAuth.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\InstanceDiscovery.cs" Link="InstanceDiscovery.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\InstancePortBinder.cs" Link="InstancePortBinder.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\ComRegistration.cs" Link="ComRegistration.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\IdleDeadline.cs" Link="IdleDeadline.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\PdfOutputInspector.cs" Link="PdfOutputInspector.cs" />
   </ItemGroup>

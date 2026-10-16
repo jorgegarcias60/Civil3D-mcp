@@ -524,19 +524,20 @@ foreach (var node in (JsonArray)Args["layers"]!) {
 Db.Insunits = Enum.Parse<UnitsValue>((string)Args["units"]!);
 return 1;
 `,
+  // Issue #43: creating a layout, switching to it and creating viewports in one write run crashed AutoCAD, so the
+  // compile guard refuses it and the fixture is built in three runs: viewportCreate, viewportActivate, viewportSetup.
+  viewportCreate: String.raw`
+LayoutManager.Current.CreateLayout((string)Args["layout"]!);
+return LayoutManager.Current.CurrentLayout;
+`,
   viewportSetup: String.raw`
-var manager = LayoutManager.Current;
-var original = manager.CurrentLayout;
-try {
-  var id = manager.CreateLayout((string)Args["layout"]!);
-  manager.CurrentLayout = (string)Args["layout"]!;
-  var layout = Open<Layout>(id);
-  var overall = layout.GetViewports()[0];
-  var ps = Open<BlockTableRecord>(layout.BlockTableRecordId, true);
-  var viewport = new Viewport { CenterPoint = new Point3d(10,10,0), Width = 8, Height = 5, ViewDirection = Vector3d.ZAxis };
-  ps.AppendEntity(viewport); Tr.AddNewlyCreatedDBObject(viewport, true); viewport.On = true; viewport.Locked = true;
-  return new { handle = viewport.ObjectId, overall, original };
-} finally { manager.CurrentLayout = original; }
+var layouts = Open<DBDictionary>(Db.LayoutDictionaryId);
+var layout = Open<Layout>(layouts.GetAt((string)Args["layout"]!));
+var overall = layout.GetViewports()[0];
+var ps = Open<BlockTableRecord>(layout.BlockTableRecordId, true);
+var viewport = new Viewport { CenterPoint = new Point3d(10,10,0), Width = 8, Height = 5, ViewDirection = Vector3d.ZAxis };
+ps.AppendEntity(viewport); Tr.AddNewlyCreatedDBObject(viewport, true); viewport.On = true; viewport.Locked = true;
+return new { handle = viewport.ObjectId, overall };
 `,
   viewportWrite: String.raw`
 return SetViewport((string)Args["layout"]!, ById((string)Args["handle"]!), paperCenter: new Point3d(18,12,0),
@@ -695,8 +696,10 @@ async function helperChecks(runCodeApi) {
   let original = requireOk(await run({ code: "return LayoutManager.Current.CurrentLayout;" }));
   try {
     await check("helpers: SetViewport persists after non-current layout activation", async () => {
+      requireOk(await execute("viewportCreate", { layout: layoutName }));
+      requireOk(await execute("viewportActivate", { layout: layoutName }));
       const fixture = requireOk(await execute("viewportSetup", { layout: layoutName }));
-      original = fixture.original;
+      requireOk(await execute("viewportActivate", { layout: original }));
       const args = { layout: layoutName, handle: fixture.handle };
       const changedResponse = await execute("viewportWrite", args);
       const changed = requireOk(changedResponse);
