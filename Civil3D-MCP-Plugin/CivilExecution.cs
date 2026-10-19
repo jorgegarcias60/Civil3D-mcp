@@ -186,6 +186,7 @@ public static partial class CivilExecution
 
     T? result = default;
     Exception? capturedException = null;
+    var inputWarnings = new List<string>();
 
     // Read on the request's thread: the expected identity is an AsyncLocal,
     // and the Idle and plugin-command routes run on the UI thread's
@@ -230,7 +231,7 @@ public static partial class CivilExecution
       return Task.CompletedTask;
     }, needsCommand: write || inCommand, needsQuietEditor: commandLine, cancellationToken,
       targetDocument: targetDocument, drainOnCancellation: targetDocument != null,
-      dispatchWarning: activation == null ? null : activation.AddWarning);
+      dispatchWarning: activation == null ? null : activation.AddWarning, inputWarning: inputWarnings.Add);
 
     // A targeted write must finish its host work before its caller restores
     // the previous drawing. RunOnHostAsync drains started work on cancellation.
@@ -242,7 +243,25 @@ public static partial class CivilExecution
       System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(capturedException).Throw();
     }
 
-    return result!;
+    return WithInputWarnings(result!, inputWarnings);
+  }
+
+  // Warnings from typed command-line input that has no evidence of running
+  // (issue #53) go into the operation's result, so a caller never gets plain
+  // success for an UNDO that did not run. Every operation that queues
+  // command-line input returns a Dictionary; anything else keeps only the log.
+  private static T WithInputWarnings<T>(T result, List<string> warnings)
+  {
+    if (warnings.Count == 0 || result is not IDictionary<string, object?> response) return result;
+    var combined = response.TryGetValue("warnings", out var existing) switch
+    {
+      true when existing is string single => new List<string> { single },
+      true when existing is IEnumerable<string> earlier => earlier.ToList(),
+      _ => new List<string>(),
+    };
+    combined.AddRange(warnings);
+    response["warnings"] = combined;
+    return result;
   }
 
   // Same host gate, command context, drawing-identity check, and document
@@ -444,16 +463,17 @@ public static partial class CivilExecution
       }
 
       var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
+      var inputWarnings = new List<string>();
       var hostTask = RunOnHostAsync(_ =>
       {
         cancellationToken.ThrowIfCancellationRequested();
         RequireExpectedDocument(expectedDrawingIdentity, "No commands were run.");
         QueueCommandLine(input);
         return Task.CompletedTask;
-      }, needsCommand: false, needsQuietEditor: true, cancellationToken);
+      }, needsCommand: false, needsQuietEditor: true, cancellationToken, inputWarning: inputWarnings.Add);
 
       await AwaitHostContextAsync(hostTask, cancellationToken);
-      return result;
+      return WithInputWarnings(result, inputWarnings);
     });
   }
 
@@ -538,13 +558,20 @@ public static partial class CivilExecution
   //  - while no Idle tick arrives at all for HostBusyTimeout (a modal dialog).
   // The busy checks, the no-Idle watchdog and the claim flag come from
   // jorgegarcias60/Civil3D-mcp#1 and #2.
+  // inputWarning receives the warnings of typed command-line input that has no
+  // evidence of running (SendTypedInputAsync); the COM channel has none.
   private static async Task RunOnHostAsync(Func<HostRoute, Task> operation, bool needsCommand, bool needsQuietEditor,
     CancellationToken cancellationToken, Document? targetDocument = null, TimeSpan? busyTimeout = null,
-    bool drainOnCancellation = false, Action<string>? dispatchWarning = null)
+    bool drainOnCancellation = false, Action<string>? dispatchWarning = null, Action<string>? inputWarning = null)
   {
     var timeout = busyTimeout ?? HostBusyTimeout;
     var dispatch = new RunCodeDispatchGate();
     var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    void ReportInputWarning(string? warning)
+    {
+      if (warning != null) inputWarning?.Invoke(warning);
+    }
 
     async Task RunOnce(HostRoute route)
     {
@@ -655,7 +682,7 @@ public static partial class CivilExecution
             PendingCancel = false;
             if (channel.Value == InputChannel.Typed)
             {
-              if (inputDocument != null) await SendTypedInputAsync(inputDocument, new[] { "\x03\x03" });
+              if (inputDocument != null) ReportInputWarning(await SendTypedInputAsync(inputDocument, new[] { "\x03\x03" }));
             }
             else if (acadDocument != null) await SendCancelAsync(acadDocument);
           }
@@ -665,7 +692,7 @@ public static partial class CivilExecution
         {
           var input = PendingCommandLine.ToList();
           PendingCommandLine.Clear();
-          await SendTypedInputAsync(inputDocument, input);
+          ReportInputWarning(await SendTypedInputAsync(inputDocument, input));
         }
         else if (PendingCommandLine.Count > 0 && acadDocument != null)
         {

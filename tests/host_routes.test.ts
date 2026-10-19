@@ -149,7 +149,7 @@ describe("host routes", () => {
     expect(count(typedInput, "SendTyped(")).toBe(4);
     for (const caller of [
       "private static async Task StartPluginCommandTypedAsync(",
-      "private static async Task SendTypedInputAsync(",
+      "private static async Task<string?> SendTypedInputAsync(",
       "public static Task<object?> ProbeTypedInputAsync(",
     ]) {
       expect(count(methodBody(typedInput, caller), "SendTyped("), caller).toBe(1);
@@ -192,8 +192,32 @@ describe("host routes", () => {
     expect(count(execution + typedInput, "channel.Value = ")).toBe(1);
     expect(typedInput).toMatch(/if \(!HostRouteDecision\.FallsBackToCom\(hopStart\)\)\s*\{[^}]*"typed hop start was lost; nothing ran\.[^}]*\}\s*channel\.Value = InputChannel\.Com;\s*await StartPluginCommandAsync\(doc, work, finished, acadDocument\);/);
     // Cancel and command-line input follow channel.Value; COM stays the else branch.
-    expect(execution).toMatch(/if \(PendingCancel\)\s*\{\s*PendingCancel = false;\s*if \(channel\.Value == InputChannel\.Typed\)\s*\{\s*if \(inputDocument != null\) await SendTypedInputAsync\(inputDocument, new\[\] \{ "\\x03\\x03" \}\);\s*\}\s*else if \(acadDocument != null\) await SendCancelAsync\(acadDocument\);/);
-    expect(execution).toMatch(/if \(PendingCommandLine\.Count > 0 && channel\.Value == InputChannel\.Typed && inputDocument != null\)\s*\{[^}]*await SendTypedInputAsync\(inputDocument, input\);\s*\}\s*else if \(PendingCommandLine\.Count > 0 && acadDocument != null\)\s*\{[^}]*await SendCommandLineAsync\(acadDocument, input\);/);
+    expect(execution).toMatch(/if \(PendingCancel\)\s*\{\s*PendingCancel = false;\s*if \(channel\.Value == InputChannel\.Typed\)\s*\{\s*if \(inputDocument != null\) ReportInputWarning\(await SendTypedInputAsync\(inputDocument, new\[\] \{ "\\x03\\x03" \}\)\);\s*\}\s*else if \(acadDocument != null\) await SendCancelAsync\(acadDocument\);/);
+    expect(execution).toMatch(/if \(PendingCommandLine\.Count > 0 && channel\.Value == InputChannel\.Typed && inputDocument != null\)\s*\{[^}]*ReportInputWarning\(await SendTypedInputAsync\(inputDocument, input\)\);\s*\}\s*else if \(PendingCommandLine\.Count > 0 && acadDocument != null\)\s*\{[^}]*await SendCommandLineAsync\(acadDocument, input\);/);
+  });
+
+  // "Input no longer pending" is no evidence: acedIsInputPending is also false when typed
+  // strings were discarded. Each entry's command must start (CommandWillStart); without
+  // that the caller's result carries a warning (never plain success for an UNDO that did
+  // not run) and, after quiet idle time with no command started, typed input is marked
+  // dead. Never resent over COM: the typed string may still run.
+  it("requires evidence that typed command-line input ran, and reports it in the result", () => {
+    const send = methodBody(typedInput, "private static async Task<string?> SendTypedInputAsync(");
+    expect(send).toMatch(/commandStarted = \(_, e\) => created\.CommandStarted\(e\.GlobalCommandName\);\s*doc\.CommandWillStart \+= commandStarted;\s*foreach \(var text in input\) SendTyped\(doc, text\);/);
+    expect(send).toMatch(/finally\s*\{\s*if \(commandStarted != null\) doc\.CommandWillStart -= commandStarted;\s*\}/);
+    expect(send).toMatch(/watch\.Tick\(Stopwatch\.GetTimestamp\(\), HostIsIdle\(\), pending\)/);
+    expect(send).toMatch(/case TypedInputVerdict\.Lost:[\s\S]*Route\.TypedInput\.RecordLostInput\(pending, DateTime\.UtcNow\)[\s\S]*return \$"Typed input was not consumed/);
+    expect(send).toMatch(/default:[\s\S]*return \$"Typed input has not run yet/);
+    expect(send).not.toMatch(/SendCommand|SendCancelAsync|SendCommandLineAsync|AcadInputPending\.Read\(\) != true/);
+    // The warnings reach the results of the operations that queue command-line input.
+    expect(count(execution, "ReportInputWarning(await SendTypedInputAsync(")).toBe(2);
+    expect(count(execution, "inputWarning: inputWarnings.Add")).toBe(2);
+    expect(methodBody(execution, "private static async Task<T> ExecuteOnHostAsync<T>("))
+      .toContain("return WithInputWarnings(result!, inputWarnings);");
+    expect(methodBody(execution, "public static async Task<T> RunCommandLineAsync<T>("))
+      .toContain("return WithInputWarnings(result, inputWarnings);");
+    expect(methodBody(execution, "private static T WithInputWarnings<T>(")).toContain('response["warnings"] = combined;');
+    expect(decisions).toContain('Set(TypedInputState.Dead, "typed-input-lost", utc)');
   });
 
   it("drops a lost typed start's work and fails or falls back without running anything twice", () => {
@@ -204,6 +228,10 @@ describe("host routes", () => {
     // as the COM not-started path does.
     expect(count(start, "DropQueuedWork(typedWork);")).toBe(5);
     expect(start).toContain("Route.TypedInput.RecordLostStart(inputPending, DateTime.UtcNow)");
+    // The start latency is taken at the top of the hop's work, not when the verdict's
+    // continuation runs after the work's synchronous part.
+    expect(start).toMatch(/started: \(\) =>\s*\{\s*Volatile\.Write\(ref startedAt, Stopwatch\.GetTimestamp\(\)\);\s*verdict\.TrySetResult\(TypedStartOutcome\.Started\);\s*\}/);
+    expect(start).toContain("Route.TypedInput.RecordTypedStart(ElapsedMs(sentAt, Volatile.Read(ref startedAt)), DateTime.UtcNow)");
     expect(count(start, '"CIVIL3D.HOST_BUSY"')).toBe(2);
     // The wrapper runs work only after winning the claim; the watcher declares a start
     // lost only through the same claim.
@@ -220,10 +248,15 @@ describe("host routes", () => {
     const probe = methodBody(typedInput, "public static Task<object?> ProbeTypedInputAsync(");
     expect(probe).toContain('Math.Clamp(PluginRuntime.GetOptionalInt(parameters, "timeoutMs") ?? 3000, 250, 10000)');
     expect(probe).toContain("return ExecuteSerializedAsync<object?>(");
-    expect(probe).toMatch(/if \(Convert\.ToInt32\(CoreApp\.GetSystemVariable\("CMDACTIVE"\)\) != 0 \|\| !doc\.Editor\.IsQuiescent\)\s*\{\s*skipped = "busy";\s*return null;\s*\}[\s\S]*AcadInputPending\.Read\(\);[\s\S]*SendTyped\(/);
+    // CMDACTIVE and CMDNAMES are read before deciding to skip, and returned when busy.
+    expect(probe).toMatch(/var cmdactive = Convert\.ToInt32\(CoreApp\.GetSystemVariable\("CMDACTIVE"\)\);\s*var cmdnames = Convert\.ToString\(CoreApp\.GetSystemVariable\("CMDNAMES"\)\);\s*if \(cmdactive != 0 \|\| !doc\.Editor\.IsQuiescent\)\s*\{\s*skipped = "busy";\s*busyCmdnames = cmdnames;\s*busyCmdactive = cmdactive;\s*return null;\s*\}[\s\S]*AcadInputPending\.Read\(\);[\s\S]*SendTyped\(/);
+    expect(probe).toContain("return Result(false, skipped, cmdnames: busyCmdnames, cmdactive: busyCmdactive);");
+    expect(probe).toContain('["cmdactive"] = cmdactive,');
     expect(probe).toContain("Route.TypedInput.RecordProbe(ran, latency, DateTime.UtcNow)");
     const entry = withoutComments(source("PluginEntry.cs"));
-    expect(entry).toMatch(/\[CommandMethod\(CivilExecution\.ProbeCommandName, CommandFlags\.Modal \| CommandFlags\.NoHistory \| CommandFlags\.NoMultiple\)\]\s*public static void ProbeCommand\(\)/);
+    // NoUndoMarker: the probe touches no database, so it must not leave an undo step
+    // that shifts UNDO counts or clears redo.
+    expect(entry).toMatch(/\[CommandMethod\(CivilExecution\.ProbeCommandName, CommandFlags\.Modal \| CommandFlags\.NoHistory \| CommandFlags\.NoMultiple \| CommandFlags\.NoUndoMarker\)\]\s*public static void ProbeCommand\(\)/);
     expect(typedInput).toContain('internal const string ProbeCommandName = "C3DMCPPROBE";');
     expect(decisions).toContain('internal const string ExportName = "?acedIsInputPending@@YA_NXZ";');
   });

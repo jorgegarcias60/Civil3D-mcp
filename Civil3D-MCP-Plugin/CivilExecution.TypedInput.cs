@@ -22,9 +22,14 @@ public static partial class CivilExecution
 
   internal const string ProbeCommandName = "C3DMCPPROBE";
 
-  // Quiet idle time a typed C3DMCPHOP start may take before it counts as lost.
-  // Healthy typed starts and command-context callbacks took 12-51 ms live.
+  // Quiet idle time a typed C3DMCPHOP start, or the command of typed
+  // command-line input, may take before it counts as lost. Healthy typed
+  // starts and command-context callbacks took 12-51 ms live.
   private static readonly TimeSpan TypedStartQuietTimeout = TimeSpan.FromMilliseconds(2000);
+
+  // How long typed command-line input may take to run before the request
+  // completes anyway (as SendCommandLineAsync waits on the COM channel).
+  private static readonly TimeSpan TypedInputWait = TimeSpan.FromSeconds(3);
 
   private static readonly TypedProbeLedger ProbeLedger = new();
 
@@ -45,8 +50,11 @@ public static partial class CivilExecution
     return report;
   }
 
-  // The C3DMCPPROBE command (main thread). Harmless: it only records that it
-  // ran and when. A run after the probe's waiter gave up still counts.
+  // The C3DMCPPROBE command (main thread). It touches no database and only
+  // records that it ran and when; it is flagged NoUndoMarker so it should
+  // leave no undo step (not yet verified live). A run after the probe's waiter
+  // gave up still counts. Such a late string can also answer a prompt that is
+  // open by then, which is why the probe is meant for an idle Command: prompt.
   internal static void ProbeCommandRan()
   {
     var run = ProbeLedger.CommandRan(Stopwatch.GetTimestamp());
@@ -69,7 +77,7 @@ public static partial class CivilExecution
     {
       var session = HostSessionInfo.Read(HostMainWindow());
       Dictionary<string, object?> Result(bool ran, string? skipped, double? latencyMs = null, bool? before = null,
-        bool? after = null, string? cmdnames = null)
+        bool? after = null, string? cmdnames = null, int? cmdactive = null)
       {
         var result = new Dictionary<string, object?>
         {
@@ -79,6 +87,7 @@ public static partial class CivilExecution
           ["inputPendingBefore"] = before,
           ["inputPendingAfter"] = after,
           ["cmdnames"] = cmdnames,
+          ["cmdactive"] = cmdactive,
           ["session"] = session,
           ["typedInput"] = Route.TypedInput.Report(),
         };
@@ -88,6 +97,10 @@ public static partial class CivilExecution
 
       (long Id, Task<double> Ran, bool? Before)? sent;
       string? skipped = null;
+      // Read before deciding to skip: when the host is busy, which command
+      // holds it is what the experiment needs to see.
+      string? busyCmdnames = null;
+      int? busyCmdactive = null;
       try
       {
         sent = await RunOnIdleAsync<(long Id, Task<double> Ran, bool? Before)?>(() =>
@@ -99,9 +112,13 @@ public static partial class CivilExecution
             return null;
           }
 
-          if (Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) != 0 || !doc.Editor.IsQuiescent)
+          var cmdactive = Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE"));
+          var cmdnames = Convert.ToString(CoreApp.GetSystemVariable("CMDNAMES"));
+          if (cmdactive != 0 || !doc.Editor.IsQuiescent)
           {
             skipped = "busy";
+            busyCmdnames = cmdnames;
+            busyCmdactive = cmdactive;
             return null;
           }
 
@@ -116,7 +133,7 @@ public static partial class CivilExecution
         return Result(false, "no-idle");
       }
 
-      if (sent is not { } probe) return Result(false, skipped);
+      if (sent is not { } probe) return Result(false, skipped, cmdnames: busyCmdnames, cmdactive: busyCmdactive);
 
       await PollOnIdleAsync(() => probe.Ran.IsCompleted, timeout);
       double? latency = null;
@@ -126,11 +143,13 @@ public static partial class CivilExecution
       Route.TypedInput.RecordProbe(ran, latency, DateTime.UtcNow);
 
       bool? after = null;
-      string? cmdnames = null;
+      string? cmdnamesAfter = null;
+      int? cmdactiveAfter = null;
       try
       {
-        (after, cmdnames) = await RunOnIdleAsync(
-          () => (AcadInputPending.Read(), Convert.ToString(CoreApp.GetSystemVariable("CMDNAMES"))),
+        (after, cmdnamesAfter, cmdactiveAfter) = await RunOnIdleAsync(
+          () => (AcadInputPending.Read(), Convert.ToString(CoreApp.GetSystemVariable("CMDNAMES")),
+            (int?)Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE"))),
           TimeSpan.FromSeconds(2));
       }
       catch (TimeoutException)
@@ -140,7 +159,7 @@ public static partial class CivilExecution
 
       if (!ran)
         PluginLog.Warn("Host", $"Typed-input probe: {ProbeCommandName} did not run within {timeoutMs} ms (input pending before {Describe(probe.Before)}, after {Describe(after)}); typed input is marked dead (issue #53).");
-      return Result(ran, null, latency, probe.Before, after, cmdnames);
+      return Result(ran, null, latency, probe.Before, after, cmdnamesAfter, cmdactiveAfter);
     });
   }
 
@@ -178,8 +197,15 @@ public static partial class CivilExecution
     var acadDocument = HostRouteDecision.FallsBackToCom(hopStart) ? doc.GetAcadDocument() : null;
     var claim = new TypedStartClaim();
     var verdict = new TaskCompletionSource<TypedStartOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+    // Taken at the top of the hop's work: the verdict's continuation runs on
+    // the main thread only after the work's synchronous part has returned.
+    long startedAt = 0;
     var typedWork = claim.Wrap(work,
-      started: () => verdict.TrySetResult(TypedStartOutcome.Started),
+      started: () =>
+      {
+        Volatile.Write(ref startedAt, Stopwatch.GetTimestamp());
+        verdict.TrySetResult(TypedStartOutcome.Started);
+      },
       lateRun: Route.TypedInput.RecordLateTypedRun);
     var sentAt = Stopwatch.GetTimestamp();
     PluginCommandWork.Enqueue(typedWork);
@@ -211,7 +237,7 @@ public static partial class CivilExecution
     switch (outcome)
     {
       case TypedStartOutcome.Started:
-        Route.TypedInput.RecordTypedStart(ElapsedMs(sentAt), DateTime.UtcNow);
+        Route.TypedInput.RecordTypedStart(ElapsedMs(sentAt, Volatile.Read(ref startedAt)), DateTime.UtcNow);
         return;
       case TypedStartOutcome.Abandoned:
         // The request was cancelled or timed out first; it reports that itself.
@@ -272,10 +298,7 @@ public static partial class CivilExecution
           return;
         }
 
-        var activeDocument = App.DocumentManager.MdiActiveDocument;
-        var quiet = Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) == 0
-          && activeDocument?.Editor.IsQuiescent != false;
-        if (!watch.QuietExpired(Stopwatch.GetTimestamp(), quiet)) return;
+        if (!watch.QuietExpired(Stopwatch.GetTimestamp(), HostIsIdle())) return;
         var pending = AcadInputPending.Read();
         if (claim.TryDeclareLost())
         {
@@ -326,35 +349,71 @@ public static partial class CivilExecution
   // Typed counterpart of SendCommandLineAsync for an operation whose channel is
   // Typed. Queued from an Idle tick (application context), so AutoCAD runs it
   // after C3DMCPHOP has ended, in order, and never inside a COM-started
-  // command. Then waits, like the COM path, up to 3 s for the input to be
-  // consumed (no input pending, CMDACTIVE 0, quiescent editor, at least two
-  // Idle ticks), so the next request does not start before UNDO has run. A
-  // dialog or prompt keeps it waiting; then the request completes anyway.
+  // command. Then waits up to TypedInputWait for evidence that it ran
+  // (TypedInputWatch): the command each entry names must start
+  // (Document.CommandWillStart), then the host must be idle again, so the next
+  // request does not start before UNDO has run. ESC ESC names no command; the
+  // host returning to idle is its evidence. A dialog or prompt keeps a started
+  // command running; then the request completes anyway, as on the COM path.
+  // Returns a warning for the operation's result when a command did not
+  // start; when no command started at all in quiet idle time, typed input is
+  // also marked dead. Never resent over COM: the typed string may still run.
   // Best effort: a failure is logged and never replaces the operation's result.
-  private static async Task SendTypedInputAsync(Document doc, IReadOnlyList<string> input)
+  private static async Task<string?> SendTypedInputAsync(Document doc, IReadOnlyList<string> input)
   {
     var description = string.Join(", ", input.Select(text => text == "\x03\x03" ? "ESC ESC" : text.Trim()));
+    CommandEventHandler? commandStarted = null;
     try
     {
-      await RunOnIdleAsync(() =>
+      var watch = await RunOnIdleAsync(() =>
       {
+        var sentAt = Stopwatch.GetTimestamp();
+        var created = new TypedInputWatch(input,
+          new QuietStartWatch(TypedStartQuietTimeout, TypedInputWait, sentAt, quietAtStart: HostIsIdle()));
+        // Subscribed before the input is queued, so its command cannot start unseen.
+        commandStarted = (_, e) => created.CommandStarted(e.GlobalCommandName);
+        doc.CommandWillStart += commandStarted;
         foreach (var text in input) SendTyped(doc, text);
-        return true;
+        return created;
       }, TimeSpan.FromSeconds(3));
 
-      var ticks = 0;
-      var consumed = await PollOnIdleAsync(() =>
-        ++ticks >= 2
-        && AcadInputPending.Read() != true
-        && Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) == 0
-        && App.DocumentManager.MdiActiveDocument?.Editor.IsQuiescent != false,
-        TimeSpan.FromSeconds(3));
-      if (!consumed)
-        PluginLog.Info("Host", $"Typed command-line input '{description}' is still running (a dialog or prompt); not waiting for it.");
+      bool? pending = null;
+      await PollOnIdleAsync(() =>
+      {
+        pending = AcadInputPending.Read();
+        return watch.Tick(Stopwatch.GetTimestamp(), HostIsIdle(), pending) != null;
+      }, TypedInputWait);
+
+      var missing = string.Join(", ", watch.Missing);
+      switch (watch.Final())
+      {
+        case TypedInputVerdict.Consumed:
+          return null;
+        case TypedInputVerdict.Running:
+          PluginLog.Info("Host", $"Typed command-line input '{description}' is still running (a dialog or prompt); not waiting for it.");
+          return null;
+        case TypedInputVerdict.Lost:
+          var markedDead = Route.TypedInput.RecordLostInput(pending, DateTime.UtcNow);
+          PluginLog.Warn("Host",
+            $"Typed command-line input '{description}' was not consumed: {missing} did not start in {TypedStartQuietTimeout.TotalMilliseconds:0} ms of quiet idle time and no other command started (input pending: {Describe(pending)}); " +
+            (markedDead ? "typed input is marked dead" : "typed input was already dead") +
+            " (issue #53). It may still run later; it is not resent over COM.");
+          return $"Typed input was not consumed: {missing} did not start, so this request may have had no effect yet, and the input may still run later. Typed input is marked dead in this Civil 3D session (issue #53). Check the drawing before the next change.";
+        default:
+          var others = watch.Others;
+          var instead = others.Count > 0 ? $"; {string.Join(", ", others)} started instead" : "; Civil 3D was busy";
+          PluginLog.Warn("Host", $"Typed command-line input '{description}' has not started {missing} within {TypedInputWait.TotalSeconds:0} s{instead}; it may still run later (issue #53).");
+          return $"Typed input has not run yet: {missing} did not start within {TypedInputWait.TotalSeconds:0} s{instead}. It may still run later. Check the drawing before the next change.";
+      }
     }
     catch (Exception ex)
     {
       PluginLog.Warn("Host", $"Typed command-line input '{description}' could not be sent.", ex);
+      return $"Typed input could not be sent ({ex.Message}), so this request may have had no effect. Check the drawing before the next change.";
+    }
+    finally
+    {
+      if (commandStarted != null) doc.CommandWillStart -= commandStarted;
     }
   }
 
@@ -479,8 +538,13 @@ public static partial class CivilExecution
     return host.MainWindowHandle;
   }
 
-  private static double ElapsedMs(long since) =>
-    Math.Round((Stopwatch.GetTimestamp() - since) * 1000.0 / Stopwatch.Frequency, 1);
+  private static double ElapsedMs(long since, long until) =>
+    Math.Round((until - since) * 1000.0 / Stopwatch.Frequency, 1);
+
+  // CMDACTIVE 0 and a quiescent editor (main thread).
+  private static bool HostIsIdle() =>
+    Convert.ToInt32(CoreApp.GetSystemVariable("CMDACTIVE")) == 0
+    && App.DocumentManager.MdiActiveDocument?.Editor.IsQuiescent != false;
 
   private static string Describe(bool? value) => value switch { true => "yes", false => "no", null => "unknown" };
 }

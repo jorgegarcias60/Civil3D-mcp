@@ -80,10 +80,12 @@ public sealed class PluginEntry : IExtensionApplication
   }
 
   // Issue #53 typed-input probe: probeTypedInput (civil3d_health
-  // probeTypedInput) types it with SendStringToExecute and waits for it.
-  // Harmless: it only records that it ran and when; typed by hand it changes
-  // nothing.
-  [CommandMethod(CivilExecution.ProbeCommandName, CommandFlags.Modal | CommandFlags.NoHistory | CommandFlags.NoMultiple)]
+  // probeTypedInput) types it with SendStringToExecute and waits for it. It
+  // touches no database and only records that it ran and when. NoUndoMarker:
+  // a command that changes nothing still leaves an empty undo step otherwise
+  // (seen live for C3DMCPHOP previews), which would shift UNDO counts and
+  // clear redo; that the flag avoids it is not yet verified live.
+  [CommandMethod(CivilExecution.ProbeCommandName, CommandFlags.Modal | CommandFlags.NoHistory | CommandFlags.NoMultiple | CommandFlags.NoUndoMarker)]
   public static void ProbeCommand()
   {
     try

@@ -119,10 +119,11 @@ internal sealed class HostRouteState
   };
 }
 
-// unknown | alive | dead, updated by the probe (C3DMCPPROBE) and by typed
-// C3DMCPHOP starts. Dead is sticky for "auto": once dead, operations start
-// over COM and only a probe that runs (or a typed start on the "typed" route)
-// makes it alive again. Thread-safe.
+// unknown | alive | dead, updated by the probe (C3DMCPPROBE), by typed
+// C3DMCPHOP starts and by typed command-line input that was lost. Dead is
+// sticky for "auto": once dead, operations start over COM and only a probe
+// that runs (or a typed start on the "typed" route) makes it alive again.
+// Thread-safe.
 internal sealed class TypedInputTracker
 {
   private readonly object sync = new();
@@ -134,6 +135,7 @@ internal sealed class TypedInputTracker
   private double? lastStartLatencyMs;
   private bool? inputPendingAtLastLoss;
   private int lostStarts;
+  private int lostInputs;
   private int lateRuns;
 
   internal TypedInputState State { get { lock (sync) return state; } }
@@ -183,6 +185,21 @@ internal sealed class TypedInputTracker
     }
   }
 
+  // Typed command-line input (UNDO, MREDO, a data shortcut or Storm and
+  // Sanitary command) did not start its command in quiet idle time and no
+  // other command started. True when typed input was not dead before.
+  internal bool RecordLostInput(bool? inputPending, DateTime utc)
+  {
+    lock (sync)
+    {
+      var wasDead = state == TypedInputState.Dead;
+      lostInputs++;
+      inputPendingAtLastLoss = inputPending;
+      Set(TypedInputState.Dead, "typed-input-lost", utc);
+      return !wasDead;
+    }
+  }
+
   // A typed C3DMCPHOP ran after its start was declared lost (or its request
   // ended). Counted only: it ran nothing, and dead stays dead for "auto".
   internal void RecordLateTypedRun()
@@ -203,6 +220,7 @@ internal sealed class TypedInputTracker
         ["lastLatencyMs"] = lastLatencyMs,
         ["lastStartLatencyMs"] = lastStartLatencyMs,
         ["lostStarts"] = lostStarts,
+        ["lostInputs"] = lostInputs,
         ["lateRuns"] = lateRuns,
         ["inputPendingAtLastLoss"] = inputPendingAtLastLoss,
       };
@@ -249,43 +267,175 @@ internal sealed class TypedStartClaim
   };
 }
 
-// The start timeout of a typed C3DMCPHOP, in quiet idle time: Idle ticks with
-// CMDACTIVE 0 and a quiescent editor. A busy tick restarts the quiet window (a
-// command or prompt holds typed input back without losing it). The overall
-// limit (the request's busy timeout) also ends the wait when the host stays
-// busy or raises no Idle at all. Stopwatch timestamps.
+// The start timeout of a typed C3DMCPHOP (and the loss check of typed
+// command-line input), in quiet idle time: Idle ticks with CMDACTIVE 0 and a
+// quiescent editor. A busy tick restarts the quiet window (a command or prompt
+// holds typed input back without losing it), and so does a gap of more than
+// MaxGap between ticks: the waiters post WM_NULL every 250 ms, so a longer gap
+// means the main thread was busy without a command (a regen, an autosave,
+// another Idle handler, Civil 3D rebuilding after the previous write) and had
+// no chance to read the input. The overall limit (the request's busy timeout)
+// also ends the wait when the host stays busy or raises no Idle at all.
+// Stopwatch timestamps.
 internal sealed class QuietStartWatch
 {
+  // Three WM_NULL nudges.
+  internal static readonly TimeSpan MaxGap = TimeSpan.FromMilliseconds(750);
+
   private readonly long quietTicks;
   private readonly long overallTicks;
+  private readonly long maxGapTicks;
   private readonly long startedAt;
+  private long lastTick;
   private long? quietSince;
 
-  internal QuietStartWatch(TimeSpan quiet, TimeSpan overall, long startedAt, long? frequency = null)
+  // quietAtStart: the input was sent from a quiet tick (a typed C3DMCPHOP
+  // start always is), so quiet time counts from the send.
+  internal QuietStartWatch(TimeSpan quiet, TimeSpan overall, long startedAt, long? frequency = null,
+    bool quietAtStart = true)
   {
     var ticksPerSecond = frequency ?? Stopwatch.Frequency;
     quietTicks = (long)(quiet.TotalSeconds * ticksPerSecond);
     overallTicks = (long)(overall.TotalSeconds * ticksPerSecond);
+    maxGapTicks = (long)(MaxGap.TotalSeconds * ticksPerSecond);
     this.startedAt = startedAt;
-    // The start was sent only when the host was quiet.
-    quietSince = startedAt;
+    lastTick = startedAt;
+    quietSince = quietAtStart ? startedAt : null;
   }
 
   // Main thread, every Idle tick while waiting.
   internal bool QuietExpired(long now, bool quiet)
   {
+    var gap = now - lastTick;
+    lastTick = now;
     if (!quiet)
     {
       quietSince = null;
       return false;
     }
 
-    quietSince ??= now;
+    if (quietSince == null || gap > maxGapTicks) quietSince = now;
     return now - quietSince.Value >= quietTicks;
   }
 
   // Any thread.
   internal bool OverallExpired(long now) => now - startedAt >= overallTicks;
+}
+
+// What became of typed command-line input.
+internal enum TypedInputVerdict
+{
+  // Every command it names started, and the host is idle again.
+  Consumed,
+  // Every command it names started; one is still running (a dialog or prompt).
+  Running,
+  // A command it names has not started, while the host was busy or another
+  // command started: it may still run later.
+  NotStarted,
+  // A command it names did not start in quiet idle time and no command started
+  // at all: typed input looks dead. The input may still run later.
+  Lost,
+}
+
+// Positive evidence that typed command-line input ran (issue #53). Each entry
+// names the command it starts by its first token ("_.UNDO 2 " starts UNDO), and
+// counts only when Document.CommandWillStart reports that command. Input that
+// names no command (ESC ESC) is checked by CMDACTIVE returning to 0 instead.
+// "Input no longer pending" proves nothing: acedIsInputPending is also false
+// when the strings were discarded. Thread-safe.
+internal sealed class TypedInputWatch
+{
+  private readonly object sync = new();
+  private readonly string?[] expected;
+  private readonly bool[] started;
+  private readonly List<string> others = new();
+  private readonly QuietStartWatch quiet;
+  private int ticks;
+  private TypedInputVerdict? verdict;
+
+  internal TypedInputWatch(IReadOnlyList<string> input, QuietStartWatch quiet)
+  {
+    expected = input.Select(CommandName).ToArray();
+    started = new bool[expected.Length];
+    this.quiet = quiet;
+  }
+
+  // The global name of the command an entry starts: its first token without
+  // the "_" (global name) and "." (built-in) prefixes, upper case. Null for
+  // input that names no command (control characters, empty, LISP).
+  internal static string? CommandName(string input)
+  {
+    var token = input.TrimStart().Split(new[] { ' ', '\t', '\r', '\n' }, 2)[0].TrimStart('_', '.');
+    return token.Length > 0 && token.All(c => char.IsLetterOrDigit(c) || c is '_' or '-' or '$')
+      ? token.ToUpperInvariant()
+      : null;
+  }
+
+  // Document.CommandWillStart (main thread): marks the first entry still
+  // waiting for that command, in order.
+  internal void CommandStarted(string? globalName)
+  {
+    var name = globalName?.Trim().ToUpperInvariant() ?? string.Empty;
+    lock (sync)
+    {
+      for (var i = 0; i < expected.Length; i++)
+      {
+        if (started[i] || expected[i] == null || expected[i] != name) continue;
+        started[i] = true;
+        return;
+      }
+
+      others.Add(name);
+    }
+  }
+
+  internal IReadOnlyList<string> Missing
+  {
+    get
+    {
+      lock (sync)
+        return expected.Where((name, i) => name != null && !started[i]).Select(name => name!).ToList();
+    }
+  }
+
+  internal IReadOnlyList<string> Others { get { lock (sync) return others.ToList(); } }
+
+  // Idle tick (main thread), with CMDACTIVE 0 and a quiescent editor as quiet.
+  // Returns the verdict once the wait can end, null to keep waiting.
+  internal TypedInputVerdict? Tick(long now, bool idle, bool? inputPending)
+  {
+    lock (sync)
+    {
+      if (verdict != null) return verdict;
+      ticks++;
+      // Every tick, so a busy tick or a gap restarts the quiet window.
+      var quietExpired = quiet.QuietExpired(now, idle);
+      var allStarted = AllStarted();
+      if (allStarted && ticks >= 2 && idle && inputPending != true) verdict = TypedInputVerdict.Consumed;
+      else if (!allStarted && quietExpired && others.Count == 0) verdict = TypedInputVerdict.Lost;
+      return verdict;
+    }
+  }
+
+  // The wait timed out (any thread).
+  internal TypedInputVerdict Final()
+  {
+    lock (sync)
+    {
+      verdict ??= AllStarted() ? TypedInputVerdict.Running : TypedInputVerdict.NotStarted;
+      return verdict.Value;
+    }
+  }
+
+  private bool AllStarted()
+  {
+    for (var i = 0; i < expected.Length; i++)
+    {
+      if (expected[i] != null && !started[i]) return false;
+    }
+
+    return true;
+  }
 }
 
 // One typed-input probe at a time (probes run under the host gate). Matches a

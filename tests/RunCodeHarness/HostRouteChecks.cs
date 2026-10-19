@@ -1,7 +1,8 @@
 // Offline checks of HostInputRoute.cs (issue #53): the hop start route
 // decisions, the typed-input state machine, the typed start claim against the
-// dispatch gate, the quiet-idle start timeout, the probe ledger and the native
-// guards. Called from RuntimeChecks.Run.
+// dispatch gate, the quiet-idle start timeout, the evidence that typed
+// command-line input ran, the probe ledger and the native guards. Called from
+// RuntimeChecks.Run.
 using System.Collections.Concurrent;
 using Civil3DMcpPlugin;
 
@@ -12,6 +13,7 @@ internal static class HostRouteChecks
     CheckDecisions(expect);
     CheckTracker(expect);
     CheckQuietWatch(expect);
+    CheckTypedInputWatch(expect);
     CheckProbeLedger(expect);
     CheckClaimRace(expect);
     CheckLateHops(expect);
@@ -108,22 +110,153 @@ internal static class HostRouteChecks
     expect(tracker.State == TypedInputState.Alive && (double?)report["lastStartLatencyMs"] == 21
         && (string?)report["reason"] == "typed-start" && (string?)report["lastChangeUtc"] == t.AddSeconds(6).ToString("o"),
       "a typed start that ran (typed route) makes typed input alive");
+
+    expect((int)tracker.Report()["lostInputs"]! == 0 && tracker.RecordLostInput(true, t.AddSeconds(7)),
+      "the first lost typed command-line input reports a change");
+    report = tracker.Report();
+    expect(tracker.State == TypedInputState.Dead && (string?)report["reason"] == "typed-input-lost"
+        && (int)report["lostInputs"]! == 1 && (bool?)report["inputPendingAtLastLoss"] == true
+        && (int)report["lostStarts"]! == 3,
+      "lost typed command-line input makes typed input dead, counted apart from lost starts");
+    expect(!tracker.RecordLostInput(false, t.AddSeconds(8)) && (int)tracker.Report()["lostInputs"]! == 2
+        && HostRouteDecision.IdleCommandLine(HopStartRoute.Auto, tracker.State) == InputChannel.Com
+        && HostRouteDecision.IdleCommandLine(HopStartRoute.Typed, tracker.State) == InputChannel.Com,
+      "after lost typed input, later Idle-route input goes over COM on typed and auto");
+  }
+
+  // Ticks every 250 ms (the WM_NULL nudge) from `from` to `to` inclusive: the
+  // first tick that reports the quiet window expired, or -1.
+  private static long QuietTicks(QuietStartWatch watch, long from, long to, bool quiet = true)
+  {
+    for (var now = from; now <= to; now += 250)
+    {
+      if (watch.QuietExpired(now, quiet)) return now;
+    }
+
+    return -1;
   }
 
   private static void CheckQuietWatch(Action<bool, string> expect)
   {
     const long ms = 1000;
     var quiet = new QuietStartWatch(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(15), 0, ms);
-    expect(!quiet.QuietExpired(1999, true) && quiet.QuietExpired(2000, true),
+    expect(QuietTicks(quiet, 250, 2000) == 2000,
       "quiet idle time counts from the send, which happened in a quiet tick");
 
     var busy = new QuietStartWatch(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(15), 0, ms);
-    expect(!busy.QuietExpired(1500, false) && !busy.QuietExpired(1600, true) && !busy.QuietExpired(3599, true)
-        && busy.QuietExpired(3600, true),
+    expect(QuietTicks(busy, 250, 1500) == -1 && !busy.QuietExpired(1750, false) && QuietTicks(busy, 2000, 4500) == 4000,
       "a busy tick restarts the quiet window (a command or prompt holds typed input back)");
     expect(!busy.QuietExpired(20000, false), "a busy tick never declares a start lost");
     expect(!busy.OverallExpired(14999) && busy.OverallExpired(15000),
       "the overall limit ends the wait independently of quiet time");
+
+    // No Idle tick for 3 s after the send: the host was busy without a command
+    // (a regen, an autosave, another Idle handler) and could not read the input.
+    var gap = new QuietStartWatch(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(15), 0, ms);
+    expect(!gap.QuietExpired(3000, true), "the first quiet tick after a 3 s gap with no Idle tick does not expire");
+    expect(QuietTicks(gap, 3250, 5000) == 5000, "after a gap, expiry needs 2 s of ticks spaced 250 ms apart");
+
+    var midGap = new QuietStartWatch(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(15), 0, ms);
+    expect(QuietTicks(midGap, 250, 1500) == -1 && !midGap.QuietExpired(2400, true) && QuietTicks(midGap, 2650, 4650) == 4400,
+      "a gap of more than 750 ms between ticks restarts the quiet window");
+    var shortGap = new QuietStartWatch(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(15), 0, ms);
+    expect(QuietTicks(shortGap, 250, 1000) == -1 && !shortGap.QuietExpired(1750, true) && shortGap.QuietExpired(2000, true),
+      "a gap of up to 750 ms keeps the quiet window");
+
+    var notQuietAtStart = new QuietStartWatch(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(15), 0, ms,
+      quietAtStart: false);
+    expect(QuietTicks(notQuietAtStart, 250, 2500) == 2250,
+      "input sent from a busy tick counts quiet time from the first quiet tick");
+  }
+
+  private static void CheckTypedInputWatch(Action<bool, string> expect)
+  {
+    const long ms = 1000;
+    QuietStartWatch Quiet(bool quietAtStart = true) =>
+      new(TimeSpan.FromMilliseconds(2000), TimeSpan.FromSeconds(3), 0, ms, quietAtStart);
+    TypedInputVerdict? TickUntil(TypedInputWatch watch, long from, long to, bool idle, bool? pending)
+    {
+      for (var now = from; now <= to; now += 250)
+      {
+        if (watch.Tick(now, idle, pending) is { } verdict) return verdict;
+      }
+
+      return null;
+    }
+
+    expect(TypedInputWatch.CommandName("_.UNDO 2 ") == "UNDO" && TypedInputWatch.CommandName("_.MREDO 1 ") == "MREDO"
+        && TypedInputWatch.CommandName("CreateDataShortcuts ") == "CREATEDATASHORTCUTS"
+        && TypedInputWatch.CommandName("_AeccSynchronizeReferences ") == "AECCSYNCHRONIZEREFERENCES"
+        && TypedInputWatch.CommandName("ExportSSA ") == "EXPORTSSA"
+        && TypedInputWatch.CommandName("._LINE ") == "LINE" && TypedInputWatch.CommandName("-PLOT ") == "-PLOT",
+      "typed input names its command by its first token without the _ and . prefixes");
+    expect(TypedInputWatch.CommandName("\x03\x03") == null && TypedInputWatch.CommandName("(princ) ") == null
+        && TypedInputWatch.CommandName("   ") == null,
+      "ESC ESC, LISP and empty input name no command");
+
+    // UNDO started and the host is idle again: consumed.
+    var undo = new TypedInputWatch(new[] { "_.UNDO 2 " }, Quiet());
+    expect(undo.Tick(50, false, false) == null, "a busy tick while UNDO has not started keeps waiting");
+    undo.CommandStarted("UNDO");
+    expect(undo.Tick(100, true, false) == TypedInputVerdict.Consumed && undo.Missing.Count == 0
+        && undo.Final() == TypedInputVerdict.Consumed,
+      "typed input is consumed only once its command started and the host is idle");
+
+    // The check before this fix: two quiet ticks with nothing pending passed
+    // as consumed. Without a CommandWillStart that is no evidence.
+    var discarded = new TypedInputWatch(new[] { "_.UNDO 2 " }, Quiet());
+    expect(discarded.Tick(250, true, false) == null && discarded.Tick(500, true, false) == null,
+      "quiet ticks with nothing pending are not evidence that UNDO ran (discarded input looks the same)");
+    expect(TickUntil(discarded, 750, 3000, true, false) == TypedInputVerdict.Lost && discarded.Final() == TypedInputVerdict.Lost
+        && discarded.Missing.SequenceEqual(new[] { "UNDO" }),
+      "UNDO that did not start in 2 s of quiet idle time, with no command started, is lost");
+
+    // The wedge signature: input piling up while CMDACTIVE is 0 and the editor
+    // is quiescent. Lost too, never "still running".
+    var wedged = new TypedInputWatch(new[] { "_.UNDO 1 " }, Quiet());
+    expect(TickUntil(wedged, 250, 3000, true, true) == TypedInputVerdict.Lost,
+      "input pending while the host is quiet (the wedge) is lost");
+
+    // Busy all the time (a dialog of another command): not started, may run later.
+    var busy = new TypedInputWatch(new[] { "_.MREDO 1 " }, Quiet(quietAtStart: false));
+    expect(TickUntil(busy, 250, 3000, false, true) == null && busy.Final() == TypedInputVerdict.NotStarted,
+      "input that did not start while the host was busy is not started, not lost");
+
+    // A gap with no Idle tick is busy time, not quiet time.
+    var gap = new TypedInputWatch(new[] { "_.UNDO 1 " }, Quiet());
+    expect(TickUntil(gap, 2500, 3000, true, false) == null && gap.Final() == TypedInputVerdict.NotStarted,
+      "no Idle tick for 2.5 s after the send is not quiet time: not lost");
+
+    // Another command started: typed input was read, so not lost.
+    var other = new TypedInputWatch(new[] { "_.UNDO 1 " }, Quiet());
+    other.CommandStarted("C3DMCPHOP");
+    expect(TickUntil(other, 250, 3000, true, false) == null && other.Final() == TypedInputVerdict.NotStarted
+        && other.Others.SequenceEqual(new[] { "C3DMCPHOP" }),
+      "another command starting instead is reported, not counted as UNDO and not lost");
+
+    // Started, then a dialog keeps it running past the wait.
+    var dialog = new TypedInputWatch(new[] { "CreateDataShortcuts " }, Quiet());
+    dialog.CommandStarted("createdatashortcuts");
+    expect(TickUntil(dialog, 250, 3000, false, false) == null && dialog.Final() == TypedInputVerdict.Running,
+      "a started command still in a dialog is running");
+
+    // Several entries: each must start, in order.
+    var two = new TypedInputWatch(new[] { "_.UNDO 1 ", "_.MREDO 1 " }, Quiet());
+    two.CommandStarted("UNDO");
+    expect(two.Tick(250, true, false) == null && two.Missing.SequenceEqual(new[] { "MREDO" }),
+      "with two entries, one started command is not enough");
+    two.CommandStarted("MREDO");
+    expect(two.Tick(500, true, false) == TypedInputVerdict.Consumed, "both commands started: consumed");
+
+    // ESC ESC names no command: the host returning to idle is its evidence.
+    var cancel = new TypedInputWatch(new[] { "\x03\x03" }, Quiet(quietAtStart: false));
+    expect(cancel.Tick(250, false, false) == null && cancel.Tick(500, true, false) == TypedInputVerdict.Consumed,
+      "ESC ESC is consumed once CMDACTIVE is 0 again, after at least two ticks");
+    var stuck = new TypedInputWatch(new[] { "\x03\x03" }, Quiet(quietAtStart: false));
+    expect(TickUntil(stuck, 250, 3000, false, false) == null && stuck.Final() == TypedInputVerdict.Running,
+      "ESC ESC that leaves a command active is running, never lost");
+
+    expect(undo.Tick(5000, false, true) == TypedInputVerdict.Consumed, "a verdict, once reached, does not change");
   }
 
   private static void CheckProbeLedger(Action<bool, string> expect)
