@@ -407,6 +407,48 @@ public static class CivilExecution
     return ExecuteAsync(action, true);
   }
 
+  // A write, then `after` for the same document from a later Idle tick, once
+  // no command is active and the editor is quiescent: the write's C3DMCPHOP
+  // command, its commit and its CommandEnded handlers have all finished. One
+  // hold of the host gate covers both, so no other request runs in between.
+  // `after` gets no drawing-identity check, since a Save As renames the
+  // drawing; the document only has to be still open. A failure of `after`
+  // is returned with the write's result, never thrown over it.
+  public static Task<(T Result, TAfter? After, Exception? AfterError)> WriteThenAfterCommandAsync<T, TAfter>(
+    Func<Document, CivilDocument, Database, Transaction, T> action, Func<Document, TAfter> after)
+  {
+    return ExecuteSerializedAsync<(T, TAfter?, Exception?)>(async cancellationToken =>
+    {
+      Document? written = null;
+      var result = await ExecuteOnHostAsync((doc, civil, db, tr) =>
+      {
+        written = doc;
+        return action(doc, civil, db, tr);
+      }, write: true, inCommand: false, commandLine: false, cancellationToken);
+
+      TAfter? value = default;
+      Exception? failure = null;
+      try
+      {
+        var hostTask = RunOnHostAsync(_ =>
+        {
+          try
+          {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (written == null || !App.DocumentManager.Cast<Document>().Contains(written))
+              throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "The drawing is no longer open.");
+            value = after(written);
+          }
+          catch (Exception error) { failure = error; }
+          return Task.CompletedTask;
+        }, needsCommand: false, needsQuietEditor: true, cancellationToken);
+        await AwaitHostContextAsync(hostTask, cancellationToken);
+      }
+      catch (Exception error) { failure = error; }
+      return (result, failure == null ? value : default, failure);
+    });
+  }
+
   // A read that needs a command around it: it creates scratch objects that
   // must disappear when the transaction is aborted (TinVolumeSurface.Create
   // for volumes), or it uses the pickfirst selection (Editor.SelectImplied

@@ -136,15 +136,16 @@ internal static class InstanceCommands
   // activation events that other add-ins handle, and a handler may modify
   // the drawing it activates (issue #54). The active drawing reads the system
   // variable; any other reads it through its own ActiveX document, as the
-  // live run-code smoke does for an inactive drawing. Main thread only.
+  // live run-code smoke does for an inactive drawing. DBMOD is a 16-bit
+  // short and is read unsigned. Main thread only.
   // If the COM read fails, switch to the drawing as before.
   internal static int ReadDbmod(Document document)
   {
     if (ReferenceEquals(App.DocumentManager.MdiActiveDocument, document))
-      return Convert.ToInt32(App.GetSystemVariable("DBMOD"));
+      return DbmodFlags.FromSystemVariable(App.GetSystemVariable("DBMOD"));
     try
     {
-      return Convert.ToInt32(Civil3DCompatibility.InvokeComMethod(document.GetAcadDocument(), "GetVariable", "DBMOD"));
+      return DbmodFlags.FromSystemVariable(Civil3DCompatibility.InvokeComMethod(document.GetAcadDocument(), "GetVariable", "DBMOD"));
     }
     catch (Exception error)
     {
@@ -160,8 +161,8 @@ internal static class InstanceCommands
     {
       App.DocumentManager.MdiActiveDocument = document;
       if (!ReferenceEquals(App.DocumentManager.MdiActiveDocument, document))
-        throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", "Could not inspect every open drawing before quitting.");
-      return Convert.ToInt32(App.GetSystemVariable("DBMOD"));
+        throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", $"Could not switch to '{document.Name}' to read its DBMOD.");
+      return DbmodFlags.FromSystemVariable(App.GetSystemVariable("DBMOD"));
     }
     finally { App.DocumentManager.MdiActiveDocument = previous; }
   }

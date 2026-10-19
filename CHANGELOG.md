@@ -2,12 +2,15 @@
 
 ## Unreleased
 
-- `civil3d_drawing save` returns `dbmodAfterSave` (DBMOD value and flag names, read right
-  after the save) and warns when it is not 0. The `civil3d_instance stop` refusal lists
-  each unsaved drawing with its DBMOD flags and says when only view, window or field flags
-  are set. The check reads each drawing without making it active (switching could let
-  other add-ins modify it) and is skipped with `discardChanges: true`. Workflows that save
-  pass the warning on. Refs #54.
+- `civil3d_drawing save` returns DBMOD (value and flag names) twice: `dbmodAfterSave`,
+  read inside the save command right after `Database.SaveAs`, and `dbmodAfterCommand`,
+  read once that command has ended. It warns when the later value is not 0 or the two
+  differ. The `civil3d_instance stop` refusal lists each unsaved drawing with its DBMOD
+  flags and says when only view, window or field flags are set. The check reads each
+  drawing without making it active (switching could let other add-ins modify it); if the
+  COM read fails, it switches to the drawing as before and plugin.log records a warning.
+  It is skipped with `discardChanges: true`. Workflows that save pass the warnings on.
+  Refs #54.
 
 - When the plugin starts, it removes the discovery files that crashed or killed instances
   left in `%LOCALAPPDATA%\Civil3DMcpPlugin\instances`: the pid has exited, or it now

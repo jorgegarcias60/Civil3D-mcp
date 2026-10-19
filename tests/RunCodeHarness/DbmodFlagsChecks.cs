@@ -15,7 +15,12 @@ internal static class DbmodFlagsChecks
     expect(DbmodFlags.Describe(63).SequenceEqual(["objects", "bit 2", "variables", "window", "view", "fields"]),
       "63 lists every bit in order");
     expect(DbmodFlags.Describe(64 | 8).SequenceEqual(["window", "bit 64"]), "unknown higher bits keep bit order");
-    expect(DbmodFlags.Describe(int.MinValue).SequenceEqual(["bit 2147483648"]), "the sign bit is reported as an unsigned value");
+    // AutoCAD returns DBMOD as a 16-bit short: its top bit must not sign-extend.
+    expect(DbmodFlags.FromSystemVariable((short)-32768) == 32768
+      && DbmodFlags.Describe(DbmodFlags.FromSystemVariable((short)-32768)).SequenceEqual(["bit 32768"]),
+      "DBMOD's top bit (a negative short) reads as 32768, one 'bit 32768'");
+    expect(DbmodFlags.FromSystemVariable((short)48) == 48 && DbmodFlags.FromSystemVariable((short)(-32768 | 1)) == 32769
+      && DbmodFlags.FromSystemVariable(null) == 0, "DBMOD shorts read unsigned, null reads 0");
 
     expect(!DbmodFlags.HasContentChanges(0) && !DbmodFlags.HasContentChanges(8 | 16 | 32) && !DbmodFlags.HasContentChanges(2),
       "view, window, fields and bit 2 are not content changes");
@@ -43,5 +48,25 @@ internal static class DbmodFlagsChecks
       "an undocumented bit without content bits is not called a view, window or field flag");
     expect(System.Text.RegularExpressions.Regex.IsMatch(display, "unsaved", System.Text.RegularExpressions.RegexOptions.IgnoreCase),
       "the refusal still matches /unsaved/i");
+
+    // civil3d_drawing save: read right after SaveAs, and once the save command has ended.
+    const string stillModified = "The file was written, but Civil 3D still counts the drawing as modified (DBMOD {0}): civil3d_instance stop refuses it without discardChanges.";
+    expect(DbmodFlags.SaveWarnings(0, null, 0, null).Count == 0, "a save that leaves DBMOD 0 at both reads has no warning");
+    expect(DbmodFlags.SaveWarnings(1, null, 1, null).SequenceEqual([string.Format(stillModified, "1 (objects)")]),
+      "DBMOD not 0 at both reads: one warning that stop refuses");
+    expect(DbmodFlags.SaveWarnings(0, null, 16, null).SequenceEqual([
+        string.Format(stillModified, "16 (view)"),
+        "DBMOD changed after the save: 0 right after Database.SaveAs, 16 (view) once the save command had ended."]),
+      "DBMOD 0 after SaveAs but set once the command ended: the later value counts, and the change is reported");
+    expect(DbmodFlags.SaveWarnings(1, null, 0, null).SequenceEqual([
+        "DBMOD changed after the save: 1 (objects) right after Database.SaveAs, 0 once the save command had ended."]),
+      "DBMOD cleared by the end of the command: no stop warning, only the change");
+    expect(DbmodFlags.SaveWarnings(4, null, null, "host busy").SequenceEqual([
+        "The file was written, but its DBMOD could not be read after the save command ended: host busy",
+        string.Format(stillModified, "4 (variables)")]),
+      "the later read failed: its error, and the value right after SaveAs decides the stop warning");
+    expect(DbmodFlags.SaveWarnings(null, "no document", 0, null).SequenceEqual([
+        "The file was written, but its DBMOD could not be read right after the save: no document"]),
+      "the first read failed: its error only, when the later read is 0");
   }
 }

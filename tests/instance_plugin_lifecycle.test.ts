@@ -5,6 +5,7 @@ const runtime = readFileSync(new URL("../Civil3D-MCP-Plugin/PluginRuntime.cs", i
 const quit = readFileSync(new URL("../Civil3D-MCP-Plugin/InstanceCommands.cs", import.meta.url), "utf8");
 const drawing = readFileSync(new URL("../Civil3D-MCP-Plugin/DrawingCommands.cs", import.meta.url), "utf8");
 const workflow = readFileSync(new URL("../Civil3D-MCP-Plugin/WorkflowCommands.cs", import.meta.url), "utf8");
+const execution = readFileSync(new URL("../Civil3D-MCP-Plugin/CivilExecution.cs", import.meta.url), "utf8");
 const flagsPath = new URL("../Civil3D-MCP-Plugin/DbmodFlags.cs", import.meta.url);
 const flags = existsSync(flagsPath) ? readFileSync(flagsPath, "utf8") : "";
 
@@ -81,15 +82,21 @@ it("reads each drawing's DBMOD without switching the active drawing (#54)", () =
   expect(fallback).toBeGreaterThan(0);
   const normal = read.slice(0, fallback);
   expect(normal).toContain("if (ReferenceEquals(App.DocumentManager.MdiActiveDocument, document))");
-  expect(normal).toContain('return Convert.ToInt32(App.GetSystemVariable("DBMOD"));');
-  expect(normal).toContain('Civil3DCompatibility.InvokeComMethod(document.GetAcadDocument(), "GetVariable", "DBMOD")');
+  // DBMOD is a 16-bit short: every read path masks it unsigned.
+  expect(normal).toContain('return DbmodFlags.FromSystemVariable(App.GetSystemVariable("DBMOD"));');
+  expect(normal).toContain('return DbmodFlags.FromSystemVariable(Civil3DCompatibility.InvokeComMethod(document.GetAcadDocument(), "GetVariable", "DBMOD"));');
+  expect(read).not.toContain("Convert.ToInt32(");
   expect(normal).not.toMatch(/MdiActiveDocument\s*=[^=]/);
   expect(read.slice(fallback)).toMatch(/PluginLog\.Warn\([\s\S]*?return ReadDbmodBySwitching\(document\);/);
   // Both checks go through ReadDbmod; nothing else switches drawings to read DBMOD.
   expect(quit).not.toContain("IsModified");
   expect(member(quit, "private static List<(string Name, int Value)> ModifiedDrawings()")).toContain("var dbmod = ReadDbmod(document);");
   expect(quit.match(/MdiActiveDocument = document;/g)).toHaveLength(1);
-  expect(member(quit, "private static int ReadDbmodBySwitching(Document document)")).toContain("App.DocumentManager.MdiActiveDocument = document;");
+  const switching = member(quit, "private static int ReadDbmodBySwitching(Document document)");
+  expect(switching).toContain("App.DocumentManager.MdiActiveDocument = document;");
+  expect(switching).toContain('return DbmodFlags.FromSystemVariable(App.GetSystemVariable("DBMOD"));');
+  expect(switching).not.toContain("Convert.ToInt32(");
+  expect(flags).toContain("internal static int FromSystemVariable(object? value) => Convert.ToInt32(value) & 0xFFFF;");
 });
 
 it("skips the unsaved check when discarding and lists each drawing's DBMOD (#54)", () => {
@@ -111,15 +118,34 @@ it("skips the unsaved check when discarding and lists each drawing's DBMOD (#54)
   expect(flags).toContain('" Only view, window or field flags are set: no object or drawing-variable changes."');
 });
 
-it("reports DBMOD in the save step, right after SaveAs (#54)", () => {
-  const save = member(drawing, "public static Task<object?> SaveDrawingAsync(JsonObject? parameters)");
+it("reports DBMOD right after SaveAs and once the save command has ended (#54)", () => {
+  const save = member(drawing, "public static async Task<object?> SaveDrawingAsync(JsonObject? parameters)");
+  const write = save.indexOf("await CivilExecution.WriteThenAfterCommandAsync((doc, civilDoc, database, transaction) =>");
   const saveAs = save.indexOf("database.SaveAs(targetPath, true, DwgVersion.Current, database.SecurityParameters);");
-  const read = save.indexOf("var dbmod = InstanceCommands.ReadDbmod(doc);");
-  expect(saveAs).toBeGreaterThan(0);
-  expect(read).toBeGreaterThan(saveAs);
-  expect(save.indexOf('result["dbmodAfterSave"] = DbmodFlags.ToJson(dbmod);')).toBeGreaterThan(read);
-  expect(save).toMatch(/if \(dbmod != 0\)\s*result\["warnings"\] = new List<string> \{ \$"The file was written, but Civil 3D still counts the drawing as modified \(DBMOD \{DbmodFlags\.Format\(dbmod\)\}\): civil3d_instance stop refuses it without discardChanges\." \};/);
-  expect(save).toMatch(/catch \(Exception error\)\s*\{\s*result\["dbmodAfterSave"\] = null;\s*result\["warnings"\] = new List<string> \{ \$"The file was written, but its DBMOD could not be read afterwards: \{error\.Message\}" \};\s*\}\s*return result;\s*\}\);$/);
+  const inCommand = save.indexOf("try { afterSave = InstanceCommands.ReadDbmod(doc); }");
+  const afterCommand = save.indexOf("}, InstanceCommands.ReadDbmod);");
+  expect(write).toBeGreaterThan(0);
+  expect(save).not.toContain("CivilExecution.WriteAsync");
+  expect(saveAs).toBeGreaterThan(write);
+  expect(inCommand).toBeGreaterThan(saveAs);
+  expect(save).toContain("catch (Exception error) { afterSaveError = error.Message; }");
+  expect(afterCommand).toBeGreaterThan(inCommand);
+  const report = save.slice(afterCommand);
+  expect(report).toContain('result["dbmodAfterSave"] = afterSave is int saved ? DbmodFlags.ToJson(saved) : null;');
+  expect(report).toContain('result["dbmodAfterCommand"] = afterCommandError == null ? DbmodFlags.ToJson(afterCommand) : null;');
+  expect(report).toMatch(/var warnings = DbmodFlags\.SaveWarnings\(afterSave, afterSaveError,\s*afterCommandError == null \? afterCommand : null, afterCommandError\?\.Message\);\s*if \(warnings\.Count > 0\) result\["warnings"\] = warnings;\s*return result;$/);
+
+  // One hold of the host gate: the write, then an Idle read once the editor is quiescent, without the drawing-identity
+  // check (a Save As renames the drawing). Its failure is returned, never thrown over the written file.
+  const helper = member(execution, "public static Task<(T Result, TAfter? After, Exception? AfterError)> WriteThenAfterCommandAsync<T, TAfter>(");
+  expect(helper.match(/ExecuteSerializedAsync/g)).toHaveLength(1);
+  const hostWrite = helper.indexOf("}, write: true, inCommand: false, commandLine: false, cancellationToken);");
+  const idleRead = helper.indexOf("}, needsCommand: false, needsQuietEditor: true, cancellationToken);");
+  expect(hostWrite).toBeGreaterThan(0);
+  expect(idleRead).toBeGreaterThan(hostWrite);
+  expect(helper).toContain("if (written == null || !App.DocumentManager.Cast<Document>().Contains(written))");
+  expect(helper).not.toContain("RequireExpectedDocument");
+  expect(helper.slice(idleRead)).toMatch(/await AwaitHostContextAsync\(hostTask, cancellationToken\);\s*\}\s*catch \(Exception error\) \{ failure = error; \}\s*return \(result, failure == null \? value : default, failure\);/);
 
   expect(workflow.match(/AddSaveWarnings\(saveResult, warnings\);/g)).toHaveLength(2);
   expect(member(workflow, "private static void AddSaveWarnings(")).toContain('saveResult.TryGetValue("warnings", out var value) && value is IEnumerable<string> saveWarnings');

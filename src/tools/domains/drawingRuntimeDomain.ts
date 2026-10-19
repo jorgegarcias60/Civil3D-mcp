@@ -7,17 +7,23 @@ const DrawingSettingsResponseSchema = z.object({ coordinateSystem: z.string().nu
 const SelectedCivilObjectsResponseSchema = z.array(z.object({ handle: z.string(), objectType: z.string(), name: z.string().optional(), description: z.string().optional() }));
 const CivilObjectTypesResponseSchema = z.array(z.string());
 const GenericResponseSchema = z.object({}).passthrough();
+const DbmodSchema = z.object({ value: z.number().int().nonnegative(), flags: z.array(z.string()) }).passthrough();
 /**
- * saveDrawing. `dbmodAfterSave` is the drawing's DBMOD read right after the
- * save: its value and bit names ("objects", "variables", "window", "view",
- * "fields", "bit N"). Null when it could not be read; absent from plugins
- * older than issue #54. `warnings` says when the drawing still counts as
- * modified, which civil3d_instance stop refuses without discardChanges.
+ * saveDrawing. Each DBMOD is a value and its bit names ("objects",
+ * "variables", "window", "view", "fields", "bit N"). `dbmodAfterSave` is read
+ * inside the save command right after Database.SaveAs, before its transaction
+ * commits. `dbmodAfterCommand` is read once that command has ended, which is
+ * closer to what civil3d_instance stop sees; 0 there still does not promise
+ * that stop passes, since anything that marks the drawing later counts.
+ * Either is null when it could not be read, and absent from plugins older
+ * than issue #54. `warnings` says when the drawing still counts as modified
+ * (stop refuses it without discardChanges) or DBMOD changed between the reads.
  */
 export const DrawingSaveResponseSchema = z.object({
   saved: z.boolean(),
   filePath: z.string(),
-  dbmodAfterSave: z.object({ value: z.number().int().nonnegative(), flags: z.array(z.string()) }).passthrough().nullable().optional(),
+  dbmodAfterSave: DbmodSchema.nullable().optional(),
+  dbmodAfterCommand: DbmodSchema.nullable().optional(),
   warnings: z.array(z.string()).optional(),
 }).passthrough();
 

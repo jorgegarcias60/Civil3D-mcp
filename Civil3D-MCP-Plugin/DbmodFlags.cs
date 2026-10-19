@@ -17,6 +17,13 @@ internal static class DbmodFlags
   internal const int Fields = 32;
   private const int DisplayOnly = Window | View | Fields;
 
+  /// <summary>
+  /// DBMOD as AutoCAD returns it, a 16-bit short from GetSystemVariable and
+  /// from COM GetVariable, as an unsigned bit set: bit 32768 stays 32768
+  /// instead of becoming a negative number.
+  /// </summary>
+  internal static int FromSystemVariable(object? value) => Convert.ToInt32(value) & 0xFFFF;
+
   /// <summary>The set bits' names, lowest bit first.</summary>
   internal static IReadOnlyList<string> Describe(int value)
   {
@@ -67,5 +74,25 @@ internal static class DbmodFlags
         ? " Only view, window or field flags are set: no object or drawing-variable changes."
         : " No object or drawing-variable changes are flagged.";
     return message + " Pass discardChanges=true to close them without saving.";
+  }
+
+  /// <summary>
+  /// civil3d_drawing save's warnings. afterSave is read inside the save
+  /// command right after Database.SaveAs, before its transaction commits;
+  /// afterCommand once that command has ended, which is closer to what
+  /// civil3d_instance stop sees. A null value is a failed read, with its error.
+  /// </summary>
+  internal static List<string> SaveWarnings(int? afterSave, string? afterSaveError, int? afterCommand, string? afterCommandError)
+  {
+    var warnings = new List<string>();
+    if (afterSave == null)
+      warnings.Add($"The file was written, but its DBMOD could not be read right after the save: {afterSaveError}");
+    if (afterCommand == null)
+      warnings.Add($"The file was written, but its DBMOD could not be read after the save command ended: {afterCommandError}");
+    if ((afterCommand ?? afterSave) is int latest && latest != 0)
+      warnings.Add($"The file was written, but Civil 3D still counts the drawing as modified (DBMOD {Format(latest)}): civil3d_instance stop refuses it without discardChanges.");
+    if (afterSave is int before && afterCommand is int after && before != after)
+      warnings.Add($"DBMOD changed after the save: {Format(before)} right after Database.SaveAs, {Format(after)} once the save command had ended.");
+    return warnings;
   }
 }

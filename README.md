@@ -143,10 +143,12 @@ and Save As as well as open/close.
   `B.dwg (DBMOD 48 (view, fields))`: `objects` and `variables` are drawing
   content, `window`, `view` and `fields` are display state, any other bit is
   `bit N`. When no listed drawing has content flags, the refusal says so. The
-  check reads each drawing without making it the active one; with
-  `discardChanges: true` it is skipped. The plugin checks again just before it
-  quits and cancels if a drawing changed after its reply; plugin.log then names
-  the drawing and its flags, and the server's 60-second timeout points there.
+  check reads each drawing without making it the active one. If the COM read
+  of a drawing fails, it switches to that drawing as before and plugin.log
+  records a warning. With `discardChanges: true` the check is skipped. The
+  plugin checks again just before it quits and cancels if a drawing changed
+  after its reply; plugin.log then names the drawing and its flags, and the
+  server's 60-second timeout points there.
   The plugin closes documents and quits on its main thread.
   Both quit stages wake the host message loop. Pending callbacks expire, so later
   interaction cannot trigger a delayed quit after failure. The server waits 60
@@ -677,7 +679,7 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 | `list_civil_object_types` | Lists major Civil 3D object types present in the current drawing |
 | `get_selected_civil_objects_info` | Gets properties of currently selected Civil 3D objects |
 | `civil3d_health` | Reports Civil 3D connection and plugin status |
-| `civil3d_drawing` | Manages drawing state, document info, save/undo operations. `save` also returns `dbmodAfterSave` (DBMOD value and flags right after the save) and a warning when it is not 0, since `civil3d_instance stop` then refuses without `discardChanges` |
+| `civil3d_drawing` | Manages drawing state, document info, save/undo operations. `save` also returns DBMOD (value and flags) twice: `dbmodAfterSave`, read inside the save command right after `Database.SaveAs`, and `dbmodAfterCommand`, read once that command has ended. It warns when the later value is not 0, since `civil3d_instance stop` then refuses without `discardChanges`, and when the two differ. A 0 does not promise that stop passes: anything that marks the drawing later still counts |
 | `civil3d_job` | Checks status of long-running async operations or requests cancellation |
 | `list_tool_capabilities` | Lists domain and capability metadata for the full MCP tool catalog |
 

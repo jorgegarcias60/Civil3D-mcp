@@ -94,10 +94,15 @@ Saves the current drawing. Requires explicit confirmation from the LLM.
 {
   saved: boolean,
   filePath: string,
-  dbmodAfterSave?: { value: number, flags: string[] } | null,  // DBMOD right after the save; null if it could not be read
-  warnings?: string[]  // set when DBMOD is not 0 or could not be read
+  dbmodAfterSave?: { value: number, flags: string[] } | null,     // inside the save command, right after Database.SaveAs
+  dbmodAfterCommand?: { value: number, flags: string[] } | null,  // once the save command has ended
+  warnings?: string[]  // DBMOD still not 0, changed between the reads, or could not be read
 }
 ```
+
+Either DBMOD is null when it could not be read. `dbmodAfterCommand` is closer to what
+`civil3d_instance stop` sees, but a 0 there does not promise that stop passes: anything
+that marks the drawing later still counts.
 
 #### `undo`
 
