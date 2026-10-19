@@ -138,11 +138,14 @@ Returns drawing-level ambient settings.
 
 ### Tool 2: `civil3d_health`
 
-Reports the status of the Civil 3D connection and plugin.
+Reports the status of the Civil 3D connection and plugin. The two parameters are
+diagnostics for issue #53 (typed input lost after COM-started commands); both are
+optional and the call stays safe to retry.
 
-| Parameter | Type | Required | Description            |
-| --------- | ---- | -------- | ---------------------- |
-| —        | —   | —       | No parameters required |
+| Parameter       | Type                            | Required | Description |
+| --------------- | ------------------------------- | -------- | ----------- |
+| probeTypedInput | boolean                         | no       | Types the harmless `C3DMCPPROBE` command with `SendStringToExecute`, waits up to 3 s, and returns the result as `typedInputProbe`. Skipped while a command or prompt is active. |
+| hopStart        | `"com"`, `"typed"` or `"auto"` | no       | Sets how the attached instance starts `C3DMCPHOP` from the next operation on. `com` is the default. Not persisted: a restart is `com` again. |
 
 **Response data:**
 
@@ -155,9 +158,42 @@ Reports the status of the Civil 3D connection and plugin.
   operationInProgress: boolean,
   currentOperation: string | null,
   queueDepth: number,
-  memoryUsageMb: number
+  memoryUsageMb: number,
+  hostRoute: {
+    hopStart: "com" | "typed" | "auto",
+    typedInput: {
+      state: "unknown" | "alive" | "dead",
+      reason: string | null,          // probe, probe-timeout, late-probe, typed-start, typed-start-lost
+      lastChangeUtc: string | null,
+      lastProbeUtc: string | null,
+      lastLatencyMs: number | null,
+      lastStartLatencyMs: number | null,
+      lostStarts: number,
+      lateRuns: number,
+      inputPendingAtLastLoss: boolean | null
+    }
+  },
+  typedInputProbe?: {                 // only with probeTypedInput: true
+    ran: boolean,
+    skipped?: "busy" | "no-drawing" | "no-idle",
+    latencyMs: number | null,
+    timeoutMs: number,
+    inputPendingBefore: boolean | null,
+    inputPendingAfter: boolean | null,
+    cmdnames: string | null,
+    session: { remoteSession, connectState, inputDesktop, foreground, minimized },
+    typedInput: { ... }
+  }
 }
 ```
+
+`typed` starts `C3DMCPHOP` with `SendStringToExecute`; when it has not started after 2 s
+of quiet idle time the request fails with `CIVIL3D.HOST_BUSY` "typed hop start was lost;
+nothing ran" and `typedInput` becomes `dead`. `auto` is typed while `typedInput` is not
+`dead`; a lost start marks it `dead` and starts the same operation over COM, and later
+operations start over COM until a probe runs. An operation's command-line input (undo,
+redo, data shortcuts, Storm and Sanitary) and its ESC ESC cancel use the channel of its
+start.
 
 ---
 

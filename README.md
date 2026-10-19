@@ -473,7 +473,7 @@ flowchart LR
     subgraph Civil3D ["Autodesk Civil 3D"]
         Plugin["Civil3DMcpPlugin.dll\nTCP Listener"]
         Queue["Bounded Host Queue"]
-        Context["ExecuteInCommandContextAsync"]
+        Context["Application.Idle (reads)\nC3DMCPHOP command (writes, commands)"]
         Safety["Document Lock + Transaction"]
         API["Civil 3D 2026 .NET API"]
 
@@ -481,9 +481,12 @@ flowchart LR
     end
 ```
 
-Civil 3D database operations execute inside Autodesk command context under a
-bounded, serialized host gate. Mutations additionally use a document lock and a
-narrow transaction; callers never mutate a drawing directly from Node.js.
+Civil 3D database operations run under a bounded, serialized host gate. Reads
+run from an `Application.Idle` tick in an open-close transaction. Writes, command
+sequences and reads that need a command run inside the plugin's own `C3DMCPHOP`
+command, which the plugin starts with COM `SendCommand`. Mutations additionally
+use a document lock and a narrow transaction; callers never mutate a drawing
+directly from Node.js.
 
 ---
 
@@ -667,7 +670,7 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 | `get_drawing_info` | Retrieves basic information about the active Civil 3D drawing |
 | `list_civil_object_types` | Lists major Civil 3D object types present in the current drawing |
 | `get_selected_civil_objects_info` | Gets properties of currently selected Civil 3D objects |
-| `civil3d_health` | Reports Civil 3D connection and plugin status |
+| `civil3d_health` | Reports Civil 3D connection and plugin status, and how the plugin starts its commands (`hostRoute`); `probeTypedInput` and `hopStart` are issue #53 diagnostics |
 | `civil3d_drawing` | Manages drawing state, document info, save/undo operations |
 | `civil3d_job` | Checks status of long-running async operations or requests cancellation |
 | `list_tool_capabilities` | Lists domain and capability metadata for the full MCP tool catalog |
@@ -1611,8 +1614,17 @@ scratch user instance. Run the three commands above separately; the legacy
 - Check the DLL path passed to `NETLOAD` has no spaces or special characters
 
 **Another plugin's commands are ignored after a civil3d tool call**
-- Once any COM client has used `SendCommand` in a Civil 3D session (this plugin starts its `C3DMCPHOP` command that way), AutoCAD silently drops input queued with `Document.SendStringToExecute`. Seen live on Civil 3D 2026: Design Master commands were lost right after `civil3d_plot`.
-- A plugin that sends commands next to this one should use COM `SendCommand` on `Document.GetAcadDocument()` from a background thread, as `CivilExecution` does. This plugin no longer uses `SendStringToExecute` (a stuck `-PLOT` is cancelled with ESC ESC over COM), and `run_code` refuses it.
+- After a command started with COM `SendCommand`, AutoCAD sometimes drops input queued with `Document.SendStringToExecute` or COM `PostCommand`, now and then for the rest of the session. This plugin starts its `C3DMCPHOP` command that way; a COM `NETLOAD` did it too. Seen live on Civil 3D 2026: Design Master commands were lost right after `civil3d_plot` and other writes.
+- It does not happen every time: the same sequence lost typed input on one instance and not on another. Typed input came back after a COM `SendCommand("(princ) ")` and after Escape of a COM-started command. The 2026-10-11 trials saw the related stall of `ExecuteInCommandContextAsync` only in a disconnected Windows session.
+- To measure it, run `civil3d_health` with `probeTypedInput: true`. The plugin types its harmless `C3DMCPPROBE` command, waits up to 3 s, and returns `typedInputProbe`: whether it ran, the latency, whether input was pending before and after (`acedIsInputPending`), the active commands, and the Windows session (remote, connect state, input desktop, foreground, minimized). It does not send while a command or prompt is active (`skipped: "busy"`). `hostRoute.typedInput` keeps the result: `unknown`, `alive` or `dead`.
+- A plugin that sends commands next to this one can use COM `SendCommand` on `Document.GetAcadDocument()` from a background thread, as `CivilExecution` does. With the default route this plugin does not use `SendStringToExecute` (a stuck `-PLOT` is cancelled with ESC ESC over COM), and `run_code` refuses it.
+
+**Trying the typed start route (issue #53 experiment)**
+- `civil3d_health` with `hopStart` sets how the attached instance starts `C3DMCPHOP` from the next operation on. Not persisted: a restart is `com` again. Use it on scratch instances until the live tests are done.
+- `com` (default): COM `SendCommand`, as before.
+- `typed`: `SendStringToExecute` from an Idle tick. If the command has not started after 2 s of quiet idle time, the request fails with `CIVIL3D.HOST_BUSY` "typed hop start was lost; nothing ran" and `hostRoute.typedInput` becomes `dead`.
+- `auto`: typed while typed input is not `dead`. A lost start marks it `dead` and starts the same operation over COM, with no error. After that it starts with COM until a probe runs.
+- An operation's command-line input and its ESC ESC cancel use one channel, never both: the channel its `C3DMCPHOP` was started with. Operations without a `C3DMCPHOP` (undo, redo, most data shortcut and Storm and Sanitary actions) use typed input on `typed` and `auto` while typed input is not `dead`, COM otherwise.
 
 ---
 

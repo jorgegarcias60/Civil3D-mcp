@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Issue #53 diagnostics. `civil3d_health` reports `hostRoute`: how the plugin starts its
+  `C3DMCPHOP` command (`hopStart`, `com` by default) and what is known about typed input
+  in this session (`typedInput`: `unknown`, `alive` or `dead`). `probeTypedInput: true`
+  types the harmless `C3DMCPPROBE` command with `SendStringToExecute` and reports whether
+  it ran, the latency, `acedIsInputPending` before and after, and the Windows session
+  (remote, connect state, input desktop, foreground, minimized). `hopStart` sets the
+  attached instance's start route until a restart: `typed` fails with HOST_BUSY when a
+  typed start is lost (2 s of quiet idle time), `auto` then starts the same operation over
+  COM and stays on COM until a probe runs. An operation's command-line input and ESC ESC
+  cancel take the channel of its start. The default route is unchanged. The README
+  troubleshooting entry from #46 now says what is known: not every time, recovery seen.
+  Refs #53.
+
 - When the plugin starts, it removes the discovery files that crashed or killed instances
   left in `%LOCALAPPDATA%\Civil3DMcpPlugin\instances`: the pid has exited, or it now
   belongs to a process started at another time. A file whose process cannot be inspected

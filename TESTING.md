@@ -34,6 +34,23 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 
 ## Offline (no Civil 3D needed)
 
+### Typed-input probe and typed hop start, issue #53 part 1 (2026-10-19)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10 (`HostRouteChecks`, 79 checks) | Pass. Route decisions (`com` always COM; `typed` always typed; `auto` typed until dead; Idle-route input typed only for typed/auto while not dead; only `auto` falls back), route names, default `com` and `unknown`; the typed-input state machine (probe ran, probe timeout, late probe, typed start, lost start logged once, late typed run keeps dead); quiet idle timeout (counts from the send, a busy tick restarts it, overall limit); probe ledger (in time, timeout then late run, run by hand ignored); 32 start-versus-lost races give one outcome; late hops with the real `RunCodeDispatchGate` (auto fallback runs the work once, an inert lost item, an abandoned request then the next one); `acedIsInputPending` guard returns null for a missing library or export; the session report has its five fields. |
+| Harness totals | net8: 1368 ok, 0 failed (230 references). net10: 1368 ok, 0 failed (238 references). |
+| `tests/host_routes.test.ts` | `SendStringToExecute` is called once, in `SendTyped`, from the typed hop start, typed command-line input and the probe only; no other plugin file calls it. Default `com`, and the COM dispatch and `StartPluginCommandAsync` body unchanged for it. One channel per operation from a route read once; only a lost `auto` start changes it, to COM, before the COM start; cancel and command-line input follow it. Lost, busy, abandoned and failed typed starts drop their item; the probe sends only from a quiet Idle tick inside the host gate. |
+| `tests/health_diagnostics.test.ts` | `probeTypedInput` and `hopStart` schema; no parameters sends only `getCivil3DHealth`; `hopStart` then probe then report, in that order; the response schema keeps `hostRoute` and `typedInputProbe` and still accepts a plugin without `hostRoute`; an older plugin's METHOD_NOT_FOUND names issue #53; read-only and retry-safe. |
+| Old code | With the source changes stashed: all 6 health tests fail, 6 of 11 host_routes tests fail (the 5 unchanged ones pass), and the harness does not compile without `HostInputRoute.cs`. |
+| `npx vitest run --cache=false` | 927 passed in 63 files. |
+| `npm run build`, `docs:check` | Ok (212 entries). |
+| Plugin Release net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+Not covered offline: whether typed starts and the probe run in Civil 3D, the 2 s timeout against real
+latencies, pickfirst through a typed `C3DMCPHOP`, and the disconnected-session case. The live matrix
+(`scratch-live-53.mjs`, not committed) runs these.
+
 ### Stale discovery files #39, COM cancel #46, reference docs #47, order-dependent tests #34 (2026-10-16)
 
 | Check | Result |
