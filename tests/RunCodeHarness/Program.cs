@@ -619,6 +619,7 @@ InstanceDiscoveryChecks.Run((condition, name) => Expect(condition, name));
 ComRegistrationChecks.Run((condition, name) => Expect(condition, name));
 PdfChecks.Run((condition, name) => Expect(condition, name));
 RasterPlotChecks.Run((condition, name) => Expect(condition, name));
+DbmodFlagsChecks.Run((condition, name) => Expect(condition, name));
 PublishPreflightChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 LayoutInitializationChecks.Run(repoRoot, (condition, name) => Expect(condition, name));
 PreviewGuardChecks.Run((code, preview) => Compile(code, write: true, preview: preview),

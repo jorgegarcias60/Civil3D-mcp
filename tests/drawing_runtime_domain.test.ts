@@ -41,3 +41,37 @@ describe("drawing runtime response contracts", () => {
     }).success).toBe(true);
   });
 });
+
+describe("drawing save response (issue #54)", () => {
+  const saveSchema = DRAWING_RUNTIME_DOMAIN_DEFINITION.actions.save.responseSchema!;
+
+  it("accepts the result of plugins older than the DBMOD report", () => {
+    expect(saveSchema.parse({ saved: true, filePath: "C:\\jobs\\A.dwg" })).toEqual({ saved: true, filePath: "C:\\jobs\\A.dwg" });
+  });
+
+  it("keeps dbmodAfterSave, warnings and extra fields", () => {
+    const result = {
+      saved: true,
+      filePath: "C:\\jobs\\A.dwg",
+      dbmodAfterSave: { value: 48, flags: ["view", "fields"] },
+      warnings: ["The file was written, but Civil 3D still counts the drawing as modified (DBMOD 48 (view, fields)): civil3d_instance stop refuses it without discardChanges."],
+      extra: 1,
+    };
+    expect(saveSchema.parse(result)).toEqual(result);
+    expect(saveSchema.parse({ saved: true, filePath: "A.dwg", dbmodAfterSave: { value: 0, flags: [] } }).dbmodAfterSave)
+      .toEqual({ value: 0, flags: [] });
+  });
+
+  it("accepts a DBMOD that could not be read", () => {
+    const result = { saved: true, filePath: "A.dwg", dbmodAfterSave: null, warnings: ["The file was written, but its DBMOD could not be read afterwards: x"] };
+    expect(saveSchema.parse(result)).toEqual(result);
+  });
+
+  it("rejects a malformed save result", () => {
+    expect(saveSchema.safeParse({ filePath: "A.dwg" }).success).toBe(false);
+    expect(saveSchema.safeParse({ saved: true }).success).toBe(false);
+    expect(saveSchema.safeParse({ saved: true, filePath: "A.dwg", dbmodAfterSave: { value: -1, flags: [] } }).success).toBe(false);
+    expect(saveSchema.safeParse({ saved: true, filePath: "A.dwg", dbmodAfterSave: { value: 1 } }).success).toBe(false);
+    expect(saveSchema.safeParse({ saved: true, filePath: "A.dwg", warnings: "one" }).success).toBe(false);
+  });
+});

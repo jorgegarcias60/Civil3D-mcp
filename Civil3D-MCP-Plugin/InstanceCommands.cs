@@ -69,11 +69,12 @@ internal static class InstanceCommands
       try
       {
         deadline.Token.ThrowIfCancellationRequested();
-        var documents = App.DocumentManager.Cast<Document>().ToArray();
-        var unsaved = documents.Where(IsModified).Select(doc => doc.Name).ToArray();
-        if (unsaved.Length > 0 && !discard)
-          throw new JsonRpcDispatchException("CIVIL3D.CONFLICT",
-            $"Instance has unsaved drawings: {string.Join(", ", unsaved)}. Pass discardChanges=true to close them without saving.");
+        if (!discard)
+        {
+          var unsaved = ModifiedDrawings();
+          if (unsaved.Count > 0)
+            throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", DbmodFlags.UnsavedDrawingsMessage(unsaved));
+        }
         lock (Sync)
         {
           if (_state != QuitState.Idle) throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", "This instance is already quitting.");
@@ -119,7 +120,40 @@ internal static class InstanceCommands
     return completion.Task;
   }
 
-  private static bool IsModified(Document document)
+  // Every open drawing whose DBMOD is not 0, with its value. Main thread only.
+  private static List<(string Name, int Value)> ModifiedDrawings()
+  {
+    var modified = new List<(string Name, int Value)>();
+    foreach (var document in App.DocumentManager.Cast<Document>().ToArray())
+    {
+      var dbmod = ReadDbmod(document);
+      if (dbmod != 0) modified.Add((document.Name, dbmod));
+    }
+    return modified;
+  }
+
+  // DBMOD of one drawing without making it the active one. A switch fires
+  // activation events that other add-ins handle, and a handler may modify
+  // the drawing it activates (issue #54). The active drawing reads the system
+  // variable; any other reads it through its own ActiveX document, as the
+  // live run-code smoke does for an inactive drawing. Main thread only.
+  // If the COM read fails, switch to the drawing as before.
+  internal static int ReadDbmod(Document document)
+  {
+    if (ReferenceEquals(App.DocumentManager.MdiActiveDocument, document))
+      return Convert.ToInt32(App.GetSystemVariable("DBMOD"));
+    try
+    {
+      return Convert.ToInt32(Civil3DCompatibility.InvokeComMethod(document.GetAcadDocument(), "GetVariable", "DBMOD"));
+    }
+    catch (Exception error)
+    {
+      PluginLog.Warn("Instance", $"Could not read DBMOD of '{document.Name}' over COM; switching to it to read it.", error);
+      return ReadDbmodBySwitching(document);
+    }
+  }
+
+  private static int ReadDbmodBySwitching(Document document)
   {
     var previous = App.DocumentManager.MdiActiveDocument;
     try
@@ -127,7 +161,7 @@ internal static class InstanceCommands
       App.DocumentManager.MdiActiveDocument = document;
       if (!ReferenceEquals(App.DocumentManager.MdiActiveDocument, document))
         throw new JsonRpcDispatchException("CIVIL3D.HOST_BUSY", "Could not inspect every open drawing before quitting.");
-      return Convert.ToInt32(App.GetSystemVariable("DBMOD")) != 0;
+      return Convert.ToInt32(App.GetSystemVariable("DBMOD"));
     }
     finally { App.DocumentManager.MdiActiveDocument = previous; }
   }
@@ -179,12 +213,16 @@ internal static class InstanceCommands
       }
       try
       {
-        var documents = App.DocumentManager.Cast<Document>().ToArray();
-        if (!discard && documents.Any(IsModified))
+        if (!discard)
         {
-          PluginLog.Warn("Instance", "Quit cancelled because a drawing changed after the reply.");
-          return;
+          var changed = ModifiedDrawings();
+          if (changed.Count > 0)
+          {
+            PluginLog.Warn("Instance", $"Quit cancelled because a drawing changed after the reply: {DbmodFlags.FormatDrawings(changed)}.");
+            return;
+          }
         }
+        var documents = App.DocumentManager.Cast<Document>().ToArray();
         foreach (var doc in documents) doc.CloseAndDiscard();
         lock (Sync) { if (_state != QuitState.Executing || _requestId != responseId) return; }
         App.Quit();

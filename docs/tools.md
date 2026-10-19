@@ -88,6 +88,17 @@ Saves the current drawing. Requires explicit confirmation from the LLM.
 | action    | `"save"` | yes      | —                                       |
 | saveAs    | string     | no       | If provided, saves to this new file path |
 
+**Response data:**
+
+```
+{
+  saved: boolean,
+  filePath: string,
+  dbmodAfterSave?: { value: number, flags: string[] } | null,  // DBMOD right after the save; null if it could not be read
+  warnings?: string[]  // set when DBMOD is not 0 or could not be read
+}
+```
+
 #### `undo`
 
 Undoes the last operation. Uses Civil 3D's built-in undo stack.

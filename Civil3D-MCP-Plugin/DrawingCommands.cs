@@ -207,11 +207,28 @@ public static class DrawingCommands
         : FileBoundary.ResolveExportPath(targetPath, overwrite, ".dwg");
       database.SaveAs(targetPath, true, DwgVersion.Current, database.SecurityParameters);
 
-      return new Dictionary<string, object?>
+      var result = new Dictionary<string, object?>
       {
         ["saved"] = true,
         ["filePath"] = targetPath,
       };
+      // DBMOD is read in this same step: after a Save As the drawing's
+      // identity changes, so a later step of the request would be refused.
+      // civil3d_instance stop refuses any drawing whose DBMOD is not 0, saved
+      // or not (issue #54). A failed read never fails the written file.
+      try
+      {
+        var dbmod = InstanceCommands.ReadDbmod(doc);
+        result["dbmodAfterSave"] = DbmodFlags.ToJson(dbmod);
+        if (dbmod != 0)
+          result["warnings"] = new List<string> { $"The file was written, but Civil 3D still counts the drawing as modified (DBMOD {DbmodFlags.Format(dbmod)}): civil3d_instance stop refuses it without discardChanges." };
+      }
+      catch (Exception error)
+      {
+        result["dbmodAfterSave"] = null;
+        result["warnings"] = new List<string> { $"The file was written, but its DBMOD could not be read afterwards: {error.Message}" };
+      }
+      return result;
     });
   }
 
