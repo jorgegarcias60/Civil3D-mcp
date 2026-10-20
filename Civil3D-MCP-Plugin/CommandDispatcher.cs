@@ -9,6 +9,8 @@ public static class CommandDispatcher
   return method switch
   {
       "getCivil3DHealth" => DrawingCommands.GetCivil3DHealthAsync(),
+      "probeTypedInput" => CivilExecution.ProbeTypedInputAsync(parameters),
+      "setHostRoute" => Task.FromResult(CivilExecution.SetHostRoute(parameters)),
       "quitInstance" => InstanceCommands.QuitInstanceAsync(parameters),
       "adoptInstance" => InstanceCommands.AdoptInstanceAsync(parameters),
       "getDrawingInfo" => DrawingCommands.GetDrawingInfoAsync(),

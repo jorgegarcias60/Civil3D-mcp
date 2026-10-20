@@ -3,7 +3,8 @@
     Offline checks of runCode's compiler (ScriptCompiler): default usings,
     line mapping, hoisted using directives and the read-mode guard, compiled
     against the Civil 3D reference assemblies and the built plugin; and of its
-    AutoCAD-free runtime helpers (RunCodeOutput, RpcAuth, HostDispatchState: RuntimeChecks.cs).
+    AutoCAD-free runtime helpers (RunCodeOutput, RpcAuth, HostDispatchState: RuntimeChecks.cs;
+    HostInputRoute: HostRouteChecks.cs).
     Nothing runs in Civil 3D. Usage: see Program.cs.
   -->
   <PropertyGroup>
@@ -24,6 +25,7 @@
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeChanges.cs" Link="RunCodeChanges.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeArguments.cs" Link="RunCodeArguments.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\HostDispatchState.cs" Link="HostDispatchState.cs" />
+    <Compile Include="..\..\Civil3D-MCP-Plugin\HostInputRoute.cs" Link="HostInputRoute.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeLog.cs" Link="RunCodeLog.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeResult.cs" Link="RunCodeResult.cs" />
     <Compile Include="..\..\Civil3D-MCP-Plugin\RunCodeJson.cs" Link="RunCodeJson.cs" />

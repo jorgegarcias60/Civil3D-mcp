@@ -126,7 +126,7 @@ Generated from the runtime manifest for civil3d-mcp 1.2.1. Do not edit by hand.
 | `civil3d_sheet_view_create` | plan_production | — | createSheetView | no |
 | `civil3d_sheet_view_set_scale` | plan_production | — | setSheetViewScale | no |
 | `civil3d_plot` | plot | list_layouts, list_page_setups, list_plotters, plot_layouts_to_pdf, render_layouts_to_png, publish_sheet_set | plotListLayouts, plotListPageSetups, plotListPlotters, plotLayoutsToPdf, startJob, plotLayoutsToPng, plotPublishSheetSet | no |
-| `civil3d_health` | plugin | — | getCivil3DHealth | yes |
+| `civil3d_health` | plugin | — | getCivil3DHealth, setHostRoute, probeTypedInput | yes |
 | `civil3d_point` | point | list, get, create, list_groups, import, delete, group_create, group_update, group_delete, export, transform | listCogoPoints, getCogoPoint, createCogoPoints, listPointGroups, importCogoPoints, deleteCogoPoints, createPointGroup, updatePointGroup, deletePointGroup, exportCogoPoints, transformCogoPoints | no |
 | `civil3d_point_export` | point | — | exportCogoPoints | yes |
 | `civil3d_point_group_create` | point | — | createPointGroup | no |

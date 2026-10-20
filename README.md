@@ -484,7 +484,7 @@ flowchart LR
     subgraph Civil3D ["Autodesk Civil 3D"]
         Plugin["Civil3DMcpPlugin.dll\nTCP Listener"]
         Queue["Bounded Host Queue"]
-        Context["ExecuteInCommandContextAsync"]
+        Context["Application.Idle (reads)\nC3DMCPHOP command (writes, commands)"]
         Safety["Document Lock + Transaction"]
         API["Civil 3D 2026 .NET API"]
 
@@ -492,9 +492,12 @@ flowchart LR
     end
 ```
 
-Civil 3D database operations execute inside Autodesk command context under a
-bounded, serialized host gate. Mutations additionally use a document lock and a
-narrow transaction; callers never mutate a drawing directly from Node.js.
+Civil 3D database operations run under a bounded, serialized host gate. Reads
+run from an `Application.Idle` tick in an open-close transaction. Writes, command
+sequences and reads that need a command run inside the plugin's own `C3DMCPHOP`
+command, which the plugin starts with COM `SendCommand`. Mutations additionally
+use a document lock and a narrow transaction; callers never mutate a drawing
+directly from Node.js.
 
 ---
 
@@ -678,7 +681,7 @@ one or more operations; alias rows show an em dash in the **Operations** column.
 | `get_drawing_info` | Retrieves basic information about the active Civil 3D drawing |
 | `list_civil_object_types` | Lists major Civil 3D object types present in the current drawing |
 | `get_selected_civil_objects_info` | Gets properties of currently selected Civil 3D objects |
-| `civil3d_health` | Reports Civil 3D connection and plugin status |
+| `civil3d_health` | Reports Civil 3D connection and plugin status, and how the plugin starts its commands (`hostRoute`); `probeTypedInput` and `hopStart` are issue #53 diagnostics |
 | `civil3d_drawing` | Manages drawing state, document info, save/undo operations. `save` also returns DBMOD (value and flags) twice: `dbmodAfterSave`, read inside the save command right after `Database.SaveAs`, and `dbmodAfterCommand`, read once that command has ended. It warns when the later value is not 0, since `civil3d_instance stop` then refuses without `discardChanges`, and when the two differ. A 0 does not promise that stop passes: anything that marks the drawing later still counts |
 | `civil3d_job` | Checks status of long-running async operations or requests cancellation |
 | `list_tool_capabilities` | Lists domain and capability metadata for the full MCP tool catalog |
@@ -1622,8 +1625,23 @@ scratch user instance. Run the three commands above separately; the legacy
 - Check the DLL path passed to `NETLOAD` has no spaces or special characters
 
 **Another plugin's commands are ignored after a civil3d tool call**
-- Once any COM client has used `SendCommand` in a Civil 3D session (this plugin starts its `C3DMCPHOP` command that way), AutoCAD silently drops input queued with `Document.SendStringToExecute`. Seen live on Civil 3D 2026: Design Master commands were lost right after `civil3d_plot`.
-- A plugin that sends commands next to this one should use COM `SendCommand` on `Document.GetAcadDocument()` from a background thread, as `CivilExecution` does. This plugin no longer uses `SendStringToExecute` (a stuck `-PLOT` is cancelled with ESC ESC over COM), and `run_code` refuses it.
+- After a COM `SendCommand`, AutoCAD can throw away input queued with `Document.SendStringToExecute` (and COM `PostCommand`). Measured live on Civil 3D 2026 on 2026-10-19, in a connected, active Windows session with Civil 3D in front, with this plugin's probe:
+  - one write through the default COM-started `C3DMCPHOP`: every later typed probe was lost (9 of 9 over three writes), with nothing pending in the input buffer and nothing running later;
+  - one plain PowerShell COM `SendCommand("(princ) ")`, no `C3DMCPHOP` involved: the same;
+  - a later COM `SendCommand` brought typed input back 2 times out of 4;
+  - writes through a typed-started `C3DMCPHOP` (`hopStart: "typed"`): typed input kept working (9 of 9 probes ran after three writes).
+  The Design Master MCP saw the same: its typed command starts were lost after `civil3d_plot` and other writes, though not on every instance.
+- To measure it, run `civil3d_health` with `probeTypedInput: true`. The plugin types its `C3DMCPPROBE` command, waits up to 3 s (`probeTimeoutMs`: 250-10000), and returns `typedInputProbe`: whether it ran, the latency, whether input was pending before and after (`acedIsInputPending`), the active commands (`cmdnames`, `cmdactive`), and the Windows session (remote, connect state, input desktop, foreground, minimized). It does not send while a command or prompt is active (`skipped: "busy"`, with the commands that hold the host). `hostRoute.typedInput` keeps the result: `unknown`, `alive` or `dead`.
+- What is known about the probe: it changes no drawing data, and it leaves no undo step and keeps the redo stack (verified live: write, probe, UNDO 1 removed the write; write, UNDO 1, probe, MREDO 1 restored it). A probe that did not run while input was pending may still run later and answer whatever prompt is open then. Run it at an idle `Command:` prompt.
+- A plugin that sends commands next to this one can use COM `SendCommand` on `Document.GetAcadDocument()` from a background thread, as `CivilExecution` does. With the default route this plugin does not use `SendStringToExecute` (a stuck `-PLOT` is cancelled with ESC ESC over COM), and `run_code` refuses it.
+
+**Trying the typed start route (issue #53 experiment)**
+- `civil3d_health` with `hopStart` sets how the attached instance starts `C3DMCPHOP`, and so every later write and command, from the next operation on. It changes the instance, not the drawing, and needs no approval. Not persisted: a restart is `com` again. Live-tested on scratch instances (Civil 3D 2026, connected session): typed writes, typed UNDO and MREDO, and the `auto` fallback (a lost typed start after an outside COM command: the same write ran over COM, 6.1 s instead of about 2.3 s). Not tested yet: the pickfirst selection through a typed start, a disconnected Windows session, Civil 3D 2027. A typed start that arrives late can answer a prompt open by then.
+- `com` (default): COM `SendCommand`, as before.
+- `typed`: `SendStringToExecute` from an Idle tick. If the command has not started after 2 s of quiet idle time, the request fails with `CIVIL3D.HOST_BUSY` "typed hop start was lost; nothing ran" and `hostRoute.typedInput` becomes `dead`. Quiet idle time is Idle ticks with no command and a quiescent editor. A busy tick restarts the count, and so does a gap of more than 750 ms without Idle ticks (Civil 3D was busy without a command, for example in a regen).
+- `auto`: typed while typed input is not `dead`. A lost start marks it `dead` and starts the same operation over COM, with no error. After that it starts with COM until a probe runs.
+- An operation's command-line input and its ESC ESC cancel use one channel, never both: the channel its `C3DMCPHOP` was started with. Operations without a `C3DMCPHOP` (undo, redo, most data shortcut and Storm and Sanitary actions) use typed input on `typed` and `auto` while typed input is not `dead`, COM otherwise.
+- Typed command-line input counts as run only when the command it names starts (`UNDO`, `MREDO`, the data shortcut or Storm and Sanitary command). If it does not start within 3 s, the result carries a `warnings` entry saying it may still run later. If no command started at all in 2 s of quiet idle time, `hostRoute.typedInput` also becomes `dead` (`reason: "typed-input-lost"`, counted in `lostInputs`). The input is never resent over COM, because the typed string may still run. Check the drawing before the next change.
 
 ---
 

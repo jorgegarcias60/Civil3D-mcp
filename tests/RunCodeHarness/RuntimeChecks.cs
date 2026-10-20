@@ -1,5 +1,6 @@
 // Offline checks of runCode's AutoCAD-free runtime helpers, called from
-// Program.cs: the Log cap, runCode token and host dispatch gate.
+// Program.cs: the Log cap, runCode token and host dispatch gate (and, through
+// HostRouteChecks, the issue #53 host route state).
 // RunTransaction (RunCodeScript.cs) needs AutoCAD at runtime, so it is only
 // compiled here (with the plugin build) and checked live in Civil 3D.
 using System.Runtime.Versioning;
@@ -24,6 +25,7 @@ internal static class RuntimeChecks
     RetentionChecks.Run(expect);
     ResultChecks.Run(expect);
     CheckDispatchGateAsync(expect).GetAwaiter().GetResult();
+    HostRouteChecks.Run(expect);
   }
 
   private static void CheckViewportLayouts(Action<bool, string> expect)

@@ -154,11 +154,15 @@ Returns drawing-level ambient settings.
 
 ### Tool 2: `civil3d_health`
 
-Reports the status of the Civil 3D connection and plugin.
+Reports the status of the Civil 3D connection and plugin. The parameters are
+diagnostics for issue #53 (typed input lost after COM-started commands); all are
+optional and the call stays safe to retry.
 
-| Parameter | Type | Required | Description            |
-| --------- | ---- | -------- | ---------------------- |
-| —        | —   | —       | No parameters required |
+| Parameter       | Type                            | Required | Description |
+| --------------- | ------------------------------- | -------- | ----------- |
+| probeTypedInput | boolean                         | no       | Types the plugin's `C3DMCPPROBE` command with `SendStringToExecute`, waits up to 3 s, and returns the result as `typedInputProbe`. Skipped while a command or prompt is active. The probe changes no drawing data and is flagged `NoUndoMarker` (that it leaves no undo step is not yet verified live). A probe that did not run may still run later and answer a prompt open by then: probe at an idle `Command:` prompt, preferably on a scratch instance. |
+| probeTimeoutMs  | integer, 250-10000              | no       | With `probeTypedInput`: how long the probe waits. Default 3000. |
+| hopStart        | `"com"`, `"typed"` or `"auto"` | no       | Sets how the attached instance starts `C3DMCPHOP`, and so every later write and command, from the next operation on. It changes the instance, not the drawing. `com` is the default; use `typed` and `auto` on scratch instances. Not persisted: a restart is `com` again. |
 
 **Response data:**
 
@@ -171,9 +175,53 @@ Reports the status of the Civil 3D connection and plugin.
   operationInProgress: boolean,
   currentOperation: string | null,
   queueDepth: number,
-  memoryUsageMb: number
+  memoryUsageMb: number,
+  hostRoute: {
+    hopStart: "com" | "typed" | "auto",
+    typedInput: {
+      state: "unknown" | "alive" | "dead",
+      reason: string | null,          // probe, probe-timeout, late-probe, typed-start, typed-start-lost, typed-input-lost
+      lastChangeUtc: string | null,
+      lastProbeUtc: string | null,
+      lastLatencyMs: number | null,
+      lastStartLatencyMs: number | null,
+      lostStarts: number,
+      lostInputs: number,
+      lateRuns: number,
+      inputPendingAtLastLoss: boolean | null
+    }
+  },
+  typedInputProbe?: {                 // only with probeTypedInput: true
+    ran: boolean,
+    skipped?: "busy" | "no-drawing" | "no-idle",
+    latencyMs: number | null,
+    timeoutMs: number,
+    inputPendingBefore: boolean | null,
+    inputPendingAfter: boolean | null,
+    cmdnames: string | null,          // also when skipped: "busy" (the commands holding the host)
+    cmdactive: number | null,
+    session: { remoteSession, connectState, inputDesktop, foreground, minimized },
+    typedInput: { ... }
+  }
 }
 ```
+
+The server accepts any `hopStart` and `state` string a plugin reports, so a newer plugin
+does not break the report.
+
+`typed` starts `C3DMCPHOP` with `SendStringToExecute`; when it has not started after 2 s
+of quiet idle time (a busy tick, or a gap of more than 750 ms without Idle ticks, restarts
+the count) the request fails with `CIVIL3D.HOST_BUSY` "typed hop start was lost; nothing
+ran" and `typedInput` becomes `dead`. `auto` is typed while `typedInput` is not `dead`; a
+lost start marks it `dead` and starts the same operation over COM, and later operations
+start over COM until a probe runs. An operation's command-line input and its ESC ESC
+cancel use the channel its `C3DMCPHOP` was started with. Operations without a `C3DMCPHOP`
+(undo, redo, most data shortcut and Storm and Sanitary actions) use typed input on `typed`
+and `auto` while typed input is not `dead`, COM otherwise. Typed command-line input counts
+as run only when the command it names starts; otherwise that operation's result carries a
+`warnings` entry (it may still run later), and when no command started at all in 2 s of
+quiet idle time `typedInput` becomes `dead` (`typed-input-lost`). It is never resent over
+COM.
 
 ---
 

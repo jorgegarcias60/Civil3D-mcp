@@ -28,9 +28,10 @@ namespace Civil3DMcpPlugin;
 ///       plus throwaway non-database-resident PlotSettings for media lookups);
 ///     * never modifies a layout or page setup ("Save changes to page setup?
 ///       No");
-///     * issues -PLOT / -PUBLISH through Editor.CommandAsync inside
-///       ExecuteInCommandContextAsync with FILEDIA=0, CMDECHO=0 and
-///       BACKGROUNDPLOT=0, restoring every system variable afterwards;
+///     * issues -PLOT / -PUBLISH through Editor.CommandAsync inside the
+///       plugin's C3DMCPHOP command (CivilExecution.ExecuteCommandSequenceAsync)
+///       with FILEDIA=0, CMDECHO=0 and BACKGROUNDPLOT=0, restoring every system
+///       variable afterwards;
 ///     * validates every answer (layout, device, paper, plot style table,
 ///       output path) BEFORE starting the command, so a bad value cannot shift
 ///       the prompt chain;

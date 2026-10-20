@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -19,17 +20,19 @@ public sealed class RunCodeActivation
   internal void AddWarning(string warning) => Warning = Warning == null ? warning : $"{Warning}; {warning}";
 }
 
-public static class CivilExecution
+public static partial class CivilExecution
 {
   private static readonly SemaphoreSlim HostExecutionGate = new(1, 1);
 
   // Where an operation runs. Nothing uses DocumentManager
-  // .ExecuteInCommandContextAsync any more: on Civil 3D 2027 it stops running
-  // callbacks for the rest of the session as soon as any COM client (another
-  // process, or this plugin) has run a command with SendCommand (see
-  // RunOnHostAsync). Reads run from an Application.Idle tick; everything that
-  // changes the drawing, drives commands, or creates scratch objects runs
-  // inside the plugin's own C3DMCPHOP command.
+  // .ExecuteInCommandContextAsync any more: on Civil 3D 2027, in a
+  // disconnected Windows session, it stopped running callbacks for the rest of
+  // the session as soon as any COM client (another process, or this plugin)
+  // had run a command with SendCommand (see RunOnHostAsync). Reads run from an
+  // Application.Idle tick; everything that changes the drawing, drives
+  // commands, or creates scratch objects runs inside the plugin's own
+  // C3DMCPHOP command, started over COM (or typed, opt-in for issue #53: see
+  // CivilExecution.TypedInput.cs).
   private enum HostRoute
   {
     Idle,
@@ -183,6 +186,7 @@ public static class CivilExecution
 
     T? result = default;
     Exception? capturedException = null;
+    var inputWarnings = new List<string>();
 
     // Read on the request's thread: the expected identity is an AsyncLocal,
     // and the Idle and plugin-command routes run on the UI thread's
@@ -227,7 +231,7 @@ public static class CivilExecution
       return Task.CompletedTask;
     }, needsCommand: write || inCommand, needsQuietEditor: commandLine, cancellationToken,
       targetDocument: targetDocument, drainOnCancellation: targetDocument != null,
-      dispatchWarning: activation == null ? null : activation.AddWarning);
+      dispatchWarning: activation == null ? null : activation.AddWarning, inputWarning: inputWarnings.Add);
 
     // A targeted write must finish its host work before its caller restores
     // the previous drawing. RunOnHostAsync drains started work on cancellation.
@@ -239,7 +243,25 @@ public static class CivilExecution
       System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(capturedException).Throw();
     }
 
-    return result!;
+    return WithInputWarnings(result!, inputWarnings);
+  }
+
+  // Warnings from typed command-line input that has no evidence of running
+  // (issue #53) go into the operation's result, so a caller never gets plain
+  // success for an UNDO that did not run. Every operation that queues
+  // command-line input returns a Dictionary; anything else keeps only the log.
+  private static T WithInputWarnings<T>(T result, List<string> warnings)
+  {
+    if (warnings.Count == 0 || result is not IDictionary<string, object?> response) return result;
+    var combined = response.TryGetValue("warnings", out var existing) switch
+    {
+      true when existing is string single => new List<string> { single },
+      true when existing is IEnumerable<string> earlier => earlier.ToList(),
+      _ => new List<string>(),
+    };
+    combined.AddRange(warnings);
+    response["warnings"] = combined;
+    return result;
   }
 
   // Same host gate, command context, drawing-identity check, and document
@@ -513,40 +535,46 @@ public static class CivilExecution
       }
 
       var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
+      var inputWarnings = new List<string>();
       var hostTask = RunOnHostAsync(_ =>
       {
         cancellationToken.ThrowIfCancellationRequested();
         RequireExpectedDocument(expectedDrawingIdentity, "No commands were run.");
         QueueCommandLine(input);
         return Task.CompletedTask;
-      }, needsCommand: false, needsQuietEditor: true, cancellationToken);
+      }, needsCommand: false, needsQuietEditor: true, cancellationToken, inputWarning: inputWarnings.Add);
 
       await AwaitHostContextAsync(hostTask, cancellationToken);
-      return result;
+      return WithInputWarnings(result, inputWarnings);
     });
   }
 
-  // Command-line input requested by the running host operation; sent through
-  // COM SendCommand once the operation (and C3DMCPHOP) has finished. Only
-  // touched on the main thread, one host operation at a time.
+  // Command-line input requested by the running host operation; sent once the
+  // operation (and C3DMCPHOP) has finished, through the channel the operation
+  // took (COM SendCommand by default). Only touched on the main thread, one
+  // host operation at a time.
   private static readonly List<string> PendingCommandLine = new();
 
   // Main thread, inside a host operation: run this command-line input (for
-  // example "_.UNDO 2 ") right after the operation. Document.SendStringToExecute
-  // cannot be used: queued input mixes with C3DMCPHOP's COM input (seen live:
-  // UNDO received "C3DMCPHOP" as its answer instead of the count).
+  // example "_.UNDO 2 ") right after the operation. It takes the channel the
+  // operation's C3DMCPHOP was started with, never the other one: input queued
+  // with SendStringToExecute inside a COM-started C3DMCPHOP mixed with its COM
+  // input (seen live: UNDO received "C3DMCPHOP" as its answer instead of the
+  // count). With the default route that channel is COM.
   public static void QueueCommandLine(string input)
   {
-    // COM SendCommand needs a trailing space (or Enter) to submit the input.
+    // COM SendCommand needs a trailing space (or Enter) to submit the input;
+    // typed input reads the space as Enter too.
     PendingCommandLine.Add(input.TrimEnd('\r', '\n', ' ') + " ");
   }
 
   // Set by a host operation that left a command waiting at a prompt. After the
   // operation ends, successfully or not, ESC ESC goes to the document through
-  // COM SendCommand. Not SendStringToExecute: once any COM client has used
-  // SendCommand in the session (C3DMCPHOP always does), AutoCAD silently drops
-  // input queued with SendStringToExecute (issue #46: another plugin's
-  // commands were lost right after civil3d_plot). Main thread only.
+  // the operation's channel: COM SendCommand by default. Typed input
+  // (SendStringToExecute) was lost after COM-started commands (issue #46:
+  // another plugin's commands were lost right after civil3d_plot; issue #53:
+  // not every time, and it came back), so it is used only on the opt-in typed
+  // route. Main thread only.
   private static bool PendingCancel;
 
   public static void QueueCancelAfterOperation() => PendingCancel = true;
@@ -575,7 +603,9 @@ public static class CivilExecution
   //  - reads (needsCommand false) run in the Idle tick itself (application
   //    context, with their own document lock);
   //  - everything else is queued for the plugin's C3DMCPHOP command, which the
-  //    Idle tick starts with COM SendCommand from a background thread.
+  //    Idle tick starts with COM SendCommand from a background thread (the
+  //    default route; setHostRoute "typed" or "auto" starts it with
+  //    SendStringToExecute instead, for issue #53: CivilExecution.TypedInput.cs).
   //
   // Why not DocumentManager.ExecuteInCommandContextAsync, the usual route:
   // verified on Civil 3D 2027 (2026-10-11, diagnostic build, Windows session
@@ -600,13 +630,20 @@ public static class CivilExecution
   //  - while no Idle tick arrives at all for HostBusyTimeout (a modal dialog).
   // The busy checks, the no-Idle watchdog and the claim flag come from
   // jorgegarcias60/Civil3D-mcp#1 and #2.
+  // inputWarning receives the warnings of typed command-line input that has no
+  // evidence of running (SendTypedInputAsync); the COM channel has none.
   private static async Task RunOnHostAsync(Func<HostRoute, Task> operation, bool needsCommand, bool needsQuietEditor,
     CancellationToken cancellationToken, Document? targetDocument = null, TimeSpan? busyTimeout = null,
-    bool drainOnCancellation = false, Action<string>? dispatchWarning = null)
+    bool drainOnCancellation = false, Action<string>? dispatchWarning = null, Action<string>? inputWarning = null)
   {
     var timeout = busyTimeout ?? HostBusyTimeout;
     var dispatch = new RunCodeDispatchGate();
     var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    void ReportInputWarning(string? warning)
+    {
+      if (warning != null) inputWarning?.Invoke(warning);
+    }
 
     async Task RunOnce(HostRoute route)
     {
@@ -669,14 +706,32 @@ public static class CivilExecution
         CoreApp.Idle -= idle;
         Interlocked.Exchange(ref started, 1);
         // The COM document must be fetched on the main thread.
-        var acadDocument = (targetDocument ?? activeDocument)?.GetAcadDocument();
+        var inputDocument = targetDocument ?? activeDocument;
+        var acadDocument = inputDocument?.GetAcadDocument();
+        // One channel per operation, chosen here once (issue #53): its
+        // C3DMCPHOP start, then its command-line input and cancel. The route
+        // is read once, so setHostRoute changes the next operation only. The
+        // default route "com" always gives Com: today's code path below. A
+        // lost typed start under "auto" switches the channel to Com before
+        // the work starts.
+        var hopStart = Route.HopStart;
+        var channel = new StrongBox<InputChannel>(needsCommand
+          ? HostRouteDecision.HopStart(hopStart, Route.TypedInput.State)
+          : HostRouteDecision.IdleCommandLine(hopStart, Route.TypedInput.State));
         if (needsCommand)
         {
           var commandDocument = targetDocument ?? activeDocument
             ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
           // Register the whole COM dispatch before cancellation can start its
           // drain. If cancellation won first, do not fetch/queue the command.
-          if (!dispatch.TryDispatch(() => StartPluginCommandAsync(commandDocument,
+          if (channel.Value == InputChannel.Typed)
+          {
+            // The dispatch completes when the work has started (or the start
+            // was lost and, under "auto", SendCommand has returned).
+            if (!dispatch.TryDispatch(() => StartPluginCommandTypedAsync(commandDocument,
+                  () => RunOnce(HostRoute.PluginCommand), () => !dispatch.IsNotStarted, hopStart, channel, timeout))) return;
+          }
+          else if (!dispatch.TryDispatch(() => StartPluginCommandAsync(commandDocument,
                 () => RunOnce(HostRoute.PluginCommand), () => !dispatch.IsNotStarted))) return;
           await dispatch.DispatchDone;
         }
@@ -697,11 +752,21 @@ public static class CivilExecution
           if (PendingCancel)
           {
             PendingCancel = false;
-            if (acadDocument != null) await SendCancelAsync(acadDocument);
+            if (channel.Value == InputChannel.Typed)
+            {
+              if (inputDocument != null) ReportInputWarning(await SendTypedInputAsync(inputDocument, new[] { "\x03\x03" }));
+            }
+            else if (acadDocument != null) await SendCancelAsync(acadDocument);
           }
         }
         if (cancellationToken.IsCancellationRequested) return;
-        if (PendingCommandLine.Count > 0 && acadDocument != null)
+        if (PendingCommandLine.Count > 0 && channel.Value == InputChannel.Typed && inputDocument != null)
+        {
+          var input = PendingCommandLine.ToList();
+          PendingCommandLine.Clear();
+          ReportInputWarning(await SendTypedInputAsync(inputDocument, input));
+        }
+        else if (PendingCommandLine.Count > 0 && acadDocument != null)
         {
           var input = PendingCommandLine.ToList();
           PendingCommandLine.Clear();
@@ -813,10 +878,13 @@ public static class CivilExecution
   // main thread like an external client's and runs it at once, also in a
   // disconnected Windows session with nobody at the keyboard. Completes when SendCommand
   // has returned; the work itself reports through the request's own task.
-  private static async Task StartPluginCommandAsync(Document doc, Func<Task> work, Func<bool> finished)
+  // acadDocument is passed only by the typed route's COM fallback, which
+  // fetched it on the main thread before its typed attempt.
+  private static async Task StartPluginCommandAsync(Document doc, Func<Task> work, Func<bool> finished,
+    object? acadDocument = null)
   {
     // The COM document must be fetched on the main thread.
-    var acadDocument = doc.GetAcadDocument();
+    acadDocument ??= doc.GetAcadDocument();
     PluginCommandWork.Enqueue(work);
 
     await Task.Run(() => SendCommandWithRetry(acadDocument, "_" + PluginCommandName + " "));

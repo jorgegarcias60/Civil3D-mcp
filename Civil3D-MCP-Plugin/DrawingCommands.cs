@@ -45,6 +45,9 @@ public static class DrawingCommands
       ["logFilePath"] = PluginLog.LogFilePath,
       ["fileLoggingHealthy"] = PluginLog.IsFileLoggingHealthy,
       ["fileLoggingError"] = PluginLog.LastFileError,
+      // Issue #53 diagnostics: how C3DMCPHOP is started (com by default) and
+      // what is known about typed input (SendStringToExecute) in this session.
+      ["hostRoute"] = CivilExecution.Route.Report(),
       ["jobs"] = new Dictionary<string, object?>
       {
         ["total"] = jobs.Total,

@@ -60,7 +60,9 @@ public sealed class PluginEntry : IExtensionApplication
 
   // Runs host work queued by CivilExecution (writes, command sequences, and
   // reads that need a command; see CivilExecution.RunOnHostAsync). Started over
-  // COM by the plugin itself; typing it runs nothing when no work waits.
+  // COM by the plugin itself (or typed on the opt-in issue #53 route); typing
+  // it runs nothing when no work waits, and a late typed start finds its work
+  // dropped or inert (CivilExecution.TypedInput.cs).
   // UsePickSet lets work read the pickfirst selection (Editor.SelectImplied
   // returns an error outside such a command); Redraw keeps that selection and
   // its grips after the command.
@@ -74,6 +76,25 @@ public sealed class PluginEntry : IExtensionApplication
     catch (System.Exception ex)
     {
       PluginLog.Error("PluginEntry", $"{CivilExecution.PluginCommandName} failed", ex);
+    }
+  }
+
+  // Issue #53 typed-input probe: probeTypedInput (civil3d_health
+  // probeTypedInput) types it with SendStringToExecute and waits for it. It
+  // touches no database and only records that it ran and when. NoUndoMarker:
+  // a command that changes nothing still leaves an empty undo step otherwise
+  // (seen live for C3DMCPHOP previews), which would shift UNDO counts and
+  // clear redo; that the flag avoids it is not yet verified live.
+  [CommandMethod(CivilExecution.ProbeCommandName, CommandFlags.Modal | CommandFlags.NoHistory | CommandFlags.NoMultiple | CommandFlags.NoUndoMarker)]
+  public static void ProbeCommand()
+  {
+    try
+    {
+      CivilExecution.ProbeCommandRan();
+    }
+    catch (System.Exception ex)
+    {
+      PluginLog.Error("PluginEntry", $"{CivilExecution.ProbeCommandName} failed", ex);
     }
   }
 

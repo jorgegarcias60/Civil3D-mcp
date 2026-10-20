@@ -5,6 +5,24 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Typed input after COM commands, #53 (2026-10-19)
+
+`scratch-live-53.mjs` on fresh agent instances (one per run, stopped with `discardChanges`), copies of a plain block
+library under `C:\CAD-Tools\tmp\c3d-53`. Windows session connected and active, input desktop available, Civil 3D in
+front, not minimized, in every probe. Probe timeout 3 s, then 10 s of polling for a late run.
+
+| Run | Result |
+|---|---|
+| Baseline, every run | Typed probe ran 3 of 3, 2-10 ms. |
+| `com`, 3 writes (default COM-started `C3DMCPHOP`) | After the first write: 9 of 9 probes lost, `acedIsInputPending` false before and after, no late runs. |
+| `com --poke`, no write: plain PowerShell COM `SendCommand("(princ) ")` | First poke: 3 of 3 probes lost. Second poke: 3 of 3 ran again. |
+| `com --recover`: COM write, then one COM `(princ)` | Round 1: lost, then back after the poke (first probe lost, next two ran). Round 2: lost, and still lost after the poke. |
+| `typed`, 3 writes (`SendStringToExecute`-started `C3DMCPHOP`) | All writes ok (2.3-3.7 s); 9 of 9 probes ran (first after a write 47-252 ms, then 2-4 ms). |
+| `auto --poke-then-write`, 2 rounds | Round 1: the poke killed typed input; the typed start was lost (2 s), marked `dead`, the same write ran over COM (ok, 6.1 s). Round 2: a probe had found typed input alive again; the write started typed (6 ms) and typed input stayed alive. |
+| `typed --undo-check` | Write, probe, UNDO 1 removed the line; write, UNDO 1, probe, MREDO 1 restored it: typed UNDO/MREDO work and the probe leaves no undo step and keeps redo. |
+
+Not covered: the pickfirst selection through a typed start, a disconnected Windows session, Civil 3D 2027.
+
 ### Save and stop, #54 (2026-10-19)
 
 Agent instances started by scratch scripts on copies under `C:\CAD-Tools\tmp\c3d-54` (template: a copy of a
@@ -45,6 +63,28 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 | #44 | Before the guard, the second erase-and-re-create of viewports on the current layout killed acad.exe. With the guard: viewport `Erase` rejected; two in-place updates ok; `plot_layouts_to_pdf` plotted 1 page (17,929 bytes) with `regenerated: true`; the instance stayed healthy and stopped cleanly. |
 
 ## Offline (no Civil 3D needed)
+
+### Typed-input probe and typed hop start, issue #53 part 1 (2026-10-19)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10 (`HostRouteChecks`, 103 checks) | Pass. Route decisions (`com` always COM; `typed` always typed; `auto` typed until dead; Idle-route input typed only for typed/auto while not dead; only `auto` falls back), route names, default `com` and `unknown`; the typed-input state machine (probe ran, probe timeout, late probe, typed start, lost start logged once, late typed run keeps dead, lost typed input counted apart and sends later Idle-route input over COM); quiet idle timeout (counts from the send, a busy tick restarts it, a gap of more than 750 ms without ticks restarts it, a 3 s gap then needs 2 s of spaced ticks, overall limit); evidence for typed command-line input (command names from the first token; consumed only after its command started; quiet ticks with nothing pending are not evidence; no start in 2 s of quiet time is lost, also with input pending; busy or another command started is not started; a started command in a dialog is running; ESC ESC by CMDACTIVE); probe ledger (in time, timeout then late run, run by hand ignored); 32 start-versus-lost races give one outcome; late hops with the real `RunCodeDispatchGate` (auto fallback runs the work once, an inert lost item, an abandoned request then the next one); `acedIsInputPending` guard returns null for a missing library or export; the session report has its five fields. |
+| Harness totals | net8: 1392 ok, 0 failed (230 references). net10: 1392 ok, 0 failed (238 references). |
+| `tests/host_routes.test.ts` | `SendStringToExecute` is called once, in `SendTyped`, from the typed hop start, typed command-line input and the probe only; no other plugin file calls it. Default `com`, and the COM dispatch and `StartPluginCommandAsync` body unchanged for it. One channel per operation from a route read once; only a lost `auto` start changes it, to COM, before the COM start; cancel and command-line input follow it. Typed command-line input subscribes `CommandWillStart` before it is queued, is never resent over COM, and its warnings reach the results of `ExecuteOnHostAsync` and `RunCommandLineAsync`. Lost, busy, abandoned and failed typed starts drop their item; the start latency is taken at the top of the hop's work. The probe sends only from a quiet Idle tick inside the host gate, returns `cmdnames` and `cmdactive` when it skips, and is flagged `NoUndoMarker`. |
+| `tests/health_diagnostics.test.ts` | `probeTypedInput`, `probeTimeoutMs` (250-10000) and `hopStart` schema; no parameters sends only `getCivil3DHealth`; `hopStart` then probe then report, in that order; `probeTimeoutMs` is forwarded as `timeoutMs`, only with `probeTypedInput`; the response schema keeps `hostRoute` and `typedInputProbe`, still accepts a plugin without `hostRoute`, and accepts a route or state it does not know; an older plugin's METHOD_NOT_FOUND names issue #53; retry-safe and approval-free, and the descriptions say `hopStart` changes later writes on the instance, for scratch instances, and do not call the probe harmless. |
+| Old code | Before the review fixes (source stashed, new tests kept): 4 of 8 health tests and 5 of 12 host_routes tests fail, and the harness does not compile. With only the 750 ms gap rule reverted, its 4 harness checks fail. Before part 1: all 6 health tests and 6 of 11 host_routes tests failed, and the harness did not compile without `HostInputRoute.cs`. |
+| `npx vitest run --cache=false` | 930 passed in 63 files. |
+| `npm run build`, `docs:check` | Ok (212 entries). |
+| Plugin Release net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
+
+Not covered offline: whether typed starts, typed command-line input and the probe run in Civil 3D, the 2 s
+timeout against real latencies, and whether `NoUndoMarker` keeps the probe out of the undo history. The live
+matrix (`scratch-live-53.mjs`, not committed) covers typed starts, the probe (with `probeTimeoutMs` and a
+10 s wait for late runs after a probe that did not run), the 2 s timeout, recovery after a COM `(princ)`
+(`--recover`), and the probe's effect on undo and redo (`--undo-check`: write, probe, `UNDO 1` removes the
+write; write, `UNDO 1`, probe, `MREDO 1` restores it). Manual steps: pickfirst through a typed `C3DMCPHOP`,
+recovery after Escape of a COM-started command, and the disconnected session (disconnect RDP during a run
+with rounds >= 5).
 
 ### DBMOD after save and in the stop refusal, #54 (2026-10-19, `jorgegarcias60/dbmod-save-stop`)
 

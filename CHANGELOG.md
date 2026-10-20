@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Issue #53 diagnostics. `civil3d_health` reports `hostRoute`: how the plugin starts its
+  `C3DMCPHOP` command (`hopStart`, `com` by default) and what is known about typed input
+  in this session (`typedInput`: `unknown`, `alive` or `dead`). `probeTypedInput: true`
+  types the plugin's `C3DMCPPROBE` command (`NoUndoMarker`, changes no drawing data) with
+  `SendStringToExecute`, waits 3 s or `probeTimeoutMs`, and reports whether it ran, the
+  latency, `acedIsInputPending` before and after, the active commands (also when it skips
+  because the host is busy), and the Windows session (remote, connect state, input desktop,
+  foreground, minimized). `hopStart` sets how the attached instance starts every later
+  write until a restart: `typed` fails with HOST_BUSY when a typed start is lost (2 s of
+  quiet idle time; a gap without Idle ticks restarts it), `auto` then starts the same
+  operation over COM and stays on COM until a probe runs. An operation's command-line input
+  and ESC ESC cancel take the channel of its start. Typed command-line input counts as run
+  only when its command starts; otherwise the result carries a warning, and typed input
+  becomes `dead` when no command started in quiet idle time. The default route is
+  unchanged. Live on Civil 3D 2026 (connected session): after one COM `SendCommand`
+  (the default COM-started `C3DMCPHOP`, or a plain PowerShell `(princ)`) every later typed
+  probe was lost; with `hopStart: "typed"` typed input kept working over every write, and
+  typed UNDO / MREDO and the `auto` fallback worked. The README troubleshooting entry from
+  #46 now gives these results. Refs #53.
+
 - `civil3d_drawing save` no longer leaves the drawing marked modified. It ran
   `Database.SaveAs` inside a write transaction, and committing that transaction after the
   save set DBMOD to 1 again, so `civil3d_instance stop` refused every drawing saved by this
