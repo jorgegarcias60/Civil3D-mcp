@@ -68,7 +68,8 @@ describe("host routes", () => {
   });
 
   it("runs writes, command sequences and lock-only work inside the plugin's own command", () => {
-    expect(execution.match(/needsCommand: true, needsQuietEditor: false/g)?.length).toBe(2);
+    // Lock-only work, command sequences, and the save (no transaction around SaveAs, #54).
+    expect(execution.match(/needsCommand: true, needsQuietEditor: false/g)?.length).toBe(3);
     expect(execution).toContain('Civil3DCompatibility.InvokeComMethod(acadDocument, "SendCommand"');
     const entry = source("PluginEntry.cs");
     expect(entry).toContain("[CommandMethod(CivilExecution.PluginCommandName");

@@ -22,6 +22,22 @@
   typed UNDO / MREDO and the `auto` fallback worked. The README troubleshooting entry from
   #46 now gives these results. Refs #53.
 
+- `civil3d_drawing save` no longer leaves the drawing marked modified. It ran
+  `Database.SaveAs` inside a write transaction, and committing that transaction after the
+  save set DBMOD to 1 again, so `civil3d_instance stop` refused every drawing saved by this
+  tool. Seen live on a plain drawing: DBMOD 0 right after `SaveAs`, 1 once the save command
+  had ended. The save now runs under a document lock without a transaction; afterwards both
+  values are 0 and stop accepts the drawing. Fixes #54.
+
+- `civil3d_drawing save` returns DBMOD (value and flag names) twice: `dbmodAfterSave`,
+  read inside the save command right after `Database.SaveAs`, and `dbmodAfterCommand`,
+  read once that command has ended. It warns when the later value is not 0 or the two
+  differ. The `civil3d_instance stop` refusal lists each unsaved drawing with its DBMOD
+  flags and says when only view, window or field flags are set. The check reads each
+  drawing without making it active (switching could let other add-ins modify it); if the
+  COM read fails, it switches to the drawing as before and plugin.log records a warning.
+  It is skipped with `discardChanges: true`. Workflows that save pass the warnings on.
+
 - When the plugin starts, it removes the discovery files that crashed or killed instances
   left in `%LOCALAPPDATA%\Civil3DMcpPlugin\instances`: the pid has exited, or it now
   belongs to a process started at another time. A file whose process cannot be inspected

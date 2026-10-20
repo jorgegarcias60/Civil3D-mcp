@@ -235,13 +235,14 @@ public static class WorkflowCommands
     steps.Add(WorkflowStep("List Civil 3D object types", "drawing.list_object_types", "completed", objectTypesResult));
     steps.Add(WorkflowStep("List project data shortcuts", "project.data_shortcut_list", "completed", dataShortcutsResult));
 
-    object? saveResult = null;
+    Dictionary<string, object?>? saveResult = null;
     if (!string.IsNullOrWhiteSpace(saveAs))
     {
       saveResult = await RequireDictionary(
         DrawingCommands.SaveDrawingAsync(new JsonObject { ["saveAs"] = saveAs, ["overwrite"] = overwrite }),
         "saveDrawing");
       steps.Add(WorkflowStep("Save startup drawing", "drawing.save", "completed", saveResult));
+      AddSaveWarnings(saveResult, warnings);
     }
     else
     {
@@ -316,13 +317,15 @@ public static class WorkflowCommands
     var dataShortcutsResult = await RequireDictionary(DataShortcutCommands.ListDataShortcutsAsync(), "listDataShortcuts");
     steps.Add(WorkflowStep("List data shortcuts after setup", "project.data_shortcut_list", "completed", dataShortcutsResult));
 
-    object? saveResult = null;
+    Dictionary<string, object?>? saveResult = null;
+    var warnings = new List<string>();
     if (!string.IsNullOrWhiteSpace(saveAs))
     {
       saveResult = await RequireDictionary(
         DrawingCommands.SaveDrawingAsync(new JsonObject { ["saveAs"] = saveAs, ["overwrite"] = overwrite }),
         "saveDrawing");
       steps.Add(WorkflowStep("Save drawing after reference setup", "drawing.save", "completed", saveResult));
+      AddSaveWarnings(saveResult, warnings);
     }
     else
     {
@@ -339,7 +342,8 @@ public static class WorkflowCommands
         ["sync"] = syncResult,
         ["dataShortcuts"] = dataShortcutsResult,
         ["save"] = saveResult,
-      });
+      },
+      warnings);
   }
 
   public static async Task<object?> DrawingReadinessAuditWorkflowAsync(JsonObject? parameters)
@@ -588,6 +592,14 @@ public static class WorkflowCommands
     }
 
     throw new JsonRpcDispatchException("CIVIL3D.TRANSACTION_FAILED", $"Expected '{context}' to return an object result.");
+  }
+
+  // saveDrawing warns when the drawing still counts as modified after the
+  // save (DBMOD); the workflow reports the same warnings.
+  private static void AddSaveWarnings(Dictionary<string, object?> saveResult, List<string> warnings)
+  {
+    if (saveResult.TryGetValue("warnings", out var value) && value is IEnumerable<string> saveWarnings)
+      warnings.AddRange(saveWarnings);
   }
 
   private static Dictionary<string, object?> WorkflowResult(
