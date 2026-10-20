@@ -120,7 +120,7 @@ it("skips the unsaved check when discarding and lists each drawing's DBMOD (#54)
 
 it("reports DBMOD right after SaveAs and once the save command has ended (#54)", () => {
   const save = member(drawing, "public static async Task<object?> SaveDrawingAsync(JsonObject? parameters)");
-  const write = save.indexOf("await CivilExecution.WriteThenAfterCommandAsync((doc, civilDoc, database, transaction) =>");
+  const write = save.indexOf("await CivilExecution.LockedThenAfterCommandAsync((doc, civilDoc, database) =>");
   const saveAs = save.indexOf("database.SaveAs(targetPath, true, DwgVersion.Current, database.SecurityParameters);");
   const inCommand = save.indexOf("try { afterSave = InstanceCommands.ReadDbmod(doc); }");
   const afterCommand = save.indexOf("}, InstanceCommands.ReadDbmod);");
@@ -135,17 +135,22 @@ it("reports DBMOD right after SaveAs and once the save command has ended (#54)",
   expect(report).toContain('result["dbmodAfterCommand"] = afterCommandError == null ? DbmodFlags.ToJson(afterCommand) : null;');
   expect(report).toMatch(/var warnings = DbmodFlags\.SaveWarnings\(afterSave, afterSaveError,\s*afterCommandError == null \? afterCommand : null, afterCommandError\?\.Message\);\s*if \(warnings\.Count > 0\) result\["warnings"\] = warnings;\s*return result;$/);
 
-  // One hold of the host gate: the write, then an Idle read once the editor is quiescent, without the drawing-identity
-  // check (a Save As renames the drawing). Its failure is returned, never thrown over the written file.
-  const helper = member(execution, "public static Task<(T Result, TAfter? After, Exception? AfterError)> WriteThenAfterCommandAsync<T, TAfter>(");
+  // One hold of the host gate: the save in C3DMCPHOP under a document lock with NO transaction (committing one after
+  // SaveAs set DBMOD 1 again, seen live 2026-10-19), then an Idle read once the editor is quiescent, without the
+  // drawing-identity check (a Save As renames the drawing). Its failure is returned, never thrown over the written file.
+  const helper = member(execution, "public static Task<(T Result, TAfter? After, Exception? AfterError)> LockedThenAfterCommandAsync<T, TAfter>(");
   expect(helper.match(/ExecuteSerializedAsync/g)).toHaveLength(1);
-  const hostWrite = helper.indexOf("}, write: true, inCommand: false, commandLine: false, cancellationToken);");
+  expect(helper).not.toMatch(/StartTransaction|ExecuteOnHostAsync|write: true/);
+  expect(helper).toContain("using var documentLock = doc.LockDocument();");
+  const hostWrite = helper.indexOf("}, needsCommand: true, needsQuietEditor: false, cancellationToken);");
   const idleRead = helper.indexOf("}, needsCommand: false, needsQuietEditor: true, cancellationToken);");
   expect(hostWrite).toBeGreaterThan(0);
   expect(idleRead).toBeGreaterThan(hostWrite);
   expect(helper).toContain("if (written == null || !App.DocumentManager.Cast<Document>().Contains(written))");
-  expect(helper).not.toContain("RequireExpectedDocument");
-  expect(helper.slice(idleRead)).toMatch(/await AwaitHostContextAsync\(hostTask, cancellationToken\);\s*\}\s*catch \(Exception error\) \{ failure = error; \}\s*return \(result, failure == null \? value : default, failure\);/);
+  // The save itself checks the drawing identity, like every write; the read after it must not.
+  expect(helper.slice(0, hostWrite)).toContain("RequireExpectedDocument(expectedDrawingIdentity");
+  expect(helper.slice(hostWrite)).not.toContain("RequireExpectedDocument");
+  expect(helper.slice(idleRead)).toMatch(/await AwaitHostContextAsync\(hostTask, cancellationToken\);\s*\}\s*catch \(Exception error\) \{ failure = error; \}\s*return \(result!, failure == null \? value : default, failure\);/);
 
   expect(workflow.match(/AddSaveWarnings\(saveResult, warnings\);/g)).toHaveLength(2);
   expect(member(workflow, "private static void AddSaveWarnings(")).toContain('saveResult.TryGetValue("warnings", out var value) && value is IEnumerable<string> saveWarnings');

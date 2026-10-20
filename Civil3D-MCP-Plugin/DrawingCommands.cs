@@ -199,7 +199,8 @@ public static class DrawingCommands
     var overwrite = PluginRuntime.GetOptionalBool(parameters, "overwrite") ?? false;
     int? afterSave = null;
     string? afterSaveError = null;
-    var (result, afterCommand, afterCommandError) = await CivilExecution.WriteThenAfterCommandAsync((doc, civilDoc, database, transaction) =>
+    // No transaction around the save: committing one after SaveAs marks the drawing modified again (#54).
+    var (result, afterCommand, afterCommandError) = await CivilExecution.LockedThenAfterCommandAsync((doc, civilDoc, database) =>
     {
       var saveAs = PluginRuntime.GetOptionalString(parameters, "saveAs");
       var targetPath = string.IsNullOrWhiteSpace(saveAs) ? database.Filename : saveAs;
