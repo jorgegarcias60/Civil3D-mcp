@@ -88,6 +88,22 @@ Saves the current drawing. Requires explicit confirmation from the LLM.
 | action    | `"save"` | yes      | —                                       |
 | saveAs    | string     | no       | If provided, saves to this new file path |
 
+**Response data:**
+
+```
+{
+  saved: boolean,
+  filePath: string,
+  dbmodAfterSave?: { value: number, flags: string[] } | null,     // inside the save command, right after Database.SaveAs
+  dbmodAfterCommand?: { value: number, flags: string[] } | null,  // once the save command has ended
+  warnings?: string[]  // DBMOD still not 0, changed between the reads, or could not be read
+}
+```
+
+Either DBMOD is null when it could not be read. `dbmodAfterCommand` is closer to what
+`civil3d_instance stop` sees, but a 0 there does not promise that stop passes: anything
+that marks the drawing later still counts.
+
 #### `undo`
 
 Undoes the last operation. Uses Civil 3D's built-in undo stack.

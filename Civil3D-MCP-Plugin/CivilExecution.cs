@@ -407,6 +407,78 @@ public static class CivilExecution
     return ExecuteAsync(action, true);
   }
 
+  // A save, then `after` for the same document from a later Idle tick, once
+  // no command is active and the editor is quiescent: the save's C3DMCPHOP
+  // command and its CommandEnded handlers have all finished. The save runs
+  // under a document lock with NO transaction: committing the write
+  // transaction after Database.SaveAs marked the drawing modified again
+  // (DBMOD 0 right after SaveAs, 1 once the command ended, on a plain drawing,
+  // Civil 3D 2026, issue #54), so stop refused every drawing saved by this
+  // tool. One hold of the host gate covers both steps, so no other request
+  // runs in between. `after` gets no drawing-identity check, since a Save As
+  // renames the drawing; the document only has to be still open. A failure of
+  // `after` is returned with the save's result, never thrown over it.
+  public static Task<(T Result, TAfter? After, Exception? AfterError)> LockedThenAfterCommandAsync<T, TAfter>(
+    Func<Document, CivilDocument, Database, T> action, Func<Document, TAfter> after)
+  {
+    return ExecuteSerializedAsync<(T, TAfter?, Exception?)>(async cancellationToken =>
+    {
+      if (App.DocumentManager.MdiActiveDocument == null)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active drawing is open in Civil 3D.");
+      }
+
+      Document? written = null;
+      T? result = default;
+      Exception? capturedException = null;
+      var expectedDrawingIdentity = PluginRuntime.GetExpectedDrawingIdentity();
+      var lockedTask = RunOnHostAsync(_ =>
+      {
+        try
+        {
+          cancellationToken.ThrowIfCancellationRequested();
+          var doc = RequireExpectedDocument(expectedDrawingIdentity, "No drawing changes were made.");
+          var civilDoc = CivilApplication.ActiveDocument ?? throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "No active Civil 3D document is available.");
+          using var documentLock = doc.LockDocument();
+          written = doc;
+          result = action(doc, civilDoc, doc.Database);
+        }
+        catch (Exception ex)
+        {
+          capturedException = ex;
+        }
+
+        return Task.CompletedTask;
+      }, needsCommand: true, needsQuietEditor: false, cancellationToken);
+      await AwaitHostContextAsync(lockedTask, cancellationToken);
+      if (capturedException != null)
+      {
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(capturedException).Throw();
+      }
+
+      TAfter? value = default;
+      Exception? failure = null;
+      try
+      {
+        var hostTask = RunOnHostAsync(_ =>
+        {
+          try
+          {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (written == null || !App.DocumentManager.Cast<Document>().Contains(written))
+              throw new JsonRpcDispatchException("CIVIL3D.NO_DRAWING", "The drawing is no longer open.");
+            value = after(written);
+          }
+          catch (Exception error) { failure = error; }
+          return Task.CompletedTask;
+        }, needsCommand: false, needsQuietEditor: true, cancellationToken);
+        await AwaitHostContextAsync(hostTask, cancellationToken);
+      }
+      catch (Exception error) { failure = error; }
+      return (result!, failure == null ? value : default, failure);
+    });
+  }
+
   // A read that needs a command around it: it creates scratch objects that
   // must disappear when the transaction is aborted (TinVolumeSurface.Create
   // for volumes), or it uses the pickfirst selection (Editor.SelectImplied

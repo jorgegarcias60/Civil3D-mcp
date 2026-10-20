@@ -418,7 +418,14 @@ export class InstanceManager {
     } else await this.deps.quit(instance, args.discardChanges === true);
     const started = this.deps.now();
     while (this.deps.alive(pid) && this.deps.now() - started < timeoutMs) await this.deps.wait(500);
-    if (this.deps.alive(pid)) throw new Error(`Civil 3D instance ${pid} did not exit within 60 seconds. It was not killed.`);
+    if (this.deps.alive(pid)) {
+      // Without discardChanges the plugin checks DBMOD again just before it
+      // quits, and cancels when a drawing changed after its reply. Only
+      // plugin.log records that.
+      const hint = args.discardChanges === true ? ""
+        : " If a drawing changed after the unsaved check, the plugin cancelled the quit: plugin.log names the drawing and its DBMOD flags.";
+      throw new Error(`Civil 3D instance ${pid} did not exit within 60 seconds. It was not killed.${hint}`);
+    }
     await rm(join(this.root, "instances", `${pid}.json`), { force: true });
     const pending = this.pending.get(pid);
     if (pending) await this.withdrawPending(pending);

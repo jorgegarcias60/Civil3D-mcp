@@ -5,6 +5,18 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Save and stop, #54 (2026-10-19)
+
+Agent instances started by scratch scripts on copies under `C:\CAD-Tools\tmp\c3d-54` (template: a copy of a
+plain block library, no xrefs); every instance was stopped at the end.
+
+| Check | Result |
+|---|---|
+| Per-drawing read (A active and clean, B edited) | stop refused listing only B, "B.dwg (DBMOD 1 (objects))"; A's system variable and COM value 0: the COM read of the inactive B is B's own. |
+| Save before the fix (one drawing: add a Line, save) | DBMOD 1 after the edit; `dbmodAfterSave` 0, `dbmodAfterCommand` 1 (objects) with both warnings; an independent read 1; stop without `discardChanges` refused. The commit of the write transaction after `SaveAs` marked the drawing again. |
+| Save after the fix (no transaction around `SaveAs`) | `dbmodAfterSave` 0, `dbmodAfterCommand` 0, no warnings; independent read 0; stop without `discardChanges` stopped the instance. |
+| Test-script note | Closing and reopening a drawing from inside a read-mode run (the script's workaround, the plugin has no open action) left COM answering RPC_E_SERVERCALL_RETRYLATER for every later write; not a plugin path. |
+
 ### Open issues #13, #22, #39, #45, #46 (2026-10-16)
 
 Plugin installed from the combined branch with Civil 3D closed; a scratch instance started by CAD-Tools
@@ -33,6 +45,26 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 | #44 | Before the guard, the second erase-and-re-create of viewports on the current layout killed acad.exe. With the guard: viewport `Erase` rejected; two in-place updates ok; `plot_layouts_to_pdf` plotted 1 page (17,929 bytes) with `regenerated: true`; the instance stayed healthy and stopped cleanly. |
 
 ## Offline (no Civil 3D needed)
+
+### DBMOD after save and in the stop refusal, #54 (2026-10-19, `jorgegarcias60/dbmod-save-stop`)
+
+| Check | Result |
+|---|---|
+| Harness net8 / net10 (`DbmodFlagsChecks`): bit names in bit order (`objects`, `variables`, `window`, `view`, `fields`, `bit N` by value), DBMOD read from a 16-bit short unsigned (a negative short gives `bit 32768`), `Format`, content bits 1 and 4 only, `ToJson`, the drawing list, the refusal text with and without the display-only sentence, an undocumented bit not called a display flag, `/unsaved/i`, the save warnings for both reads (still modified, changed between the reads, a failed read) | Pass. 1313 ok on each framework (24 new), 230 / 238 references. The harness does not build without `DbmodFlags.cs`, or against the first #54 commit. |
+| `tests/instance_plugin_lifecycle.test.ts` | `ReadDbmod` reads the active drawing's system variable and any other drawing's COM `GetVariable("DBMOD")` with no `MdiActiveDocument` assignment, all three paths masked to 16 bits; only the COM-failure fallback switches, after a warning. Both checks use it; the check is skipped with `discardChanges`; the refusal words stay; the deferred check logs each drawing's flags. Save reads DBMOD after `database.SaveAs` inside the save command, then again from an Idle tick once the editor is quiescent, under one hold of the host gate and without the drawing-identity check; a failed read gives null and a warning, never an error; both saving workflows pass the warnings on. The two changed checks fail on f6d9011, all three on f1604ba. |
+| `tests/drawing_runtime_domain.test.ts` (save response schema) | The old `{saved, filePath}`, the new fields (`dbmodAfterSave`, `dbmodAfterCommand`), null for either and extra fields pass; a missing `saved` or `filePath`, a negative value, missing flags or value, or non-array warnings are refused (fails on the old passthrough schema, and on f6d9011 for `dbmodAfterCommand`). |
+| `tests/instance_manager.test.ts` | A quit timeout without `discardChanges` points at plugin.log; with it the message is unchanged. Fails on the old code. |
+| `tests/instance_routing.test.ts` | Its mock now returns a real save result (`saved`, `filePath`), which the save schema needs. |
+| `npm run build`, `npx vitest run --cache=false`, `npm run docs:check` | Pass. 924 tests in 62 files; tool reference current (212 entries). |
+| Plugin Release net8 (refs-2026), net10 (C_References), net8 again | 0 warnings, 0 errors. |
+
+Live test pending (needs Civil 3D): `scratch-live-54.mjs` (not committed; its template must have no xrefs and no
+missing fonts, since B is opened inside a run_code read). Before anything is saved, with the active A at DBMOD 0 by an
+independent system-variable read, it stops with a modified inactive B (expect only B listed), then with B reopened
+clean and A modified (expect only A listed). Together these show that the COM read is per drawing; an A that is not 0
+at the start makes them inconclusive. Then it saves A, prints `dbmodAfterSave` and `dbmodAfterCommand` next to a later
+independent read, and stops with B modified again: A is listed only if the save left DBMOD set (H1). Then the Design
+Master drawing: save, stop, compare the bits.
 
 ### Stale discovery files #39, COM cancel #46, reference docs #47, order-dependent tests #34 (2026-10-16)
 

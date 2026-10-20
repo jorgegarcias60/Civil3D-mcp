@@ -7,6 +7,25 @@ const DrawingSettingsResponseSchema = z.object({ coordinateSystem: z.string().nu
 const SelectedCivilObjectsResponseSchema = z.array(z.object({ handle: z.string(), objectType: z.string(), name: z.string().optional(), description: z.string().optional() }));
 const CivilObjectTypesResponseSchema = z.array(z.string());
 const GenericResponseSchema = z.object({}).passthrough();
+const DbmodSchema = z.object({ value: z.number().int().nonnegative(), flags: z.array(z.string()) }).passthrough();
+/**
+ * saveDrawing. Each DBMOD is a value and its bit names ("objects",
+ * "variables", "window", "view", "fields", "bit N"). `dbmodAfterSave` is read
+ * inside the save command right after Database.SaveAs, before its transaction
+ * commits. `dbmodAfterCommand` is read once that command has ended, which is
+ * closer to what civil3d_instance stop sees; 0 there still does not promise
+ * that stop passes, since anything that marks the drawing later counts.
+ * Either is null when it could not be read, and absent from plugins older
+ * than issue #54. `warnings` says when the drawing still counts as modified
+ * (stop refuses it without discardChanges) or DBMOD changed between the reads.
+ */
+export const DrawingSaveResponseSchema = z.object({
+  saved: z.boolean(),
+  filePath: z.string(),
+  dbmodAfterSave: DbmodSchema.nullable().optional(),
+  dbmodAfterCommand: DbmodSchema.nullable().optional(),
+  warnings: z.array(z.string()).optional(),
+}).passthrough();
 
 /**
  * getDrawingUnits. `lengthUnit` is the AutoCAD UnitsValue name from INSUNITS
@@ -57,7 +76,7 @@ export const DRAWING_RUNTIME_DOMAIN_DEFINITION: DomainToolDefinition = {
   actions: {
     info: { action: "info", inputSchema: DrawingInfoArgs, responseSchema: DrawingInfoResponseSchema, capabilities: ["query", "inspect"], requiresActiveDrawing: false, safeForRetry: true, pluginMethods: ["getDrawingInfo"], execute: async () => await withApplicationConnection(async (appClient) => await appClient.sendCommand("getDrawingInfo", {})) },
     new: { action: "new", inputSchema: DrawingNewArgs, responseSchema: GenericResponseSchema, capabilities: ["create", "manage"], requiresActiveDrawing: false, safeForRetry: false, pluginMethods: ["newDrawing"], execute: async (args) => await withApplicationConnection(async (appClient) => await appClient.sendCommand("newDrawing", { templatePath: args.templatePath })) },
-    save: { action: "save", inputSchema: DrawingSaveArgs, responseSchema: GenericResponseSchema, capabilities: ["edit", "manage"], requiresActiveDrawing: false, safeForRetry: false, pluginMethods: ["saveDrawing"], execute: async (args) => await withApplicationConnection(async (appClient) => await appClient.sendCommand("saveDrawing", { saveAs: args.saveAs, overwrite: args.overwrite ?? false })) },
+    save: { action: "save", inputSchema: DrawingSaveArgs, responseSchema: DrawingSaveResponseSchema, capabilities: ["edit", "manage"], requiresActiveDrawing: false, safeForRetry: false, pluginMethods: ["saveDrawing"], execute: async (args) => await withApplicationConnection(async (appClient) => await appClient.sendCommand("saveDrawing", { saveAs: args.saveAs, overwrite: args.overwrite ?? false })) },
     undo: { action: "undo", inputSchema: DrawingUndoArgs, responseSchema: GenericResponseSchema, capabilities: ["edit", "manage"], requiresActiveDrawing: true, safeForRetry: false, pluginMethods: ["undoDrawing"], execute: async (args) => await withApplicationConnection(async (appClient) => await appClient.sendCommand("undoDrawing", { steps: args.steps ?? 1 })) },
     redo: { action: "redo", inputSchema: DrawingRedoArgs, responseSchema: GenericResponseSchema, capabilities: ["edit", "manage"], requiresActiveDrawing: true, safeForRetry: false, pluginMethods: ["redoDrawing"], execute: async (args) => await withApplicationConnection(async (appClient) => await appClient.sendCommand("redoDrawing", { steps: args.steps ?? 1 })) },
     units: { action: "units", inputSchema: DrawingUnitsArgsSchema, responseSchema: DrawingUnitsResponseSchema, capabilities: ["query", "inspect"], requiresActiveDrawing: true, safeForRetry: true, pluginMethods: ["getDrawingUnits"], execute: async () => await withApplicationConnection(async (appClient) => await appClient.sendCommand("getDrawingUnits", {})) },

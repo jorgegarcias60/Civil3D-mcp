@@ -188,10 +188,19 @@ public static class DrawingCommands
     });
   }
 
-  public static Task<object?> SaveDrawingAsync(JsonObject? parameters)
+  // civil3d_instance stop refuses any drawing whose DBMOD is not 0, saved or
+  // not (issue #54), so the save reports DBMOD twice: dbmodAfterSave inside
+  // the save command right after Database.SaveAs (does SaveAs clear it?), and
+  // dbmodAfterCommand once that command, its commit and its CommandEnded
+  // handlers have finished. Something that marks the drawing later still
+  // counts for stop. A failed read never fails the written file.
+  public static async Task<object?> SaveDrawingAsync(JsonObject? parameters)
   {
     var overwrite = PluginRuntime.GetOptionalBool(parameters, "overwrite") ?? false;
-    return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
+    int? afterSave = null;
+    string? afterSaveError = null;
+    // No transaction around the save: committing one after SaveAs marks the drawing modified again (#54).
+    var (result, afterCommand, afterCommandError) = await CivilExecution.LockedThenAfterCommandAsync((doc, civilDoc, database) =>
     {
       var saveAs = PluginRuntime.GetOptionalString(parameters, "saveAs");
       var targetPath = string.IsNullOrWhiteSpace(saveAs) ? database.Filename : saveAs;
@@ -207,12 +216,21 @@ public static class DrawingCommands
         : FileBoundary.ResolveExportPath(targetPath, overwrite, ".dwg");
       database.SaveAs(targetPath, true, DwgVersion.Current, database.SecurityParameters);
 
+      try { afterSave = InstanceCommands.ReadDbmod(doc); }
+      catch (Exception error) { afterSaveError = error.Message; }
       return new Dictionary<string, object?>
       {
         ["saved"] = true,
         ["filePath"] = targetPath,
       };
-    });
+    }, InstanceCommands.ReadDbmod);
+
+    result["dbmodAfterSave"] = afterSave is int saved ? DbmodFlags.ToJson(saved) : null;
+    result["dbmodAfterCommand"] = afterCommandError == null ? DbmodFlags.ToJson(afterCommand) : null;
+    var warnings = DbmodFlags.SaveWarnings(afterSave, afterSaveError,
+      afterCommandError == null ? afterCommand : null, afterCommandError?.Message);
+    if (warnings.Count > 0) result["warnings"] = warnings;
+    return result;
   }
 
   public static async Task<object?> NewDrawingAsync(JsonObject? parameters)

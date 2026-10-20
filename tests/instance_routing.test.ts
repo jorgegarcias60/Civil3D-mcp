@@ -313,7 +313,9 @@ describe("instance routing over the real TCP transport", () => {
       const port = (socket.address() as net.AddressInfo).port;
       requests.push({ port, method: request.method });
       socket.end(JSON.stringify({ jsonrpc: "2.0", id: request.id,
-        result: request.method === "getCivil3DHealth" ? { drawingLoaded: true } : { fileName: `drawing-${port}.dwg` } }));
+        result: request.method === "getCivil3DHealth" ? { drawingLoaded: true }
+          : request.method === "saveDrawing" ? { saved: true, filePath: `drawing-${port}.dwg` }
+          : { fileName: `drawing-${port}.dwg` } }));
     })));
     await Promise.all(servers.map(server => new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))));
     try {

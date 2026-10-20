@@ -788,6 +788,13 @@ describe("stop lifecycle", () => {
     await expect(service.stop({ pid: 101 }, 1000)).rejects.toThrow("was not killed");
     expect(await readFile(join(root, "instances", "101.json"), "utf8")).toBe("kept");
   });
+
+  it("points at plugin.log when a quit without discard times out (#54)", async () => {
+    const { service, deps } = manager(); instances = [own()]; deps.alive.mockReturnValue(true);
+    await expect(service.stop({ pid: 101 }, 1000)).rejects.toThrow(
+      "It was not killed. If a drawing changed after the unsaved check, the plugin cancelled the quit: plugin.log names the drawing and its DBMOD flags.");
+    await expect(service.stop({ pid: 101, discardChanges: true }, 1000)).rejects.toThrow(/did not exit within 60 seconds\. It was not killed\.$/);
+  });
 });
 
 describe("shortcuts and approvals", () => {
