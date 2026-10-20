@@ -5,6 +5,24 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Typed input after COM commands, #53 (2026-10-19)
+
+`scratch-live-53.mjs` on fresh agent instances (one per run, stopped with `discardChanges`), copies of a plain block
+library under `C:\CAD-Tools\tmp\c3d-53`. Windows session connected and active, input desktop available, Civil 3D in
+front, not minimized, in every probe. Probe timeout 3 s, then 10 s of polling for a late run.
+
+| Run | Result |
+|---|---|
+| Baseline, every run | Typed probe ran 3 of 3, 2-10 ms. |
+| `com`, 3 writes (default COM-started `C3DMCPHOP`) | After the first write: 9 of 9 probes lost, `acedIsInputPending` false before and after, no late runs. |
+| `com --poke`, no write: plain PowerShell COM `SendCommand("(princ) ")` | First poke: 3 of 3 probes lost. Second poke: 3 of 3 ran again. |
+| `com --recover`: COM write, then one COM `(princ)` | Round 1: lost, then back after the poke (first probe lost, next two ran). Round 2: lost, and still lost after the poke. |
+| `typed`, 3 writes (`SendStringToExecute`-started `C3DMCPHOP`) | All writes ok (2.3-3.7 s); 9 of 9 probes ran (first after a write 47-252 ms, then 2-4 ms). |
+| `auto --poke-then-write`, 2 rounds | Round 1: the poke killed typed input; the typed start was lost (2 s), marked `dead`, the same write ran over COM (ok, 6.1 s). Round 2: a probe had found typed input alive again; the write started typed (6 ms) and typed input stayed alive. |
+| `typed --undo-check` | Write, probe, UNDO 1 removed the line; write, UNDO 1, probe, MREDO 1 restored it: typed UNDO/MREDO work and the probe leaves no undo step and keeps redo. |
+
+Not covered: the pickfirst selection through a typed start, a disconnected Windows session, Civil 3D 2027.
+
 ### Open issues #13, #22, #39, #45, #46 (2026-10-16)
 
 Plugin installed from the combined branch with Civil 3D closed; a scratch instance started by CAD-Tools

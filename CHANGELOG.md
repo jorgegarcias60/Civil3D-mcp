@@ -16,8 +16,11 @@
   and ESC ESC cancel take the channel of its start. Typed command-line input counts as run
   only when its command starts; otherwise the result carries a warning, and typed input
   becomes `dead` when no command started in quiet idle time. The default route is
-  unchanged. The README troubleshooting entry from #46 now says what is known: not every
-  time, recovery seen. Refs #53.
+  unchanged. Live on Civil 3D 2026 (connected session): after one COM `SendCommand`
+  (the default COM-started `C3DMCPHOP`, or a plain PowerShell `(princ)`) every later typed
+  probe was lost; with `hopStart: "typed"` typed input kept working over every write, and
+  typed UNDO / MREDO and the `auto` fallback worked. The README troubleshooting entry from
+  #46 now gives these results. Refs #53.
 
 - When the plugin starts, it removes the discovery files that crashed or killed instances
   left in `%LOCALAPPDATA%\Civil3DMcpPlugin\instances`: the pid has exited, or it now
