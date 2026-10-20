@@ -5,6 +5,18 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Save and stop, #54 (2026-10-19)
+
+Agent instances started by scratch scripts on copies under `C:\CAD-Tools\tmp\c3d-54` (template: a copy of a
+plain block library, no xrefs); every instance was stopped at the end.
+
+| Check | Result |
+|---|---|
+| Per-drawing read (A active and clean, B edited) | stop refused listing only B, "B.dwg (DBMOD 1 (objects))"; A's system variable and COM value 0: the COM read of the inactive B is B's own. |
+| Save before the fix (one drawing: add a Line, save) | DBMOD 1 after the edit; `dbmodAfterSave` 0, `dbmodAfterCommand` 1 (objects) with both warnings; an independent read 1; stop without `discardChanges` refused. The commit of the write transaction after `SaveAs` marked the drawing again. |
+| Save after the fix (no transaction around `SaveAs`) | `dbmodAfterSave` 0, `dbmodAfterCommand` 0, no warnings; independent read 0; stop without `discardChanges` stopped the instance. |
+| Test-script note | Closing and reopening a drawing from inside a read-mode run (the script's workaround, the plugin has no open action) left COM answering RPC_E_SERVERCALL_RETRYLATER for every later write; not a plugin path. |
+
 ### Open issues #13, #22, #39, #45, #46 (2026-10-16)
 
 Plugin installed from the combined branch with Civil 3D closed; a scratch instance started by CAD-Tools
