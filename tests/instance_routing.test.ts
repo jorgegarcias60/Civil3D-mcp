@@ -370,7 +370,56 @@ describe("instance routing over the real TCP transport", () => {
     registry.read.mockResolvedValue({ hasDiscoveryFiles: false, instances: [] });
     const { withApplicationConnection } = await import("../src/utils/ConnectionManager.js");
     const operation = vi.fn();
-    await expect(withApplicationConnection(operation)).rejects.toThrow("no longer responsive");
+    await expect(withApplicationConnection(operation)).rejects.toThrow("no longer available");
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("sends job status to an attached instance that missed its health probe while busy (issue #58)", async () => {
+    vi.stubEnv("CIVIL3D_PORT", undefined);
+    const requests: { method: string; instanceIdentity: unknown }[] = [];
+    const server = net.createServer(socket => socket.once("data", data => {
+      const request = JSON.parse(data.toString());
+      requests.push({ method: request.method, instanceIdentity: request.instanceIdentity });
+      socket.end(JSON.stringify({ jsonrpc: "2.0", id: request.id,
+        result: { jobId: request.params.jobId, state: "completed", operation: "publish_sheet_set" } }));
+    }));
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { setAttachedInstance, attachedInstance } = await import("../src/utils/instanceSession.js");
+      const instance = { instanceApi: 1 as const, pid: 169716, port: (server.address() as net.AddressInfo).port,
+        tokenPath: "unused", startedAtUtc: "2026-10-21T02:16:37.2489107+00:00", updatedAtUtc: new Date().toISOString(),
+        acadVersion: "26.0s", owner: "user" as const, ownerSession: null, claimId: null, documents: [], responsive: true };
+      setAttachedInstance(instance);
+      // Same process, same start time, but the 1.2 s probe timed out during a publish.
+      registry.read.mockResolvedValue({ hasDiscoveryFiles: true, instances: [{ ...instance, responsive: false }] });
+      const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { captureDomainToolHandlers } = await import("../src/tools/domainRuntime.js");
+      const { JOB_DOMAIN_DEFINITION } = await import("../src/tools/domains/jobDomain.js");
+      const { getToolHandler } = await import("../src/tools/toolHandlerRegistry.js");
+      captureDomainToolHandlers(JOB_DOMAIN_DEFINITION);
+      const reply = await getToolHandler("civil3d_job")!({ action: "status", jobId: "0163ad6a" });
+      expect(reply.isError).not.toBe(true);
+      expect(JSON.stringify(reply)).toContain("completed");
+      expect(requests).toEqual([{ method: "getJobStatus",
+        instanceIdentity: { pid: instance.pid, startedAtUtc: instance.startedAtUtc } }]);
+      expect(attachedInstance()?.pid).toBe(instance.pid);
+      expect(warn.mock.calls.flat().join("\n")).toContain("missed the health probe");
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
+  it("still refuses an attached instance that was restarted under the same pid", async () => {
+    vi.stubEnv("CIVIL3D_PORT", undefined);
+    const { setAttachedInstance } = await import("../src/utils/instanceSession.js");
+    const instance = { instanceApi: 1 as const, pid: 169716, port: 8757, tokenPath: "unused",
+      startedAtUtc: "2026-10-21T02:16:37Z", updatedAtUtc: "2026-10-21T02:16:37Z", acadVersion: "26.0s",
+      owner: "user" as const, ownerSession: null, claimId: null, documents: [], responsive: true };
+    setAttachedInstance(instance);
+    registry.read.mockResolvedValue({ hasDiscoveryFiles: true,
+      instances: [{ ...instance, startedAtUtc: "2026-10-21T03:00:00Z", responsive: false }] });
+    const { withApplicationConnection } = await import("../src/utils/ConnectionManager.js");
+    const operation = vi.fn();
+    await expect(withApplicationConnection(operation)).rejects.toThrow(
+      "Attached Civil 3D instance 169716 is no longer available: it was closed or restarted, or its owner changed.");
     expect(operation).not.toHaveBeenCalled();
   });
 
