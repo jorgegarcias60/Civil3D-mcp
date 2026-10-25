@@ -27,6 +27,13 @@ describe("MCP server startup", () => {
       expect(drawing?.outputSchema).toBeDefined();
       expect(drawing?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
       expect(help?.inputSchema.properties).toHaveProperty("action");
+      // Every reply is { action, result }: a strict client (Python SDK, Hermes) rejects the reply when the advertised
+      // schema forbids extra properties but does not list "result".
+      for (const tool of tools.tools) {
+        const schema = tool.outputSchema as { properties?: Record<string, unknown>; additionalProperties?: unknown } | undefined;
+        if (!schema?.properties || schema.additionalProperties !== false) continue;
+        expect(Object.keys(schema.properties), tool.name).not.toEqual(["action"]);
+      }
 
       const resources = await client.listResources();
       expect(resources.resources.map((resource) => resource.uri)).toEqual(expect.arrayContaining([
