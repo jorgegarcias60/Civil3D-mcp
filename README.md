@@ -169,6 +169,11 @@ pins that instance through approval validation and execution. Every
 discovery-routed RPC checks that process identity before dispatch, so a replacement
 listener on the same port is refused. Requests are also refused until listener
 identity initialization finishes. `list`, `attach` and `detach` need no approval token.
+A busy attached instance stays attached: when its discovery record still matches the
+attached process but the 1.2-second health probe misses (a publish keeps Civil 3D busy
+for seconds), the request is sent anyway and its own timeout decides; the server logs a
+warning. A closed or restarted instance, or one with a new owner, is refused with "no
+longer available".
 Set `job` on `start` or `attach`, or set `CIVIL3D_SESSION_LABEL`, to identify the
 session. Labels use the explicit job first, then the environment label, then the
 folder after `Jobs` in the drawing path, then the drawing filename. An explicit

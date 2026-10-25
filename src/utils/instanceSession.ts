@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { join, win32 } from "node:path";
 import { readInstanceRegistry, pluginDataRoot, describeInstances, processStartTimes, type CivilInstance, type RegistrySnapshot } from "./instanceRegistry.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("InstanceSession");
 
 export interface InstanceEndpoint { port: number; tokenPath: string; pid?: number; startedAtUtc?: string; owner?: "user" | "agent"; legacyFallback?: boolean }
 export const sessionId = randomUUID();
@@ -109,7 +112,12 @@ async function resolveUnpinnedEndpoint(attachment: CivilInstance | undefined): P
   if (attachment) {
     const live = snapshot.instances.find(i => i.pid === attachment.pid && i.startedAtUtc === attachment.startedAtUtc
       && i.port === attachment.port && i.owner === attachment.owner && i.ownerSession === attachment.ownerSession);
-    if (!live?.responsive) throw new Error(`Attached Civil 3D instance ${attachment.pid} is no longer responsive. Call civil3d_instance list and attach again.`);
+    if (!live) throw new Error(`Attached Civil 3D instance ${attachment.pid} is no longer available: it was closed or restarted, or its owner changed. Call civil3d_instance list and attach again.`);
+    // The registry has matched the process and its start time, and the request
+    // carries that identity, which the plugin checks. A missed 1.2 s health probe
+    // then means busy (a publish keeps Civil 3D busy for seconds), not gone: send
+    // the request and let its own timeout decide (issue #58).
+    if (!live.responsive) log.warn("Attached instance missed the health probe; sending the request anyway (busy)", { pid: live.pid, port: live.port });
     if (attached === attachment) attached = live;
     return live;
   }
