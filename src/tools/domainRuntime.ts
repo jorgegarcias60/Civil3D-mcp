@@ -287,13 +287,18 @@ export function buildExposureOutputSchema(
     ? z.enum(actionNames as [string, ...string[]])
     : z.string();
   const responseSchemas = actionNames.map((actionName) =>
-    definition.actions[actionName]?.responseSchema ?? z.unknown()
+    definition.actions[actionName]?.responseSchema
   );
-  const resultSchema = responseSchemas.length === 0
+  // An action without a response schema can return anything, so the whole result is unknown. A union that
+  // contains z.unknown() must not be built: the JSON Schema converter drops it, the advertised schema then lists
+  // only "action" with additionalProperties false, and strict MCP clients (Hermes, the Python SDK) reject every
+  // reply that carries "result".
+  const definedSchemas = responseSchemas.filter((schema): schema is ZodTypeAny => Boolean(schema));
+  const resultSchema = definedSchemas.length === 0 || definedSchemas.length < responseSchemas.length
     ? z.unknown()
-    : responseSchemas.length === 1
-      ? responseSchemas[0]
-      : z.union(responseSchemas as unknown as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]);
+    : definedSchemas.length === 1
+      ? definedSchemas[0]
+      : z.union(definedSchemas as unknown as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]);
 
   return z.object({ action: actionSchema, result: resultSchema });
 }
