@@ -69,12 +69,17 @@ public static class LookupUtils
 
   public static ObjectId GetProfileViewStyleId(CivilDocument civilDoc, Transaction transaction, string? styleName)
   {
-    var styles = CivilObjectUtils.GetPropertyValue<object>(civilDoc.Styles, "ProfileViewStyles");
-    return styles != null
-      ? GetStyleId(styles, transaction, styleName)
-      : ObjectId.Null;
+    return GetStyleId(civilDoc.Styles.ProfileViewStyles, transaction, styleName);
   }
 
+  /// <summary>
+  /// The named profile view band set, read from the typed
+  /// StylesRoot.ProfileViewBandSetStyles collection. Band sets are not on
+  /// LabelSetStylesRoot, so the old reflective lookup there always returned
+  /// Null and the band set was skipped without an error. With no name this
+  /// returns ObjectId.Null (Civil 3D's default). A name that matches no band
+  /// set is rejected with the available names, not skipped or replaced.
+  /// </summary>
   public static ObjectId GetProfileViewBandSetId(CivilDocument civilDoc, Transaction transaction, string? bandSetName)
   {
     if (string.IsNullOrWhiteSpace(bandSetName))
@@ -82,11 +87,31 @@ public static class LookupUtils
       return ObjectId.Null;
     }
 
-    var labelSetStyles = civilDoc.Styles.LabelSetStyles;
-    var bandSetStyles = CivilObjectUtils.GetPropertyValue<object>(labelSetStyles, "ProfileViewBandSetStyles");
-    return bandSetStyles != null
-      ? GetStyleId(bandSetStyles, transaction, bandSetName)
-      : ObjectId.Null;
+    var available = new List<string>();
+    foreach (var objectId in EnumerateObjectIds(civilDoc.Styles.ProfileViewBandSetStyles))
+    {
+      if (objectId == ObjectId.Null)
+      {
+        continue;
+      }
+
+      var name = CivilObjectUtils.GetName(transaction.GetObject(objectId, OpenMode.ForRead));
+      if (string.Equals(name, bandSetName, StringComparison.OrdinalIgnoreCase))
+      {
+        return objectId;
+      }
+
+      if (!string.IsNullOrEmpty(name))
+      {
+        available.Add(name);
+      }
+    }
+
+    throw new JsonRpcDispatchException(
+      "CIVIL3D.OBJECT_NOT_FOUND",
+      available.Count == 0
+        ? $"No profile view band set named '{bandSetName}'. This drawing has no profile view band sets."
+        : $"No profile view band set named '{bandSetName}'. Available: {string.Join(", ", available)}.");
   }
 
   public static ObjectId GetParcelStyleId(CivilDocument civilDoc, Transaction transaction, string? styleName)
