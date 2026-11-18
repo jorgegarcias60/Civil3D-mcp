@@ -1519,6 +1519,38 @@ Live check (not run yet): on an open drawing, `label_list_styles` for an alignme
 `label_set`, `curves` and `station` returns the label sets, the label sets, the curve label styles and the
 station-offset label styles; `bogus` is rejected; each `curves` / `station` name is accepted by `label_add`.
 
+## label_add origin check (issue #57, offline only)
+
+Offline:
+- API by reflection over AeccDbMgd 13.8.0.280 (2026) and 13.9.0.628 (2027): the same
+  overloads in both. `StructureProfileLabel.Create(profileViewId, profileViewPartId[,
+  labelStyleId])` takes the view first; `PipeProfileLabel.Create(profileViewPartId,
+  profileViewId[, ratio, labelStyleId])` takes the part first. The plugin passes them in
+  that order, and that code is unchanged since the 2026 run that passed 9/9. So the call is
+  not the cause; the drawing (made without a template) or the release is.
+- `tests/label_commands_source.test.ts`: 2 new guards (the argument order; the origin check,
+  its positive-only signal, and `warnings` in both responses). The origin guard fails on
+  the e28f9df code.
+- `tests/live_label_smoke.test.ts`: 13 tests. The 5 source checks of the smoke fail on the
+  e28f9df script; 8 run `attachScratchAgentInstance` with a fake tool call.
+- The smoke's run_code snippets compile with the plugin's `ScriptCompiler` against the 2026
+  and 2027 references.
+- Plugin builds for 2026 (net8) and 2027 (net10) with 0 warnings. `npx vitest run`: all
+  pass. RunCodeHarness (net8): no failures. `npm run docs:check`: current.
+
+Live (not run yet). Start an agent instance on a disposable drawing made without a
+template, then:
+
+```powershell
+node scripts/live-label-smoke.mjs --agent-instance --expect-drawing <absolute path of that drawing>
+```
+
+Expect every check to pass, on 2026 and on 2027, including "null structure: each profile
+label sits in a view or is named in warnings" when the parts list has a null structure.
+Run it on a copy of the earlier RUNCODE-SMOKE drawing too, which must still pass. Not known
+yet: whether 2026 places labels at the origin in a drawing made without a template, and
+whether the cause is the null structure the old smoke may have used.
+
 ## Not automated
 
 The plugin has no C# unit tests; `tests/FileBoundaryHarness` (dotnet) is upstream's

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `label_add` pipe and structure `profile` labels: the plugin reads each new label's
+  anchor. When Civil 3D put it at the drawing origin and the profile view is elsewhere,
+  the label is kept and the response names it in `warnings` (and says so when the
+  structure is a null structure). Before, such a label counted as created with no sign
+  of the problem: seen on Civil 3D 2027 in a drawing made without a template. Any other
+  label is accepted as before. The `Create` calls are unchanged: their argument order is
+  the same in the 2026 and 2027 API. `scripts/live-label-smoke.mjs` now labels a
+  structure family that is not a null structure, fails a profile label that comes back
+  with `warnings`, checks that a null structure's profile labels sit in a view or are
+  named in `warnings`, checks the single import when the drawing has one alignment label
+  set, and runs in an agent instance with `--agent-instance`
+  (`scripts/live-agent-instance.mjs` attaches with `force: true`). Refs #57.
+
 - Issue #53 diagnostics. `civil3d_health` reports `hostRoute`: how the plugin starts its
   `C3DMCPHOP` command (`hopStart`, `com` by default) and what is known about typed input
   in this session (`typedInput`: `unknown`, `alive` or `dead`). `probeTypedInput: true`

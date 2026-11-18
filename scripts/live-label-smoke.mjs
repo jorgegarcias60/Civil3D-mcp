@@ -2,27 +2,39 @@
 // MCP server (build/index.js) and the plugin in a running Civil 3D. Run it against a
 // SCRATCH drawing: it adds an alignment (line, arc, line, spiral-curve-spiral, line),
 // two profile views, and a pipe network with a pipe and two structures shown in both
-// views plus a pipe shown in none, all named LBLSMOKE-<pid>-..., and labels them. It
-// does not remove them.
+// views (plus a null structure when the parts list has one) and a pipe shown in none,
+// all named LBLSMOKE-<pid>-..., and labels them. It does not remove them.
 //
 //   npm run build
 //   node scripts/live-label-smoke.mjs --user-instance --expect-drawing <name>
+//   node scripts/live-label-smoke.mjs --agent-instance --expect-drawing <absolute path>
 //
 // --expect-drawing (required): runs only when the active drawing's name contains this
 //   text, so it never writes into a real job by accident.
+// --user-instance: the one user instance that has this drawing open.
+// --agent-instance: the one agent instance that has this drawing open, for example one
+//   started with civil3d_instance start on a disposable drawing. This script's server is
+//   another MCP session, so it attaches with force: true (ownership is unchanged).
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { drainServerStderr } from "./server-stderr.mjs";
 import { attachScratchUserInstance } from "./live-user-instance.mjs";
+import { attachScratchAgentInstance } from "./live-agent-instance.mjs";
 
-const { values: options } = parseArgs({ options: { "expect-drawing": { type: "string" }, "user-instance": { type: "boolean", default: false } }, strict: true });
+const { values: options } = parseArgs({ options: {
+  "expect-drawing": { type: "string" },
+  "user-instance": { type: "boolean", default: false },
+  "agent-instance": { type: "boolean", default: false },
+}, strict: true });
 const expectDrawing = options["expect-drawing"];
 if (!expectDrawing) {
-  console.error("usage: node scripts/live-label-smoke.mjs --user-instance --expect-drawing <scratch drawing name>");
+  console.error("usage: node scripts/live-label-smoke.mjs --user-instance|--agent-instance --expect-drawing <scratch drawing name>");
   process.exit(2);
 }
-if (!options["user-instance"]) throw new Error("Pass --user-instance to opt into the existing scratch user instance.");
+if (options["user-instance"] === options["agent-instance"]) {
+  throw new Error("Pass exactly one of --user-instance (the existing scratch user instance) or --agent-instance (an agent instance with the scratch drawing open).");
+}
 
 const prefix = `LBLSMOKE-${process.pid}`;
 const transport = new StdioClientTransport({
@@ -113,13 +125,29 @@ var net = Open<Network>(Network.Create(Civil, ref netName), forWrite: true);
 net.PartsListId = partsList;
 var list = Open<PartsList>(partsList);
 var pipeFamily = list.GetPartFamilyIdsByDomain(DomainType.Pipe)[0];
-var structFamily = list.GetPartFamilyIdsByDomain(DomainType.Structure)[0];
-ObjectId s1 = ObjectId.Null, s2 = ObjectId.Null, pipe = ObjectId.Null, lone = ObjectId.Null;
+// The first structure family that is not a null structure (profile views do not
+// draw those; a drawing made without a template may list one first, issue #57).
+var structFamilies = list.GetPartFamilyIdsByDomain(DomainType.Structure);
+var structFamily = structFamilies[0];
+foreach (ObjectId id in structFamilies)
+{
+  if (Open<PartFamily>(id).PartType != PartType.StructNull) { structFamily = id; break; }
+}
+ObjectId s1 = ObjectId.Null, s2 = ObjectId.Null, pipe = ObjectId.Null, lone = ObjectId.Null, nul = ObjectId.Null;
 net.AddStructure(structFamily, Open<PartFamily>(structFamily)[0], new Point3d(x0 + 10, 0, 0), 0, ref s1, false);
 net.AddStructure(structFamily, Open<PartFamily>(structFamily)[0], new Point3d(x0 + 90, 0, 0), 0, ref s2, false);
 net.AddLinePipe(pipeFamily, Open<PartFamily>(pipeFamily)[0], new LineSegment3d(new Point3d(x0 + 10, 0, -5), new Point3d(x0 + 90, 0, -6)), ref pipe, false);
 net.AddLinePipe(pipeFamily, Open<PartFamily>(pipeFamily)[0], new LineSegment3d(new Point3d(x0 + 20, 30, -5), new Point3d(x0 + 80, 30, -6)), ref lone, false);
-foreach (var (id, name, shown) in new[] { (s1, "-MH1", true), (s2, "-MH2", true), (pipe, "-PIPE", true), (lone, "-PIPE-NOVIEW", false) })
+var parts = new List<(ObjectId, string, bool)> { (s1, "-MH1", true), (s2, "-MH2", true), (pipe, "-PIPE", true), (lone, "-PIPE-NOVIEW", false) };
+foreach (ObjectId id in structFamilies)
+{
+  var family = Open<PartFamily>(id);
+  if (family.PartType != PartType.StructNull || family.PartSizeCount == 0) continue;
+  net.AddStructure(id, family[0], new Point3d(x0 + 50, 0, 0), 0, ref nul, false);
+  parts.Add((nul, "-NULL", true));
+  break;
+}
+foreach (var (id, name, shown) in parts)
 {
   var part = Open<Part>(id, forWrite: true);
   part.Name = p + name;
@@ -135,13 +163,16 @@ foreach (ObjectId id in Civil.Styles.LabelSetStyles.AlignmentLabelSetStyles)
   foreach (var item in set) items++;
   labelSets.Add(new { name = set.Name, items });
 }
-return new { entities = alignment.Entities.Count, labelSets };
+var structureFamily = Open<PartFamily>(structFamily);
+return new { entities = alignment.Entities.Count, labelSets, structureFamily = structureFamily.Name, structurePartType = structureFamily.PartType.ToString(), nullStructure = !nul.IsNull };
 `;
 
 // The views each profile label sits in, by its position (Civil 3D shares one
-// ProfileViewPart between all views of a part, so the part says nothing).
+// ProfileViewPart between all views of a part, so the part says nothing). The
+// null structure's labels are listed apart, by handle.
 const placementCode = String.raw`
 var p = (string)Args["prefix"];
+var apart = ((JsonArray)Args["nullHandles"]).Select(n => (string)n).ToList();
 var views = ModelSpace<ProfileView>().Where(v => v.Name.StartsWith(p)).Select(v => (v.Name, v.GeometricExtents)).ToList();
 string ViewOf(Entity e)
 {
@@ -155,13 +186,15 @@ string ViewOf(Entity e)
 return new
 {
   pipe = ModelSpace<PipeProfileLabel>().Select(l => ViewOf(l)).Where(n => n != null).OrderBy(n => n).ToArray(),
-  structure = ModelSpace<StructureProfileLabel>().Select(l => ViewOf(l)).Where(n => n != null).OrderBy(n => n).ToArray(),
+  structure = ModelSpace<StructureProfileLabel>().Where(l => !apart.Contains(l.Handle.ToString())).Select(l => ViewOf(l)).Where(n => n != null).OrderBy(n => n).ToArray(),
+  nullStructure = apart.Select(h => new { handle = h, view = ViewOf(Open<Entity>(ById(h))) }).ToArray(),
 };
 `;
 
 try {
   await client.connect(transport);
-  await attachScratchUserInstance(call, expectDrawing);
+  if (options["agent-instance"]) await attachScratchAgentInstance(call, expectDrawing);
+  else await attachScratchUserInstance(call, expectDrawing);
   const drawing = await runCode("return Doc.Name;");
   if (!String(drawing).toLowerCase().includes(expectDrawing.toLowerCase())) {
     throw new Error(`Active drawing '${drawing}' does not contain '${expectDrawing}'; stopping before any write.`);
@@ -181,8 +214,15 @@ try {
     groups.push({ set: set.name, items: set.items, labelGroups: response.isError ? text(response) : payload(response).labelGroups });
   }
   const changed = groups.some((g, i) => i > 0 && g.labelGroups !== groups[i - 1].labelGroups);
-  record("label_set leaves exactly the set's label groups (each import replaces the last)",
-    groups.length > 1 && groups.every((g) => g.labelGroups === g.items) && changed, groups);
+  // A drawing made without a template has one alignment label set ("Standard"),
+  // so there is no second import to replace the first.
+  if (sets.length < 2) {
+    record("label_set leaves exactly the set's label groups (one label set in this drawing: no replacement to check)",
+      groups.length === 1 && groups[0].labelGroups === groups[0].items, groups);
+  } else {
+    record("label_set leaves exactly the set's label groups (each import replaces the last)",
+      groups.every((g) => g.labelGroups === g.items) && changed, groups);
+  }
 
   const curves = await label("alignment", `${prefix}-AL`, "curves");
   record("curves labels the simple arc and the arc inside the spiral-curve-spiral",
@@ -193,16 +233,32 @@ try {
     record(`${type} plan: one label`, !plan.isError && payload(plan).created === 1, plan.isError ? text(plan) : payload(plan));
     const profile = await label(type, name, "profile");
     const r = payload(profile);
+    // warnings name labels Civil 3D placed at the drawing origin (issue #57).
     record(`${type} profile: a label in each of the 2 profile views`,
-      !profile.isError && r.created === 2 && (r.handles ?? []).length === 2 && r.skipped === 0, profile.isError ? text(profile) : r);
+      !profile.isError && r.created === 2 && (r.handles ?? []).length === 2 && r.skipped === 0 && r.warnings === undefined,
+      profile.isError ? text(profile) : r);
+  }
+
+  // A null structure is not drawn in profile views. Its profile labels must sit in
+  // their views or be named in warnings (or label_add fails): never silently at
+  // the drawing origin, as in issue #57.
+  let nullStructure;
+  if (setup.nullStructure) {
+    const response = await label("structure", `${prefix}-NULL`, "profile");
+    nullStructure = response.isError ? { error: text(response).slice(0, 300) } : payload(response);
   }
 
   const noView = await label("pipe", `${prefix}-PIPE-NOVIEW`, "profile");
   record("a pipe in no profile view: a clear error", noView.isError === true && /not drawn in any profile view/i.test(text(noView)), text(noView).slice(0, 200));
 
-  const placed = await runCode(placementCode, { prefix });
+  const placed = await runCode(placementCode, { prefix, nullHandles: nullStructure?.handles ?? [] });
   record("each profile label sits in its own view",
     JSON.stringify(placed.pipe) === JSON.stringify(["-PV1", "-PV2"]) && JSON.stringify(placed.structure) === JSON.stringify(["-PV1", "-PV2"]), placed);
+  if (nullStructure) {
+    const silent = placed.nullStructure.filter((l) => l.view === null && !(nullStructure.warnings ?? []).some((w) => w.includes(l.handle)));
+    record("null structure: each profile label sits in a view or is named in warnings",
+      nullStructure.error !== undefined || silent.length === 0, { ...nullStructure, placed: placed.nullStructure });
+  }
 
   console.log(JSON.stringify({ status: failures === 0 ? "passed" : "failed", failures, drawing, prefix, results }, null, 2));
   process.exitCode = failures === 0 ? 0 : 1;
