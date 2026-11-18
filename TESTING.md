@@ -5,6 +5,28 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Render crash on 2027: attempted repro on 2026 (2026-11-18)
+
+An agent instance on a copy of a 36x24 GP drawing (7 layouts) with seven xrefs: a P-Base overlay, a 14.7 MB background,
+roads, centrelines and two vaults. All seven resolved. The current layout was set to Model first, so after each render
+the restore switched back.
+
+| Step | Result |
+|---|---|
+| `render_layouts_to_png` GP1 at 3300, 8000, 12000 px | Rendered on 4K UHD (3840 x 2160), 8K UHD (7680 x 4320) and 16K (15360 x 8640), in 20, 24 and 37 s. After each one the instance was alive, CTAB was back to Model, and BACKGROUNDPLOT, FILEDIA and CMDECHO were back to their values. |
+| `plot_layouts_to_pdf` GP1 | 1,156,994 bytes in 68 s, the same restore, alive. |
+
+So the 2027 crash did not reproduce on 2026. The change is diagnostic, plus skipping a no-change CTAB set (which may still activate the layout).
+
+With this branch's plugin installed (a combined build with PRs #59 and #62), on the same drawing:
+
+| Step | Result |
+|---|---|
+| Render GP1 at 4K, then a PDF, Model current | plugin.log: `Restoring CTAB: 'GP1' -> 'Model' (thread 1, CMDNAMES 'C3DMCPHOP')`, then CMDECHO 0 -> 1 and FILEDIA 0 -> 1. BACKGROUNDPLOT was already 0, so it was not set (no line). Alive, CTAB back to Model. |
+| Render GP1 at 4K, GP1 current | No CTAB line: the unchanged layout was not set again. CMDECHO and FILEDIA restored. Alive, CTAB still GP1. |
+| `publish_sheet_set` as a job | CMDECHO and FILEDIA restored with a log line each; every status poll succeeded. |
+
+
 ### Typed input after COM commands, #53 (2026-10-19)
 
 `scratch-live-53.mjs` on fresh agent instances (one per run, stopped with `discardChanges`), copies of a plain block
@@ -63,6 +85,15 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 | #44 | Before the guard, the second erase-and-re-create of viewports on the current layout killed acad.exe. With the guard: viewport `Erase` rejected; two in-place updates ok; `plot_layouts_to_pdf` plotted 1 page (17,929 bytes) with `regenerated: true`; the instance stayed healthy and stopped cleanly. |
 
 ## Offline (no Civil 3D needed)
+
+### Sysvar restore after plotting (2026-11-18)
+
+| Check | Result |
+|---|---|
+| Harness net8 (`SystemVariableValuesChecks`) | Pass: names compare ignoring case, numbers by value whatever their boxed type, a null is never "the same", values are described for the log line. |
+| `tests/plot_domain.test.ts` | The restore reads the current value, skips an unchanged one, and logs before its single `SetSystemVariable`. It fails on the old restore. |
+| `npm run build`, `npx vitest run --cache=false` | Pass. |
+| Plugin net8 (refs-2026) and net10 (C_References) | 0 warnings, 0 errors. |
 
 ### Busy attached instance, #58 (2026-10-21, `luissilvam/busy-attached-instance`)
 

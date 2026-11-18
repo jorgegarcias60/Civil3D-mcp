@@ -1553,9 +1553,30 @@ public static class PlotCommands
       for (var index = originals.Count - 1; index >= 0; index--)
       {
         var (name, value) = originals[index];
+        if (value == null) continue;
+        // The diagnostic reads must never cost the restore itself: a failed
+        // read only means the value is set as before.
+        object? current = null;
+        string? commands = null;
         try
         {
-          if (value != null) App.SetSystemVariable(name, value);
+          current = App.GetSystemVariable(name);
+          commands = Convert.ToString(App.GetSystemVariable("CMDNAMES"));
+        }
+        catch (Exception)
+        {
+          // Not known: restore it anyway.
+        }
+        if (SystemVariableValues.Same(current, value)) continue;
+        try
+        {
+          // Written to plugin.log before the call: an access violation inside
+          // SetSystemVariable cannot be caught (finding cad-tools#18, Civil 3D
+          // 2027, after a large raster plot), so this line is the only record
+          // of which variable was being restored and from where.
+          PluginLog.Info("Plot", $"Restoring {name}: {SystemVariableValues.Describe(current)} -> {SystemVariableValues.Describe(value)}"
+            + $" (thread {Environment.CurrentManagedThreadId}, CMDNAMES {SystemVariableValues.Describe(commands)}).");
+          App.SetSystemVariable(name, value);
         }
         catch (Exception ex)
         {

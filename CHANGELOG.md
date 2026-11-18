@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- After plotting or rendering, the plugin restores only the system variables whose value
+  changed, and writes each one to plugin.log before setting it. On Civil 3D 2027, a
+  `render_layouts_to_png` of a large drawing crashed acad.exe while a variable was being
+  restored, with an access violation that no catch sees. Setting CTAB to the layout that
+  is already current may still activate it (not verified), so a render of the current
+  layout now skips that set entirely. If it crashes again, the last plugin.log line names the
+  variable. Not reproduced on 2026 (up to a 15360 x 8640 render of a 36x24 sheet with
+  seven xrefs). Refs the CAD-Tools finding on the crash.
+
 - A busy attached Civil 3D no longer counts as gone. Before each request on an attached
   instance the server sends an unauthenticated `getCivil3DHealth` probe with a 1.2 s
   timeout. A publish keeps that probe from answering for seconds, so a request failed with
