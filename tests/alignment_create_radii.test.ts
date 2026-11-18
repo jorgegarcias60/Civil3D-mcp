@@ -48,4 +48,12 @@ describe("alignment create radii", () => {
     expect(schema.safeParse({ action: "create", name: "CL", points, radii: [0] }).success).toBe(false);
     expect(schema.safeParse({ action: "create", name: "CL", points, radii: [-50] }).success).toBe(false);
   });
+
+  it("rejects a blank polylineHandle and trims a padded one", () => {
+    const schema = ALIGNMENT_DOMAIN_DEFINITION.actions.create.inputSchema;
+    expect(schema.safeParse({ action: "create", name: "CL", polylineHandle: "   " }).success).toBe(false);
+    expect(schema.safeParse({ action: "create", name: "CL", polylineHandle: "" }).success).toBe(false);
+    const parsed = schema.safeParse({ action: "create", name: "CL", polylineHandle: " 2A9 " });
+    expect(parsed.success && parsed.data.polylineHandle).toBe("2A9");
+  });
 });

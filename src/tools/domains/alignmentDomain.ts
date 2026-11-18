@@ -114,7 +114,7 @@ const canonicalAlignmentInputShape = {
     "widen_transition",
   ]),
   name: z.string().optional(),
-  polylineHandle: z.string().optional(),
+  polylineHandle: z.string().trim().min(1).optional(),
   curveRadius: z.number().positive().optional(),
   radii: z.array(z.number().positive().nullable()).optional(),
   addCurves: z.boolean().optional(),
@@ -179,8 +179,9 @@ const AlignmentCreateArgsSchema = z.object({
   action: z.literal("create"),
   name: z.string(),
   // Either trace an existing polyline (it is kept, never erased) or build one
-  // from points. Exactly one of the two is required.
-  polylineHandle: z.string().optional(),
+  // from points. Exactly one of the two is required. A blank handle is
+  // refused here rather than read as "no polyline" by the plugin.
+  polylineHandle: z.string().trim().min(1).optional(),
   points: z.array(Point2DSchema).min(2).optional(),
   // curveRadius inserts a curve of exactly this radius at every interior PI.
   // radii gives one radius per interior PI in station order instead (null, or a

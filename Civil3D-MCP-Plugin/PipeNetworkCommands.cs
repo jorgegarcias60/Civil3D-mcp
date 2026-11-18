@@ -717,8 +717,8 @@ public static class PipeNetworkCommands
   /// Every size of every family of one domain in a parts list:
   /// PartsList.GetPartFamilyIdsByDomain(domain), then PartFamily.PartSizeCount
   /// with the family's indexer; a size's name is its Name, else its
-  /// Description. A family that can no longer be opened (erased or stale id)
-  /// is skipped, so one bad entry does not hide the rest of the list.
+  /// Description. A family or size that can no longer be opened (erased or
+  /// stale id) is skipped, so one bad entry does not hide the rest of the list.
   /// </summary>
   private static IEnumerable<PartSizeEntry> EnumeratePartSizes(PartsList partsList, DomainType domain, Transaction transaction)
   {
@@ -733,23 +733,32 @@ public static class PipeNetworkCommands
       for (var index = 0; index < family.PartSizeCount; index++)
       {
         var sizeId = family[index];
-        var size = transaction.GetObject(sizeId, OpenMode.ForRead);
+        var size = TryOpen(transaction, sizeId);
+        if (size == null)
+        {
+          continue;
+        }
+
         var sizeName = CivilObjectUtils.GetName(size) ?? CivilObjectUtils.GetStringProperty(size, "Description");
         yield return new PartSizeEntry(familyId, family.Name, sizeId, sizeName, family.PartSizeCount == 1);
       }
     }
   }
 
-  private static PartFamily? TryOpenPartFamily(Transaction transaction, ObjectId familyId)
+  private static PartFamily? TryOpenPartFamily(Transaction transaction, ObjectId familyId) =>
+    TryOpen(transaction, familyId) as PartFamily;
+
+  // Opens a parts-list entry for read, or null when its id is erased or stale.
+  private static AcDbObject? TryOpen(Transaction transaction, ObjectId id)
   {
-    if (familyId.IsNull || familyId.IsErased || !familyId.IsValid)
+    if (id.IsNull || id.IsErased || !id.IsValid)
     {
       return null;
     }
 
     try
     {
-      return transaction.GetObject(familyId, OpenMode.ForRead) as PartFamily;
+      return transaction.GetObject(id, OpenMode.ForRead);
     }
     catch (Autodesk.AutoCAD.Runtime.Exception)
     {
