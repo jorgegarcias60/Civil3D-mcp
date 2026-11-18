@@ -5,7 +5,7 @@ namespace Civil3DMcpPlugin;
 // AutoCAD-free comparison of system variable values, so a value that did not
 // change is not set again (finding cad-tools#18: on Civil 3D 2027, restoring a
 // variable after a large raster plot crashed acad.exe; setting CTAB to the
-// layout that is already current is a layout activation all the same).
+// layout that is already current may still activate it, unverified).
 internal static class SystemVariableValues
 {
   // Strings compare case-insensitively (CTAB "Model" equals "MODEL"); numbers

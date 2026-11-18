@@ -6,8 +6,8 @@
   changed, and writes each one to plugin.log before setting it. On Civil 3D 2027, a
   `render_layouts_to_png` of a large drawing crashed acad.exe while a variable was being
   restored, with an access violation that no catch sees. Setting CTAB to the layout that
-  is already current still activates it, so a render of the current layout no longer
-  switches layouts at all. If it crashes again, the last plugin.log line names the
+  is already current may still activate it (not verified), so a render of the current
+  layout now skips that set entirely. If it crashes again, the last plugin.log line names the
   variable. Not reproduced on 2026 (up to a 15360 x 8640 render of a 36x24 sheet with
   seven xrefs). Refs the CAD-Tools finding on the crash.
 

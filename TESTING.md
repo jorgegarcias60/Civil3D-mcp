@@ -16,7 +16,7 @@ the restore switched back.
 | `render_layouts_to_png` GP1 at 3300, 8000, 12000 px | Rendered on 4K UHD (3840 x 2160), 8K UHD (7680 x 4320) and 16K (15360 x 8640), in 20, 24 and 37 s. After each one the instance was alive, CTAB was back to Model, and BACKGROUNDPLOT, FILEDIA and CMDECHO were back to their values. |
 | `plot_layouts_to_pdf` GP1 | 1,156,994 bytes in 68 s, the same restore, alive. |
 
-So the 2027 crash did not reproduce on 2026. The fix is a diagnostic change, plus avoiding a no-change layout switch.
+So the 2027 crash did not reproduce on 2026. The change is diagnostic, plus skipping a no-change CTAB set (which may still activate the layout).
 
 ### Typed input after COM commands, #53 (2026-10-19)
 

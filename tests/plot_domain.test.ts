@@ -931,12 +931,13 @@ describe("civil3d_plot render_layouts_to_png", () => {
   });
 
   // Finding cad-tools#18: restoring a variable after a large raster plot crashed acad.exe on Civil 3D 2027 with an
-  // access violation, which no catch can see. A variable whose value did not change is not set again (CTAB set to the
-  // current layout is still a layout activation), and plugin.log gets a line before each set.
+  // access violation, which no catch can see. A variable whose value did not change is not set again (setting CTAB to the
+  // current layout may still activate it), and plugin.log gets a line before each set.
   it("restores only changed system variables, logging each one before the call", () => {
     const source = pluginSource("PlotCommands.cs");
     const restore = source.slice(source.indexOf("private void Restore()"), source.indexOf("private static IEnumerable<Layout> ReadLayouts("));
-    expect(restore).toMatch(/var current = App\.GetSystemVariable\(name\);\s*if \(SystemVariableValues\.Same\(current, value\)\) continue;/);
+    // The diagnostic reads have their own try, so a failed read never skips the restore.
+    expect(restore).toMatch(/try\s*\{\s*current = App\.GetSystemVariable\(name\);[\s\S]*?\}\s*catch \(Exception\)\s*\{[^}]*\}\s*if \(SystemVariableValues\.Same\(current, value\)\) continue;/);
     const log = restore.indexOf('PluginLog.Info("Plot", $"Restoring {name}:');
     const set = restore.indexOf("App.SetSystemVariable(name, value);");
     expect(log).toBeGreaterThan(0);
