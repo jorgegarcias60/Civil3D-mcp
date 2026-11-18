@@ -5,6 +5,18 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Structure profile labels at the origin, #57 (2026-11-18)
+
+A drawing made without a template (`civil3d_drawing new`, then save as), in an agent instance on Civil 3D 2026.
+
+| Check | Result |
+|---|---|
+| `scripts/scratch-live-57.mjs`, installed plugin from before this branch | One structure from each of the first 6 of the parts list's 22 structure families (a null structure included) and a pipe, in 2 profile views. Every label, from `StructureProfileLabel.Create` and from `label_add`, sat in its own view; no anchor was at the origin. Not reproduced on 2026. |
+| `live-label-smoke.mjs --agent-instance`, the same drawing, installed plugin from before this branch | Every check passed, including "each profile label sits in its own view". |
+| The same two runs with this branch's plugin installed (a combined build with PRs #59 and #61) | Every check passed; the new origin check stayed silent (no `warnings`, no false alarm). |
+
+The 2027 failure still needs a run there; the experiment script is in `scripts/`.
+
 ### Render crash on 2027: attempted repro on 2026 (2026-11-18)
 
 An agent instance on a copy of a 36x24 GP drawing (7 layouts) with seven xrefs: a P-Base overlay, a 14.7 MB background,
