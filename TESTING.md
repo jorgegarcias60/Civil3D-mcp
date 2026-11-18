@@ -64,6 +64,14 @@ Plugin installed from the combined branch (all Civil 3D closed first); scratch d
 
 ## Offline (no Civil 3D needed)
 
+### Busy attached instance, #58 (2026-10-21, `luissilvam/busy-attached-instance`)
+
+| Check | Result |
+|---|---|
+| `tests/instance_routing.test.ts`: an attached user instance whose registry record matches but whose probe missed (`responsive: false`) | `civil3d_job status` reaches the fake plugin once, with the attached pid and start time as `instanceIdentity`; the session stays attached; the warning is logged. Fails on 1c19e99 ("no longer responsive"). |
+| Same file: the same pid with another start time, and a process that disappeared | Refused with "no longer available" before any request (message test updated). |
+| `npm run build`, `npx vitest run --cache=false`, `npm run docs:check` | Build and docs pass (212 entries). 938 of 940 tests pass. The 2 failures (`instance_dialogs`, `instance_manager` launch check) also fail on unchanged 1c19e99 on this machine: Windows' execution policy blocks the PowerShell scripts those tests start ("running scripts is disabled on this system"). |
+
 ### Typed-input probe and typed hop start, issue #53 part 1 (2026-10-19)
 
 | Check | Result |
@@ -837,6 +845,20 @@ Baseline before the 2026-09-11 improvement pass: 424 tests; `docs:check` and
 checkers, not real drift (fixed in `fix-check-eol`, also in upstream PR #7).
 
 ## Live (Civil 3D 2027 open)
+
+### Busy attached instance, #58 (2026-10-21, Luis's machine)
+
+Civil 3D 2027 (26.0s), net10 plugin from 1c19e99 (unchanged), server from this branch. Scratch
+`RUNCODE-SMOKE.dwg` (two PDF layouts, saved before each run); the PC3's open-in-viewer option was turned off for
+each run and the original file restored afterwards (byte-identical).
+
+| Run | Result |
+|---|---|
+| `node scripts/live-plot-smoke.mjs --user-instance --expect-drawing RUNCODE-SMOKE.dwg --out <folder>`, server from 1c19e99 (2 runs, 2026-10-20) | 5 passed, 7 failed, 1 skipped: one `civil3d_job status` poll during the publish failed after ~2.2 s with "no longer responsive", and the smoke then refused its later publishes. |
+| Same, server from this branch | 16 passed, 0 failed, 1 skipped (`--ctb-fixture` not given). |
+| Again, from an uncommitted copy that always prints the server's stderr | 16 passed, 0 failed, 1 skipped. The probe missed 4 times, each during a publish and each before a `civil3d_job status` poll; each time the request was sent, and the plugin answered within 2 ms (each poll took 2.1-2.4 s in all). |
+
+Not run: Civil 3D 2026, and an agent-owned instance (`civil3d_instance start`).
 
 | scenario | how | last result |
 |---|---|---|
