@@ -18,6 +18,15 @@ the restore switched back.
 
 So the 2027 crash did not reproduce on 2026. The change is diagnostic, plus skipping a no-change CTAB set (which may still activate the layout).
 
+With this branch's plugin installed (a combined build with PRs #59 and #62), on the same drawing:
+
+| Step | Result |
+|---|---|
+| Render GP1 at 4K, then a PDF, Model current | plugin.log: `Restoring CTAB: 'GP1' -> 'Model' (thread 1, CMDNAMES 'C3DMCPHOP')`, then CMDECHO 0 -> 1 and FILEDIA 0 -> 1. BACKGROUNDPLOT was already 0, so it was not set (no line). Alive, CTAB back to Model. |
+| Render GP1 at 4K, GP1 current | No CTAB line: the unchanged layout was not set again. CMDECHO and FILEDIA restored. Alive, CTAB still GP1. |
+| `publish_sheet_set` as a job | CMDECHO and FILEDIA restored with a log line each; every status poll succeeded. |
+
+
 ### Typed input after COM commands, #53 (2026-10-19)
 
 `scratch-live-53.mjs` on fresh agent instances (one per run, stopped with `discardChanges`), copies of a plain block
