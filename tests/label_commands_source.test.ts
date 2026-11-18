@@ -57,6 +57,39 @@ describe("label_add source guards (LabelCommands.cs)", () => {
     }
   });
 
+  it("passes the profile view first to StructureProfileLabel.Create, the part first to PipeProfileLabel.Create", () => {
+    // Same order in the 2026 (13.8) and 2027 (13.9) AeccDbMgd, checked by reflection.
+    expect(source).toContain("StructureProfileLabel.Create(profileViewId, partId, styleId)");
+    expect(source).toContain("PipeProfileLabel.Create(partId, profileViewId, 0.5, styleId)");
+  });
+
+  it("reports a profile label Civil 3D anchored at the drawing origin, and keeps it (#57)", () => {
+    const profile = blockAfter("private static IReadOnlyList<ObjectId> CreateProfileLabels(");
+    expect(profile).toContain("List<string> warnings");
+    const check = profile.indexOf("FindLabelAtOriginOutsideView(transaction, labelId, profileViewId)");
+    expect(check).toBeGreaterThan(profile.indexOf("labelIds.Add(labelId)"));
+    expect(profile.indexOf("warnings.Add(", check)).toBeGreaterThan(check);
+    expect(profile).toContain("PartType.StructNull");
+
+    const gate = blockAfter("private static string? FindLabelAtOriginOutsideView(");
+    expect(gate).toContain(".AnchorInfo.Location");
+    // Only a positive signal: an anchor at the origin while the view, located by
+    // its own station and elevation range (not extents), is elsewhere.
+    expect(gate).toContain("FindXYAtStationAndElevation(view.StationStart, view.ElevationMin, ref x1, ref y1)");
+    expect(gate).toContain("FindXYAtStationAndElevation(view.StationEnd, view.ElevationMax, ref x2, ref y2)");
+    expect(gate).toMatch(/catch \(Exception exception\) when \(exception is not JsonRpcDispatchException\)\s*\{\s*return null;/);
+    expect(gate).not.toMatch(/\.Erase\(|\bthrow\b/);
+
+    for (const branch of [pipeBranch(), structureBranch()]) {
+      expect(branch).toContain("var warnings = new List<string>();");
+      expect(branch).toMatch(/out var skipped, warnings\);/);
+      expect(branch).toContain("}, warnings);");
+    }
+    const withWarnings = blockAfter("private static Dictionary<string, object?> WithWarnings(");
+    expect(withWarnings).toContain("if (warnings.Count > 0)");
+    expect(withWarnings).toContain('result["warnings"] = warnings;');
+  });
+
   it("reports the alignment's label group count after label_set", () => {
     const labelSet = blockAfter('string.Equals(labelType, "label_set", StringComparison.OrdinalIgnoreCase))\n');
     expect(labelSet).toContain("ImportLabelSet(labelSetId)");

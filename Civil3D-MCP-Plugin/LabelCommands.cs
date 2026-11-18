@@ -227,8 +227,9 @@ public static class LabelCommands
       if (string.Equals(objectType, "pipe", StringComparison.OrdinalIgnoreCase))
       {
         var styleId = FindStyleInCollection(transaction, civilDoc.Styles.LabelStyles.PipeLabelStyles.PlanProfileLabelStyles, labelStyle, "pipe label");
-        var labelIds = CreatePipeLabels(transaction, (Autodesk.Civil.DatabaseServices.Pipe)target, styleId, labelType, out var skipped);
-        return new Dictionary<string, object?>
+        var warnings = new List<string>();
+        var labelIds = CreatePipeLabels(transaction, (Autodesk.Civil.DatabaseServices.Pipe)target, styleId, labelType, out var skipped, warnings);
+        return WithWarnings(new Dictionary<string, object?>
         {
           ["objectType"] = objectType,
           ["objectName"] = objectName,
@@ -238,7 +239,7 @@ public static class LabelCommands
           ["handles"] = labelIds.Select(labelId => ResolveHandle(transaction, labelId)).ToList(),
           ["created"] = labelIds.Count,
           ["skipped"] = skipped,
-        };
+        }, warnings);
       }
 
       if (string.Equals(objectType, "structure", StringComparison.OrdinalIgnoreCase))
@@ -246,8 +247,9 @@ public static class LabelCommands
         var styleId = FindStyleInCollection(transaction, civilDoc.Styles.LabelStyles.StructureLabelStyles.LabelStyles, labelStyle, "structure label");
         // A structure shown in several profile views (a matchline) gets one
         // label per view; return them all so none is left untracked.
-        var labelIds = CreateStructureLabels(transaction, (Autodesk.Civil.DatabaseServices.Structure)target, styleId, labelType, out var skipped);
-        return new Dictionary<string, object?>
+        var warnings = new List<string>();
+        var labelIds = CreateStructureLabels(transaction, (Autodesk.Civil.DatabaseServices.Structure)target, styleId, labelType, out var skipped, warnings);
+        return WithWarnings(new Dictionary<string, object?>
         {
           ["objectType"] = objectType,
           ["objectName"] = objectName,
@@ -257,7 +259,7 @@ public static class LabelCommands
           ["handles"] = labelIds.Select(labelId => ResolveHandle(transaction, labelId)).ToList(),
           ["created"] = labelIds.Count,
           ["skipped"] = skipped,
-        };
+        }, warnings);
       }
 
       throw new JsonRpcDispatchException(
@@ -265,6 +267,17 @@ public static class LabelCommands
         $"addLabel currently supports alignment 'label_set', alignment/profile 'station', alignment 'curves', surface 'spot_elevation', and pipe/structure 'plan' or 'profile' labels. Requested objectType='{objectType}', labelType='{labelType}'."
       );
     });
+  }
+
+  // "warnings" is added only when there are some (a label not placed in its view).
+  private static Dictionary<string, object?> WithWarnings(Dictionary<string, object?> result, List<string> warnings)
+  {
+    if (warnings.Count > 0)
+    {
+      result["warnings"] = warnings;
+    }
+
+    return result;
   }
 
   private static DBObject ResolveTargetObject(object civilDoc, Transaction transaction, string objectType, string objectName, OpenMode openMode)
@@ -570,13 +583,13 @@ public static class LabelCommands
   // profile view that displays it. The type names probed before (PipePlanLabel,
   // Labels.PipeLabel) do not exist, so "profile" silently produced a PLAN label
   // with the default style.
-  private static IReadOnlyList<ObjectId> CreatePipeLabels(Transaction transaction, Autodesk.Civil.DatabaseServices.Pipe pipe, ObjectId styleId, string labelType, out int skipped)
+  private static IReadOnlyList<ObjectId> CreatePipeLabels(Transaction transaction, Autodesk.Civil.DatabaseServices.Pipe pipe, ObjectId styleId, string labelType, out int skipped, List<string> warnings)
   {
     skipped = 0;
     if (string.Equals(labelType, "profile", StringComparison.OrdinalIgnoreCase))
     {
       return CreateProfileLabels(transaction, pipe, "Pipe",
-        (partId, profileViewId) => Autodesk.Civil.DatabaseServices.PipeProfileLabel.Create(partId, profileViewId, 0.5, styleId), out skipped);
+        (partId, profileViewId) => Autodesk.Civil.DatabaseServices.PipeProfileLabel.Create(partId, profileViewId, 0.5, styleId), out skipped, warnings);
     }
 
     if (string.Equals(labelType, "plan", StringComparison.OrdinalIgnoreCase))
@@ -600,7 +613,7 @@ public static class LabelCommands
   // is skipped and counted.
   private static IReadOnlyList<ObjectId> CreateProfileLabels(
     Transaction transaction, Autodesk.Civil.DatabaseServices.Part part, string kind,
-    Func<ObjectId, ObjectId, ObjectId> create, out int skipped)
+    Func<ObjectId, ObjectId, ObjectId> create, out int skipped, List<string> warnings)
   {
     skipped = 0;
     var profileViewIds = part.GetProfileViewsDisplayingMe();
@@ -638,6 +651,12 @@ public static class LabelCommands
       }
 
       labelIds.Add(labelId);
+      var viewName = FindLabelAtOriginOutsideView(transaction, labelId, profileViewId);
+      if (viewName != null)
+      {
+        warnings.Add($"Civil 3D placed profile label {ResolveHandle(transaction, labelId)} of {kind.ToLowerInvariant()} '{part.Name}' at the drawing origin, not in profile view '{viewName}'. The label was kept: move or erase it."
+          + (part.PartType == Autodesk.Civil.DatabaseServices.PartType.StructNull ? $" '{part.Name}' is a null structure, which profile views do not draw." : string.Empty));
+      }
     }
 
     if (labelIds.Count == 0)
@@ -668,6 +687,45 @@ public static class LabelCommands
     return ObjectId.Null;
   }
 
+  // Issue #57: on Civil 3D 2027, in a drawing made without a template, Create
+  // returned structure profile labels that were not drawn in their profile
+  // views (their extents were the (0,0)-(1,0) placeholder), without throwing.
+  // Returns the view's name when the new label is anchored at the drawing
+  // origin and the view is not there; such a label is kept and reported.
+  // Only that positive signal counts: a label anchored anywhere else, or one
+  // whose anchor or view cannot be read, is accepted as before (pipe labels and
+  // structure labels in other drawings land in their views).
+  private static string? FindLabelAtOriginOutsideView(Transaction transaction, ObjectId labelId, ObjectId profileViewId)
+  {
+    const double tolerance = 1.0;
+    try
+    {
+      var anchor = ((Autodesk.Civil.DatabaseServices.Label)transaction.GetObject(labelId, OpenMode.ForRead)).AnchorInfo.Location;
+      if (Math.Abs(anchor.X) > tolerance || Math.Abs(anchor.Y) > tolerance)
+      {
+        return null;
+      }
+
+      // The view's corners from its own station and elevation range (not its
+      // extents). A view that cannot report them is not judged.
+      var view = (Autodesk.Civil.DatabaseServices.ProfileView)transaction.GetObject(profileViewId, OpenMode.ForRead);
+      double x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+      if (!view.FindXYAtStationAndElevation(view.StationStart, view.ElevationMin, ref x1, ref y1)
+        || !view.FindXYAtStationAndElevation(view.StationEnd, view.ElevationMax, ref x2, ref y2))
+      {
+        return null;
+      }
+
+      var originInView = Math.Min(x1, x2) - tolerance <= anchor.X && anchor.X <= Math.Max(x1, x2) + tolerance
+        && Math.Min(y1, y2) - tolerance <= anchor.Y && anchor.Y <= Math.Max(y1, y2) + tolerance;
+      return originInView ? null : view.Name;
+    }
+    catch (Exception exception) when (exception is not JsonRpcDispatchException)
+    {
+      return null;
+    }
+  }
+
   // Every ProfileViewPart in model space that draws this part.
   private static List<ObjectId> FindProfileViewParts(Transaction transaction, Autodesk.Civil.DatabaseServices.Part part)
   {
@@ -686,13 +744,15 @@ public static class LabelCommands
     return parts;
   }
 
-  private static IReadOnlyList<ObjectId> CreateStructureLabels(Transaction transaction, Autodesk.Civil.DatabaseServices.Structure structure, ObjectId styleId, string labelType, out int skipped)
+  private static IReadOnlyList<ObjectId> CreateStructureLabels(Transaction transaction, Autodesk.Civil.DatabaseServices.Structure structure, ObjectId styleId, string labelType, out int skipped, List<string> warnings)
   {
     skipped = 0;
     if (string.Equals(labelType, "profile", StringComparison.OrdinalIgnoreCase))
     {
+      // Unlike PipeProfileLabel.Create, this one takes the profile view first
+      // (same in the 2026 and 2027 API).
       return CreateProfileLabels(transaction, structure, "Structure",
-        (partId, profileViewId) => Autodesk.Civil.DatabaseServices.StructureProfileLabel.Create(profileViewId, partId, styleId), out skipped);
+        (partId, profileViewId) => Autodesk.Civil.DatabaseServices.StructureProfileLabel.Create(profileViewId, partId, styleId), out skipped, warnings);
     }
 
     if (string.Equals(labelType, "plan", StringComparison.OrdinalIgnoreCase))

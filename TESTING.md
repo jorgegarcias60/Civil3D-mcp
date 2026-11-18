@@ -5,6 +5,18 @@ repo root on Windows with Node 18+ and the .NET 10 SDK.
 
 ## Live (Civil 3D 2026)
 
+### Structure profile labels at the origin, #57 (2026-11-18)
+
+A drawing made without a template (`civil3d_drawing new`, then save as), in an agent instance on Civil 3D 2026.
+
+| Check | Result |
+|---|---|
+| `scripts/scratch-live-57.mjs`, installed plugin from before this branch | One structure from each of the first 6 of the parts list's 22 structure families (a null structure included) and a pipe, in 2 profile views. Every label, from `StructureProfileLabel.Create` and from `label_add`, sat in its own view; no anchor was at the origin. Not reproduced on 2026. |
+| `live-label-smoke.mjs --agent-instance`, the same drawing, installed plugin from before this branch | Every check passed, including "each profile label sits in its own view". |
+| The same two runs with this branch's plugin installed (a combined build with PRs #59 and #61) | Every check passed; the new origin check stayed silent (no `warnings`, no false alarm). |
+
+The 2027 failure still needs a run there; the experiment script is in `scripts/`.
+
 ### Render crash on 2027: attempted repro on 2026 (2026-11-18)
 
 An agent instance on a copy of a 36x24 GP drawing (7 layouts) with seven xrefs: a P-Base overlay, a 14.7 MB background,
@@ -1571,6 +1583,40 @@ from one helper (`GetAlignmentLabelStyleCollection`). Plugin builds for 2026 (ne
 Live check (not run yet): on an open drawing, `label_list_styles` for an alignment with no `labelType`,
 `label_set`, `curves` and `station` returns the label sets, the label sets, the curve label styles and the
 station-offset label styles; `bogus` is rejected; each `curves` / `station` name is accepted by `label_add`.
+
+## label_add origin check (issue #57, offline only)
+
+Offline:
+- API by reflection over AeccDbMgd 13.8.0.280 (2026) and 13.9.0.628 (2027): the same
+  overloads in both. `StructureProfileLabel.Create(profileViewId, profileViewPartId[,
+  labelStyleId])` takes the view first; `PipeProfileLabel.Create(profileViewPartId,
+  profileViewId[, ratio, labelStyleId])` takes the part first. The plugin passes them in
+  that order, and that code is unchanged since the 2026 run that passed 9/9. So the call is
+  not the cause; the drawing (made without a template) or the release is.
+- `tests/label_commands_source.test.ts`: 2 new guards (the argument order; the origin check,
+  its positive-only signal, and `warnings` in both responses). The origin guard fails on
+  the e28f9df code.
+- `tests/live_label_smoke.test.ts`: 13 tests. The 5 source checks of the smoke fail on the
+  e28f9df script; 8 run `attachScratchAgentInstance` with a fake tool call.
+- The smoke's run_code snippets compile with the plugin's `ScriptCompiler` against the 2026
+  and 2027 references.
+- Plugin builds for 2026 (net8) and 2027 (net10) with 0 warnings. `npx vitest run`: all
+  pass. RunCodeHarness (net8): no failures. `npm run docs:check`: current.
+
+Live (not run yet). Start an agent instance on a disposable drawing made without a
+template, then:
+
+```powershell
+node scripts/live-label-smoke.mjs --agent-instance --expect-drawing <absolute path of that drawing>
+```
+
+With this branch's plugin installed, expect every check to pass, on 2026 and on 2027,
+including "null structure: each profile label sits in a view or is named in warnings" when
+the parts list has a null structure. Run it on a copy of the earlier RUNCODE-SMOKE drawing
+too, which must still pass. With an older plugin the `warnings` checks prove nothing, and a
+failing null structure check shows the bug rather than a regression. Not known yet: whether
+2026 places labels at the origin in a drawing made without a template, and whether the
+cause is the null structure the old smoke may have used.
 
 ## Not automated
 
