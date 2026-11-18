@@ -23,6 +23,7 @@ export interface CivilInstance {
   documents: string[];
   updatedAtUtc: string;
   responsive?: boolean;
+  probe?: ProbeOutcome;
   designMaster?: { pipe: string; pluginVersion: string };
   status?: "starting";
 }
@@ -103,38 +104,55 @@ export function parseInstance(value: unknown, filename: string): CivilInstance |
   return v;
 }
 
+/** ok: the expected instance answered. busy: connected, but no full answer in time, or an error answer that
+ * passed the plugin's identity check (only STALE_INSTANCE fails it). unreachable: no connection, or the connection
+ * closed. mismatch: STALE_INSTANCE, another instance's health answer, or a reply that is not JSON-RPC for this probe. */
+export type ProbeOutcome = "ok" | "busy" | "unreachable" | "mismatch";
+
 /** A short, unauthenticated health probe. It never reads or sends a token. */
-export async function probeInstance(instance: CivilInstance): Promise<boolean> {
-  return await new Promise<boolean>(resolve => {
+export async function probeInstanceOutcome(instance: CivilInstance): Promise<ProbeOutcome> {
+  return await new Promise<ProbeOutcome>(resolve => {
     const socket = new net.Socket();
     const id = randomUUID();
     let data = "";
     let settled = false;
-    const finish = (responsive: boolean) => {
+    let connected = false;
+    const finish = (outcome: ProbeOutcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(responsive);
+      resolve(outcome);
     };
-    const timer = setTimeout(() => finish(false), 1200);
-    socket.on("error", () => finish(false));
-    socket.on("close", () => finish(false));
+    const timer = setTimeout(() => finish(connected ? "busy" : "unreachable"), 1200);
+    socket.on("error", () => finish("unreachable"));
+    socket.on("close", () => finish("unreachable"));
     socket.on("data", chunk => {
       data += chunk.toString();
-      if (data.length > 1024 * 1024) return finish(false);
+      if (data.length > 1024 * 1024) return finish("mismatch");
       try {
         const reply = JSON.parse(data);
+        if (reply.id === id && reply.error) {
+          return finish(reply.error.data?.code === "CIVIL3D.STALE_INSTANCE" ? "mismatch" : "busy");
+        }
         finish(reply.id === id && reply.result?.instanceApi === 1
           && reply.result.pid === instance.pid && reply.result.port === instance.port
-          && reply.result.owner === instance.owner && reply.result.ownerSession === instance.ownerSession);
+          && reply.result.owner === instance.owner && reply.result.ownerSession === instance.ownerSession
+          ? "ok" : "mismatch");
       } catch { /* More TCP data may follow. */ }
     });
-    socket.connect(instance.port, "127.0.0.1", () => socket.write(JSON.stringify({
-      jsonrpc: "2.0", id, method: "getCivil3DHealth", params: {},
-      instanceIdentity: { pid: instance.pid, startedAtUtc: instance.startedAtUtc },
-    })));
+    socket.connect(instance.port, "127.0.0.1", () => {
+      connected = true;
+      socket.write(JSON.stringify({
+        jsonrpc: "2.0", id, method: "getCivil3DHealth", params: {},
+        instanceIdentity: { pid: instance.pid, startedAtUtc: instance.startedAtUtc },
+      }));
+    });
   });
+}
+
+export async function probeInstance(instance: CivilInstance): Promise<boolean> {
+  return await probeInstanceOutcome(instance) === "ok";
 }
 
 export interface RegistrySnapshot { hasDiscoveryFiles: boolean; instances: CivilInstance[] }
@@ -145,7 +163,7 @@ export async function readInstanceRegistry(options: {
   port?: number;
   alive?: (pid: number) => boolean;
   startTimes?: (pids: number[]) => Promise<Record<number, string>>;
-  probe?: (instance: CivilInstance) => Promise<boolean>;
+  probe?: (instance: CivilInstance) => Promise<boolean | ProbeOutcome>;
 } = {}): Promise<RegistrySnapshot> {
   const folder = join(options.root ?? pluginDataRoot(), "instances");
   let files: string[];
@@ -167,12 +185,17 @@ export async function readInstanceRegistry(options: {
     i.owner === "agent" && i.ownerServerPid ? [i.pid, i.ownerServerPid] : [i.pid]))]);
   const matching = candidates.filter(i => Number.isFinite(Date.parse(starts[i.pid]))
     && Date.parse(starts[i.pid]) === Date.parse(i.startedAtUtc));
-  const instances = await Promise.all(matching.map(async instance => ({
-    ...instance, ownerLabel: instance.ownerLabel ?? instance.label ?? null,
-    designMaster: await readDesignMasterInstance(instance.pid, { alive: options.alive, processStartedAtUtc: instance.startedAtUtc }),
-    orphan: isOrphan(instance, options.alive ?? processAlive, starts),
-    responsive: await (options.probe ?? probeInstance)(instance),
-  })));
+  const instances = await Promise.all(matching.map(async instance => {
+    const answer = await (options.probe ?? probeInstanceOutcome)(instance);
+    const probe: ProbeOutcome = answer === true ? "ok" : answer === false ? "unreachable" : answer;
+    return {
+      ...instance, ownerLabel: instance.ownerLabel ?? instance.label ?? null,
+      designMaster: await readDesignMasterInstance(instance.pid, { alive: options.alive, processStartedAtUtc: instance.startedAtUtc }),
+      orphan: isOrphan(instance, options.alive ?? processAlive, starts),
+      responsive: probe === "ok",
+      probe,
+    };
+  }));
   return { hasDiscoveryFiles: files.length > 0, instances: instances.sort((a, b) => a.pid - b.pid) };
 }
 

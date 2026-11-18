@@ -15,6 +15,32 @@
   set, and runs in an agent instance with `--agent-instance`
   (`scripts/live-agent-instance.mjs` attaches with `force: true`). Refs #57.
 
+- After plotting or rendering, the plugin restores only the system variables whose value
+  changed, and writes each one to plugin.log before setting it. On Civil 3D 2027, a
+  `render_layouts_to_png` of a large drawing crashed acad.exe while a variable was being
+  restored, with an access violation that no catch sees. Setting CTAB to the layout that
+  is already current may still activate it (not verified), so a render of the current
+  layout now skips that set entirely. If it crashes again, the last plugin.log line names the
+  variable. Not reproduced on 2026 (up to a 15360 x 8640 render of a 36x24 sheet with
+  seven xrefs). Refs the CAD-Tools finding on the crash.
+
+- A busy attached Civil 3D no longer counts as gone. Before each request on an attached
+  instance the server sends an unauthenticated `getCivil3DHealth` probe with a 1.2 s
+  timeout. A publish keeps that probe from answering for seconds, so a request failed with
+  "Attached Civil 3D instance <pid> is no longer responsive" although the publish finished
+  normally. Seen live on Civil 3D 2027: `civil3d_job status` failed in 2 of 2 plot smoke
+  runs, and the smoke then refused its later publishes (5 passed, 7 failed). When the
+  registry still matches the attached process (pid, start time, port, owner) and the probe
+  connected but got no answer, the request is now sent anyway and its own timeout decides;
+  the server logs a warning. A probe that cannot connect, or that another instance
+  answers, is refused with that reason. Every request
+  carries the process identity, which the plugin checks, so a restarted instance is still
+  refused. When the process is gone or restarted, or its owner changed, the error says so:
+  "is no longer available: it was closed or restarted, or its owner changed." A hung
+  instance now fails at the request's own timeout instead of after 1.2 s. Fixed routing
+  (`CIVIL3D_PORT`) and `civil3d_instance attach` keep the probe. Also seen on Civil 3D 2026:
+  6 of 11 status polls failed during a publish before the fix, none after. Fixes #58.
+
 - Issue #53 diagnostics. `civil3d_health` reports `hostRoute`: how the plugin starts its
   `C3DMCPHOP` command (`hopStart`, `com` by default) and what is known about typed input
   in this session (`typedInput`: `unknown`, `alive` or `dead`). `probeTypedInput: true`
