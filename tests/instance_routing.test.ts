@@ -391,7 +391,7 @@ describe("instance routing over the real TCP transport", () => {
         acadVersion: "26.0s", owner: "user" as const, ownerSession: null, claimId: null, documents: [], responsive: true };
       setAttachedInstance(instance);
       // Same process, same start time, but the 1.2 s probe timed out during a publish.
-      registry.read.mockResolvedValue({ hasDiscoveryFiles: true, instances: [{ ...instance, responsive: false }] });
+      registry.read.mockResolvedValue({ hasDiscoveryFiles: true, instances: [{ ...instance, responsive: false, probe: "busy" as const }] });
       const warn = vi.spyOn(console, "error").mockImplementation(() => {});
       const { captureDomainToolHandlers } = await import("../src/tools/domainRuntime.js");
       const { JOB_DOMAIN_DEFINITION } = await import("../src/tools/domains/jobDomain.js");
@@ -405,6 +405,52 @@ describe("instance routing over the real TCP transport", () => {
       expect(attachedInstance()?.pid).toBe(instance.pid);
       expect(warn.mock.calls.flat().join("\n")).toContain("missed the health probe");
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
+  it.each([["unreachable", "its plugin does not answer on port 8757"], ["mismatch", "port 8757 answered as a different instance"]] as const)(
+    "refuses an attached instance whose probe was %s, not busy", async (probe, text) => {
+      vi.stubEnv("CIVIL3D_PORT", undefined);
+      const { setAttachedInstance } = await import("../src/utils/instanceSession.js");
+      const instance = { instanceApi: 1 as const, pid: 169716, port: 8757, tokenPath: "unused",
+        startedAtUtc: "2026-10-21T02:16:37Z", updatedAtUtc: "2026-10-21T02:16:37Z", acadVersion: "26.0s",
+        owner: "user" as const, ownerSession: null, claimId: null, documents: [], responsive: true };
+      setAttachedInstance(instance);
+      registry.read.mockResolvedValue({ hasDiscoveryFiles: true, instances: [{ ...instance, responsive: false, probe }] });
+      const { withApplicationConnection } = await import("../src/utils/ConnectionManager.js");
+      const operation = vi.fn();
+      await expect(withApplicationConnection(operation)).rejects.toThrow(text);
+      expect(operation).not.toHaveBeenCalled();
+    });
+
+  it("probe outcome: busy only when connected without an answer, or with a non-stale error answer", async () => {
+    const { probeInstanceOutcome } = await vi.importActual<typeof import("../src/utils/instanceRegistry.js")>("../src/utils/instanceRegistry.js");
+    const base = { instanceApi: 1 as const, pid: 169716, tokenPath: "unused", startedAtUtc: "2026-10-21T02:16:37Z",
+      updatedAtUtc: "2026-10-21T02:16:37Z", acadVersion: "26.0s", owner: "user" as const, ownerSession: null,
+      claimId: null, documents: [] as string[] };
+    const listen = async (server: net.Server) => { await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
+      return (server.address() as net.AddressInfo).port; };
+    const closed = net.createServer(); const closedPort = await listen(closed);
+    await new Promise<void>(r => closed.close(() => r()));
+    expect(await probeInstanceOutcome({ ...base, port: closedPort })).toBe("unreachable");
+    const sockets: net.Socket[] = [];
+    const silent = net.createServer(socket => { sockets.push(socket); socket.resume(); });
+    expect(await probeInstanceOutcome({ ...base, port: await listen(silent) })).toBe("busy");
+    sockets.forEach(socket => socket.destroy()); await new Promise<void>(r => silent.close(() => r()));
+    const answers = [
+      [{ result: { instanceApi: 1, pid: 999, owner: "user", ownerSession: null } }, "mismatch"],
+      [{ result: { instanceApi: 1, pid: base.pid, owner: "user", ownerSession: null } }, "ok"],
+      [{ error: { code: -32011, message: "changed", data: { code: "CIVIL3D.STALE_INSTANCE" } } }, "mismatch"],
+      [{ error: { code: -32603, message: "failed", data: { code: "CIVIL3D.INTERNAL_ERROR" } } }, "busy"],
+    ] as const;
+    for (const [answer, outcome] of answers) {
+      const server = net.createServer(socket => socket.once("data", data => {
+        const request = JSON.parse(data.toString());
+        const body = "result" in answer ? { result: { ...answer.result, port: socket.localPort } } : answer;
+        socket.end(JSON.stringify({ jsonrpc: "2.0", id: request.id, ...body }));
+      }));
+      expect(await probeInstanceOutcome({ ...base, port: await listen(server) })).toBe(outcome);
+      await new Promise<void>(r => server.close(() => r()));
+    }
   });
 
   it("still refuses an attached instance that was restarted under the same pid", async () => {

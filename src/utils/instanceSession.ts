@@ -117,7 +117,13 @@ async function resolveUnpinnedEndpoint(attachment: CivilInstance | undefined): P
     // carries that identity, which the plugin checks. A missed 1.2 s health probe
     // then means busy (a publish keeps Civil 3D busy for seconds), not gone: send
     // the request and let its own timeout decide (issue #58).
-    if (!live.responsive) log.warn("Attached instance missed the health probe; sending the request anyway (busy)", { pid: live.pid, port: live.port });
+    if (!live.responsive) {
+      if (live.probe !== "busy") {
+        throw new Error(`Attached Civil 3D instance ${attachment.pid} is running, but ${live.probe === "mismatch"
+          ? `port ${live.port} answered as a different instance` : `its plugin does not answer on port ${live.port}`}. Call civil3d_instance list and attach again.`);
+      }
+      log.warn("Attached instance missed the health probe; sending the request anyway (busy)", { pid: live.pid, port: live.port });
+    }
     if (attached === attachment) attached = live;
     return live;
   }

@@ -8,13 +8,16 @@
   "Attached Civil 3D instance <pid> is no longer responsive" although the publish finished
   normally. Seen live on Civil 3D 2027: `civil3d_job status` failed in 2 of 2 plot smoke
   runs, and the smoke then refused its later publishes (5 passed, 7 failed). When the
-  registry still matches the attached process (pid, start time, port, owner), the request
-  is now sent anyway and its own timeout decides; the server logs a warning. Every request
+  registry still matches the attached process (pid, start time, port, owner) and the probe
+  connected but got no answer, the request is now sent anyway and its own timeout decides;
+  the server logs a warning. A probe that cannot connect, or that another instance
+  answers, is refused with that reason. Every request
   carries the process identity, which the plugin checks, so a restarted instance is still
   refused. When the process is gone or restarted, or its owner changed, the error says so:
   "is no longer available: it was closed or restarted, or its owner changed." A hung
   instance now fails at the request's own timeout instead of after 1.2 s. Fixed routing
-  (`CIVIL3D_PORT`) and `civil3d_instance attach` keep the probe. Fixes #58.
+  (`CIVIL3D_PORT`) and `civil3d_instance attach` keep the probe. Also seen on Civil 3D 2026:
+  6 of 11 status polls failed during a publish before the fix, none after. Fixes #58.
 
 - Issue #53 diagnostics. `civil3d_health` reports `hostRoute`: how the plugin starts its
   `C3DMCPHOP` command (`hopStart`, `com` by default) and what is known about typed input
