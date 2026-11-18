@@ -33,7 +33,9 @@ describe("live label smoke (issue #57)", () => {
   });
 
   it("never accepts a null structure's profile label silently away from its views", () => {
-    expect(smoke).toContain('parts.Add((nul, "-NULL", true));');
+    expect(smoke).toContain('part.Name = p + "-NULL";');
+    // A null structure that cannot be added drops only its own check.
+    expect(smoke).toContain('catch (Exception ex) { nullStructureError = ex.GetType().Name + ": " + ex.Message; nul = ObjectId.Null; }');
     expect(smoke).toContain("null structure: each profile label sits in a view or is named in warnings");
     expect(smoke).toMatch(/l\.view === null && !\(nullStructure\.warnings \?\? \[\]\)\.some\(\(w\) => w\.includes\(l\.handle\)\)/);
     // The null structure's labels are kept out of the per-view structure list.

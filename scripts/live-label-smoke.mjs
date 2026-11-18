@@ -138,20 +138,28 @@ net.AddStructure(structFamily, Open<PartFamily>(structFamily)[0], new Point3d(x0
 net.AddStructure(structFamily, Open<PartFamily>(structFamily)[0], new Point3d(x0 + 90, 0, 0), 0, ref s2, false);
 net.AddLinePipe(pipeFamily, Open<PartFamily>(pipeFamily)[0], new LineSegment3d(new Point3d(x0 + 10, 0, -5), new Point3d(x0 + 90, 0, -6)), ref pipe, false);
 net.AddLinePipe(pipeFamily, Open<PartFamily>(pipeFamily)[0], new LineSegment3d(new Point3d(x0 + 20, 30, -5), new Point3d(x0 + 80, 30, -6)), ref lone, false);
-var parts = new List<(ObjectId, string, bool)> { (s1, "-MH1", true), (s2, "-MH2", true), (pipe, "-PIPE", true), (lone, "-PIPE-NOVIEW", false) };
-foreach (ObjectId id in structFamilies)
-{
-  var family = Open<PartFamily>(id);
-  if (family.PartType != PartType.StructNull || family.PartSizeCount == 0) continue;
-  net.AddStructure(id, family[0], new Point3d(x0 + 50, 0, 0), 0, ref nul, false);
-  parts.Add((nul, "-NULL", true));
-  break;
-}
-foreach (var (id, name, shown) in parts)
+foreach (var (id, name, shown) in new[] { (s1, "-MH1", true), (s2, "-MH2", true), (pipe, "-PIPE", true), (lone, "-PIPE-NOVIEW", false) })
 {
   var part = Open<Part>(id, forWrite: true);
   part.Name = p + name;
   if (shown) foreach (var pvId in views) part.AddToProfileView(pvId);
+}
+// A null structure in both views, when the parts list has one. A failure here
+// only drops that check: the rest of the smoke still runs.
+string nullStructureError = null;
+foreach (ObjectId id in structFamilies)
+{
+  var family = Open<PartFamily>(id);
+  if (family.PartType != PartType.StructNull || family.PartSizeCount == 0) continue;
+  try
+  {
+    net.AddStructure(id, family[0], new Point3d(x0 + 50, 0, 0), 0, ref nul, false);
+    var part = Open<Part>(nul, forWrite: true);
+    part.Name = p + "-NULL";
+    foreach (var pvId in views) part.AddToProfileView(pvId);
+  }
+  catch (Exception ex) { nullStructureError = ex.GetType().Name + ": " + ex.Message; nul = ObjectId.Null; }
+  break;
 }
 // Each alignment label set with its item count: importing it should leave
 // exactly that many label groups on the alignment.
@@ -164,7 +172,7 @@ foreach (ObjectId id in Civil.Styles.LabelSetStyles.AlignmentLabelSetStyles)
   labelSets.Add(new { name = set.Name, items });
 }
 var structureFamily = Open<PartFamily>(structFamily);
-return new { entities = alignment.Entities.Count, labelSets, structureFamily = structureFamily.Name, structurePartType = structureFamily.PartType.ToString(), nullStructure = !nul.IsNull };
+return new { entities = alignment.Entities.Count, labelSets, structureFamily = structureFamily.Name, structurePartType = structureFamily.PartType.ToString(), nullStructure = !nul.IsNull, nullStructureError };
 `;
 
 // The views each profile label sits in, by its position (Civil 3D shares one

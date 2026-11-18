@@ -1545,11 +1545,13 @@ template, then:
 node scripts/live-label-smoke.mjs --agent-instance --expect-drawing <absolute path of that drawing>
 ```
 
-Expect every check to pass, on 2026 and on 2027, including "null structure: each profile
-label sits in a view or is named in warnings" when the parts list has a null structure.
-Run it on a copy of the earlier RUNCODE-SMOKE drawing too, which must still pass. Not known
-yet: whether 2026 places labels at the origin in a drawing made without a template, and
-whether the cause is the null structure the old smoke may have used.
+With this branch's plugin installed, expect every check to pass, on 2026 and on 2027,
+including "null structure: each profile label sits in a view or is named in warnings" when
+the parts list has a null structure. Run it on a copy of the earlier RUNCODE-SMOKE drawing
+too, which must still pass. With an older plugin the `warnings` checks prove nothing, and a
+failing null structure check shows the bug rather than a regression. Not known yet: whether
+2026 places labels at the origin in a drawing made without a template, and whether the
+cause is the null structure the old smoke may have used.
 
 ## Not automated
 
